@@ -83,6 +83,11 @@ pub struct RadioDoc {
     pub dirty: bool,
 }
 
+/// Largest config the firmware accepts, enforced on the board in the ESP's
+/// OP_BEGIN check, the WIO's transfer buffer and the buffer RADIO.CFG is read
+/// into at boot. A push over that size is refused before any byte moves.
+pub const CONFIG_MAX: usize = 1024;
+
 /// A complete RADIO.TOML at the firmware defaults, comments and help strings
 /// included: the reference file the firmware itself ships, baked in at build
 /// time so the app can lay down a config with no file to start from and no
@@ -270,6 +275,28 @@ impl RadioDoc {
         self.dirty = true;
     }
 
+    /// The document as it goes to the board: comments, blank lines and the
+    /// `<key>_description` / `<key>_type` metadata keys dropped, each kept
+    /// line trimmed. The firmware ignores every stripped byte, and the
+    /// documented file is several times [`CONFIG_MAX`], so stripping is what
+    /// makes a push fit at all - not a size optimization.
+    pub fn wire_bytes(&self) -> Vec<u8> {
+        let mut out = String::new();
+        for line in self.doc.to_string().lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let key = trimmed.split('=').next().unwrap_or("").trim();
+            if is_meta_key(key) {
+                continue;
+            }
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+        out.into_bytes()
+    }
+
     /// The directory backups are written to and read from: `radio-backups` next
     /// to the file.
     fn backup_dir(&self) -> PathBuf {
@@ -417,6 +444,29 @@ power_mode_type = \"enum:full,psmoo,psmct\"
         let rx_boost = d.fields.iter().find(|f| f.key == "rx_boost").unwrap();
         assert_eq!(rx_boost.ty, FieldType::Bool);
         assert!(rx_boost.description.is_some());
+    }
+
+    #[test]
+    fn wire_bytes_strips_docs_and_keeps_settings() {
+        let d = doc();
+        let wire = String::from_utf8(d.wire_bytes()).unwrap();
+        // Sections and settings survive; comments and metadata do not.
+        assert!(wire.contains("[radio]"));
+        assert!(wire.contains("frequency_hz = 915000000"));
+        assert!(wire.contains("power_mode = \"full\""));
+        assert!(!wire.contains('#'));
+        assert!(!wire.contains("_description"));
+        assert!(!wire.contains("_type"));
+        assert!(!wire.contains("\n\n"));
+    }
+
+    /// The whole point of stripping: the reference config, several KB with its
+    /// documentation, must come out under the firmware's config ceiling.
+    #[test]
+    fn default_config_fits_on_the_wire() {
+        let d = RadioDoc::default_at("RADIO.toml").unwrap();
+        let n = d.wire_bytes().len();
+        assert!(n > 0 && n <= CONFIG_MAX, "{n} bytes");
     }
 
     #[test]

@@ -23,7 +23,8 @@ use midair_proto::ble;
 use midair_proto::link::Telemetry;
 
 use super::{
-    remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigWrite, DiscoveredDevice,
+    remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush, ConfigWrite,
+    DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
 };
 
 /// The compiled dex with rs.gps.gui.BleBridge (see android/build-dex.sh).
@@ -213,13 +214,17 @@ fn worker(
         chase: false,
     };
     let mut writes: Vec<ConfigWrite> = Vec::new();
+    let mut push: Option<ConfigPush> = None;
     let mut permissions_done = false;
 
     loop {
-        if drain_commands(&cmd_rx, &mut wanted, &mut writes).is_err() {
+        if drain_commands(&cmd_rx, &mut wanted, &mut writes, &mut push).is_err() {
             return Ok(()); // UI has gone away
         }
         if !wanted.connect && !wanted.scan {
+            // A push cannot go anywhere without a link; fail it rather than
+            // hold the Radio page in "sending" until some later connect.
+            fail_push(&mut push, report);
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -240,6 +245,7 @@ fn worker(
                 &cmd_rx,
                 &mut wanted,
                 &mut writes,
+                &mut push,
             ) {
                 report.status(format!("{e}; retrying"));
                 std::thread::sleep(Duration::from_secs(2));
@@ -254,6 +260,7 @@ fn worker(
             &cmd_rx,
             &mut wanted,
             &mut writes,
+            &mut push,
         ) {
             Ok(()) => {} // clean stop requested by the UI
             Err(e) => {
@@ -263,6 +270,10 @@ fn worker(
                 std::thread::sleep(Duration::from_secs(2));
             }
         }
+        // A push does not survive its session: half a transfer is dropped by
+        // the board, and silently restarting one on reconnect would resend a
+        // config the user asked for once.
+        fail_push(&mut push, report);
     }
 }
 
@@ -282,6 +293,7 @@ fn drain_commands(
     cmd_rx: &Receiver<BleCommand>,
     wanted: &mut Wanted,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), ()> {
     loop {
         match cmd_rx.try_recv() {
@@ -300,9 +312,21 @@ fn drain_commands(
                 wanted.scan = false;
             }
             Ok(BleCommand::Config(w)) => writes.push(w),
+            Ok(BleCommand::PushConfig(data)) => *push = Some(ConfigPush::new(data)),
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => return Err(()),
         }
+    }
+}
+
+/// Fail any queued or in-flight config push. Called whenever the session it
+/// rode on ends (or cannot start), so the Radio page is never left waiting on
+/// a transfer that no longer exists.
+fn fail_push(push: &mut Option<ConfigPush>, report: &Reporter) {
+    if push.take().is_some() {
+        report.send(BleEvent::ConfigPushed(Err(
+            "disconnected before the transfer finished".to_string(),
+        )));
     }
 }
 
@@ -317,6 +341,7 @@ fn discover(
     cmd_rx: &Receiver<BleCommand>,
     wanted: &mut Wanted,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), String> {
     // Drop stale callbacks from a previous session so old sightings cannot be
     // reported as if they were fresh.
@@ -328,7 +353,7 @@ fn discover(
     }
 
     let result = loop {
-        if drain_commands(cmd_rx, wanted, writes).is_err() || !wanted.scan {
+        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.scan {
             break Ok(());
         }
         match cb_rx.recv_timeout(Duration::from_millis(300)) {
@@ -365,6 +390,7 @@ fn session(
     cmd_rx: &Receiver<BleCommand>,
     wanted: &mut Wanted,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), String> {
     let session_mac = wanted.mac.clone();
 
@@ -391,7 +417,7 @@ fn session(
                 return Err("scan failed (Bluetooth off?)".into());
             }
             let found = loop {
-                if drain_commands(cmd_rx, wanted, writes).is_err() || !wanted.connect {
+                if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
                     bridge.stop_scan();
                     return Ok(());
                 }
@@ -466,11 +492,42 @@ fn session(
     bridge.read_characteristic(packet::SERVICE_UUID, ble::SETTINGS_UUID);
 
     // Pump: notifications out, commands in, until disconnect.
+    //
+    // When the outstanding bulk op's ack must have arrived by; meaningless
+    // while no push is running.
+    let mut push_deadline = Instant::now();
     loop {
         for w in writes.drain(..) {
             let (buf, n) = w.encode();
             if !bridge.write_characteristic(packet::SERVICE_UUID, packet::CONFIG_UUID, &buf[..n]) {
                 report.status("config write failed");
+            }
+        }
+
+        // Start a queued config push, and give up on one whose ack never came.
+        // Android runs one GATT op at a time, but each bulk op is only sent
+        // after the previous one's ack notification - and the board sends its
+        // write response before that ack, so the queue is always free here.
+        if let Some(p) = push.as_mut() {
+            if let Some(frame) = p.start() {
+                push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
+                if !bridge.write_characteristic(packet::SERVICE_UUID, ble::BULK_UUID, &frame) {
+                    *push = None;
+                    report.send(BleEvent::ConfigPushed(Err(
+                        "bulk write failed (a board without the bulk characteristic?)".to_string(),
+                    )));
+                }
+            } else if Instant::now() >= push_deadline {
+                *push = None;
+                // Best effort: free the board's transfer state for a retry.
+                let _ = bridge.write_characteristic(
+                    packet::SERVICE_UUID,
+                    ble::BULK_UUID,
+                    &[ble::OP_ABORT],
+                );
+                report.send(BleEvent::ConfigPushed(Err(
+                    "no ack from the board".to_string(),
+                )));
             }
         }
 
@@ -482,7 +539,40 @@ fn session(
                     }
                 } else if uuid.eq_ignore_ascii_case(packet::ACK_UUID) {
                     if let Some(a) = packet::parse_ack(&value) {
-                        report.send(BleEvent::Ack(a));
+                        if a.id == ble::ACK_ID_BULK {
+                            // A bulk ack paces the running push; it is not a
+                            // setting ack, so it never reaches the Beacon page.
+                            if let Some(p) = push.as_mut() {
+                                push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
+                                match p.on_ack(&a) {
+                                    PushStep::Write(frame) => {
+                                        if !bridge.write_characteristic(
+                                            packet::SERVICE_UUID,
+                                            ble::BULK_UUID,
+                                            &frame,
+                                        ) {
+                                            *push = None;
+                                            report.send(BleEvent::ConfigPushed(Err(
+                                                "bulk write failed".to_string(),
+                                            )));
+                                        }
+                                    }
+                                    PushStep::Done => {
+                                        *push = None;
+                                        report.send(BleEvent::ConfigPushed(Ok(
+                                            "Config sent. The board applied and stored it."
+                                                .to_string(),
+                                        )));
+                                    }
+                                    PushStep::Fail(e) => {
+                                        *push = None;
+                                        report.send(BleEvent::ConfigPushed(Err(e)));
+                                    }
+                                }
+                            }
+                        } else {
+                            report.send(BleEvent::Ack(a));
+                        }
                     }
                 } else if uuid.eq_ignore_ascii_case(ble::TELEMETRY_UUID) {
                     if let Some(t) = Telemetry::decode(&value) {
@@ -507,7 +597,7 @@ fn session(
             Err(RecvTimeoutError::Disconnected) => return Err("worker gone".into()),
         }
 
-        if drain_commands(cmd_rx, wanted, writes).is_err() || !wanted.connect {
+        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
             bridge.disconnect();
             report.send(BleEvent::Connected(false));
             report.status("disconnected");

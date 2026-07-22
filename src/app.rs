@@ -19,7 +19,7 @@ use crate::config::{normalize_mac, AppConfig};
 use crate::gps::GpsFix;
 use crate::offline::{self, DownloadProgress};
 use crate::points::{PointSource, TrackPoint};
-use crate::radio::{EditVal, RadioDoc};
+use crate::radio::{self, EditVal, RadioDoc};
 use crate::tiles::{MapLayer, OpenTopoMap};
 
 /// The view layer (page rendering + shared egui scaffolding). Kept in a
@@ -483,6 +483,10 @@ pub struct MyApp {
     radio_feedback: Option<Result<String, String>>,
     /// Per-field edit flow on the Radio page.
     radio_edit: RadioEdit,
+    /// The send-to-board confirm popup on the Radio page is open.
+    radio_push_confirm: bool,
+    /// A config push is in flight and its outcome has not arrived yet.
+    radio_push_pending: bool,
     /// Tile cache directory; also the target of offline region downloads.
     cache_dir: Option<PathBuf>,
     /// Box-selection state for the offline region download.
@@ -601,6 +605,8 @@ impl MyApp {
             radio_path: "RADIO.toml".to_string(),
             radio_feedback: None,
             radio_edit: RadioEdit::None,
+            radio_push_confirm: false,
+            radio_push_pending: false,
             cache_dir,
             select: RegionSelect::Inactive,
             download: None,
@@ -982,6 +988,29 @@ impl MyApp {
         });
     }
 
+    /// Send the editor's current config (unsaved edits included) to the
+    /// connected board over BLE. The WIO applies it live and stores it on the
+    /// SD card and in its flash backup; the outcome lands in
+    /// `radio_feedback` when the board's final ack arrives.
+    fn push_radio(&mut self) {
+        let Some(doc) = self.radio.as_ref() else {
+            return;
+        };
+        let data = doc.wire_bytes();
+        if data.len() > radio::CONFIG_MAX {
+            self.radio_feedback = Some(Err(format!(
+                "Config is {} bytes stripped, over the board's {}-byte limit. \
+                 Remove keys that are at their default - an absent key keeps it.",
+                data.len(),
+                radio::CONFIG_MAX
+            )));
+            return;
+        }
+        let _ = self.ble.commands.send(BleCommand::PushConfig(data));
+        self.radio_push_pending = true;
+        self.radio_feedback = Some(Ok("Sending config to the board...".to_string()));
+    }
+
     /// Safe-area inset at the top (status bar) in egui points.
     fn top_inset(&self, ctx: &egui::Context) -> f32 {
         match &self.insets {
@@ -1330,6 +1359,10 @@ impl MyApp {
                 BleEvent::SettingsUnsupported => {
                     self.board_settings = None;
                     self.settings_unsupported = true;
+                }
+                BleEvent::ConfigPushed(res) => {
+                    self.radio_push_pending = false;
+                    self.radio_feedback = Some(res.map_err(|e| format!("Send failed: {e}")));
                 }
             }
         }

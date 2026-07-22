@@ -6,7 +6,7 @@
 //! notifications and commands until something breaks, and start over.
 
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use btleplug::api::{
     Central, CharPropFlags, Manager as _, Peripheral as _, PeripheralProperties, ScanFilter,
@@ -20,7 +20,8 @@ use midair_proto::link::Telemetry;
 use uuid::Uuid;
 
 use super::{
-    remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigWrite, DiscoveredDevice,
+    remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush, ConfigWrite,
+    DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
 };
 
 const SERVICE_UUID: Uuid = Uuid::from_u128(packet::SERVICE_UUID_U128);
@@ -37,6 +38,8 @@ const SETTINGS_UUID: Uuid = Uuid::from_u128(ble::SETTINGS_UUID_U128);
 // position here, tagged with the node's address. Absent on the esp32c3 beacon,
 // so optional like the other board-status characteristics.
 const REMOTE_UUID: Uuid = Uuid::from_u128(ble::REMOTE_UUID_U128);
+// Bulk-transfer characteristic (radio TOML config), esp32c6-gps only.
+const BULK_UUID: Uuid = Uuid::from_u128(ble::BULK_UUID_U128);
 
 pub fn spawn(ctx: egui::Context) -> BleHandle {
     let (event_tx, event_rx) = channel();
@@ -97,11 +100,13 @@ struct Wanted {
 
 /// Drain pending commands. Config writes are queued into `writes` so a
 /// request made while connected is applied in the pump loop (requests made
-/// while disconnected are applied right after the next subscribe).
+/// while disconnected are applied right after the next subscribe). A config
+/// push lands in `push` and is started by the pump loop the same way.
 fn drain_commands(
     cmd_rx: &Receiver<BleCommand>,
     wanted: &mut Wanted,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), ()> {
     loop {
         match cmd_rx.try_recv() {
@@ -120,9 +125,21 @@ fn drain_commands(
                 wanted.scan = false;
             }
             Ok(BleCommand::Config(w)) => writes.push(w),
+            Ok(BleCommand::PushConfig(data)) => *push = Some(ConfigPush::new(data)),
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => return Err(()),
         }
+    }
+}
+
+/// Fail any queued or in-flight config push. Called whenever the session it
+/// rode on ends (or cannot start), so the Radio page is never left waiting on
+/// a transfer that no longer exists.
+fn fail_push(push: &mut Option<ConfigPush>, report: &Reporter) {
+    if push.take().is_some() {
+        report.send(BleEvent::ConfigPushed(Err(
+            "disconnected before the transfer finished".to_string(),
+        )));
     }
 }
 
@@ -144,12 +161,16 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
         chase: false,
     };
     let mut writes: Vec<ConfigWrite> = Vec::new();
+    let mut push: Option<ConfigPush> = None;
 
     loop {
-        if drain_commands(&cmd_rx, &mut wanted, &mut writes).is_err() {
+        if drain_commands(&cmd_rx, &mut wanted, &mut writes, &mut push).is_err() {
             return; // UI has gone away.
         }
         if !wanted.connect && !wanted.scan {
+            // A push cannot go anywhere without a link; fail it rather than
+            // hold the Radio page in "sending" until some later connect.
+            fail_push(&mut push, &report);
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         }
@@ -164,7 +185,16 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
         };
 
         if wanted.scan {
-            if let Err(e) = discover(&adapter, &report, &cmd_rx, &mut wanted, &mut writes).await {
+            if let Err(e) = discover(
+                &adapter,
+                &report,
+                &cmd_rx,
+                &mut wanted,
+                &mut writes,
+                &mut push,
+            )
+            .await
+            {
                 report.status(format!("{e}; retrying"));
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -172,7 +202,16 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
         }
 
         // One connect attempt; on any failure fall through, wait, retry.
-        match session(&adapter, &report, &cmd_rx, &mut wanted, &mut writes).await {
+        match session(
+            &adapter,
+            &report,
+            &cmd_rx,
+            &mut wanted,
+            &mut writes,
+            &mut push,
+        )
+        .await
+        {
             Ok(()) => {} // clean disconnect requested by the UI
             Err(e) => {
                 report.send(BleEvent::Connected(false));
@@ -180,6 +219,10 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
+        // A push does not survive its session: half a transfer is dropped by
+        // the board, and silently restarting one on reconnect would resend a
+        // config the user asked for once.
+        fail_push(&mut push, &report);
     }
 }
 
@@ -197,6 +240,7 @@ async fn discover(
     cmd_rx: &Receiver<BleCommand>,
     wanted: &mut Wanted,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), String> {
     report.status("scanning for boards...");
     adapter
@@ -207,7 +251,7 @@ async fn discover(
         .map_err(|e| format!("scan failed: {e}"))?;
 
     let result = loop {
-        if drain_commands(cmd_rx, wanted, writes).is_err() || !wanted.scan {
+        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.scan {
             break Ok(());
         }
         let peripherals = match adapter.peripherals().await {
@@ -245,6 +289,7 @@ async fn session(
     cmd_rx: &Receiver<BleCommand>,
     wanted: &mut Wanted,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), String> {
     let session_mac = wanted.mac.clone();
 
@@ -264,7 +309,7 @@ async fn session(
     // Poll discovered peripherals until one matches (by MAC when pinned,
     // otherwise by advertised service or name).
     let peripheral = loop {
-        if drain_commands(cmd_rx, wanted, writes).is_err() || !wanted.connect {
+        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
             let _ = adapter.stop_scan().await;
             return Ok(());
         }
@@ -287,7 +332,16 @@ async fn session(
     // Run the connected session, then unconditionally disconnect. bluez does
     // not tear the link down for us on error, and a lingering half-open device
     // is exactly what blocks the next reconnect.
-    let result = connected(&peripheral, report, cmd_rx, wanted, &session_mac, writes).await;
+    let result = connected(
+        &peripheral,
+        report,
+        cmd_rx,
+        wanted,
+        &session_mac,
+        writes,
+        push,
+    )
+    .await;
     let _ = peripheral.disconnect().await;
     report.send(BleEvent::Connected(false));
     result
@@ -303,6 +357,7 @@ async fn connected(
     wanted: &mut Wanted,
     session_mac: &Option<String>,
     writes: &mut Vec<ConfigWrite>,
+    push: &mut Option<ConfigPush>,
 ) -> Result<(), String> {
     let addr = peripheral.address();
     report.status(format!("connecting to {addr}..."));
@@ -345,6 +400,7 @@ async fn connected(
         .iter()
         .find(|c| c.uuid == REMOTE_UUID && c.properties.contains(CharPropFlags::NOTIFY))
         .cloned();
+    let bulk = chars.iter().find(|c| c.uuid == BULK_UUID).cloned();
 
     peripheral
         .subscribe(&position)
@@ -391,6 +447,9 @@ async fn connected(
     }
 
     let mut since_check = 0u32;
+    // When the outstanding bulk op's ack must have arrived by; meaningless
+    // while no push is running.
+    let mut push_deadline = Instant::now();
     loop {
         // Apply queued config writes.
         for w in writes.drain(..) {
@@ -403,6 +462,43 @@ async fn connected(
             }
         }
 
+        // Start a queued config push, and give up on one whose ack never came.
+        if let Some(p) = push.as_mut() {
+            if let Some(frame) = p.start() {
+                match &bulk {
+                    Some(c) => {
+                        push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
+                        if let Err(e) = peripheral
+                            .write(c, &frame, WriteType::WithResponse)
+                            .await
+                        {
+                            *push = None;
+                            report.send(BleEvent::ConfigPushed(Err(format!(
+                                "bulk write failed: {e}"
+                            ))));
+                        }
+                    }
+                    None => {
+                        *push = None;
+                        report.send(BleEvent::ConfigPushed(Err(
+                            "this board has no bulk-transfer characteristic".to_string(),
+                        )));
+                    }
+                }
+            } else if Instant::now() >= push_deadline {
+                *push = None;
+                // Best effort: free the board's transfer state for a retry.
+                if let Some(c) = &bulk {
+                    let _ = peripheral
+                        .write(c, &[ble::OP_ABORT], WriteType::WithResponse)
+                        .await;
+                }
+                report.send(BleEvent::ConfigPushed(Err(
+                    "no ack from the board".to_string(),
+                )));
+            }
+        }
+
         // Wait briefly for a notification, then service commands again.
         match tokio::time::timeout(Duration::from_millis(250), notifications.next()).await {
             Ok(Some(n)) => {
@@ -412,7 +508,43 @@ async fn connected(
                     }
                 } else if n.uuid == ACK_UUID {
                     if let Some(a) = packet::parse_ack(&n.value) {
-                        report.send(BleEvent::Ack(a));
+                        if a.id == ble::ACK_ID_BULK {
+                            // A bulk ack paces the running push; it is not a
+                            // setting ack, so it never reaches the Beacon page.
+                            if let Some(p) = push.as_mut() {
+                                push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
+                                match p.on_ack(&a) {
+                                    PushStep::Write(frame) => {
+                                        // `bulk` exists: the push could not
+                                        // have started without it.
+                                        if let Some(c) = &bulk {
+                                            if let Err(e) = peripheral
+                                                .write(c, &frame, WriteType::WithResponse)
+                                                .await
+                                            {
+                                                *push = None;
+                                                report.send(BleEvent::ConfigPushed(Err(
+                                                    format!("bulk write failed: {e}"),
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    PushStep::Done => {
+                                        *push = None;
+                                        report.send(BleEvent::ConfigPushed(Ok(
+                                            "Config sent. The board applied and stored it."
+                                                .to_string(),
+                                        )));
+                                    }
+                                    PushStep::Fail(e) => {
+                                        *push = None;
+                                        report.send(BleEvent::ConfigPushed(Err(e)));
+                                    }
+                                }
+                            }
+                        } else {
+                            report.send(BleEvent::Ack(a));
+                        }
                     }
                 } else if n.uuid == TELEMETRY_UUID {
                     if let Some(t) = Telemetry::decode(&n.value) {
@@ -442,7 +574,7 @@ async fn connected(
             }
         }
 
-        if drain_commands(cmd_rx, wanted, writes).is_err() || !wanted.connect {
+        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
             report.status("disconnected");
             return Ok(());
         }

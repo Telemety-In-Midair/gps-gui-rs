@@ -9,8 +9,10 @@
 //! The wire protocol lives in the shared gps-proto crate.
 
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 
 use gps_proto::packet::{self, Ack};
+use midair_proto::{ble, link};
 pub use gps_proto::packet::PositionPacket;
 pub use midair_proto::ble::Settings;
 pub use midair_proto::link::Telemetry;
@@ -70,6 +72,9 @@ pub enum BleEvent {
     /// The settings blob did not decode: the board's layout version is newer
     /// than this build knows. Its settings are unreadable, not defaulted.
     SettingsUnsupported,
+    /// A [`BleCommand::PushConfig`] finished: the board applied and stored the
+    /// config, or why it did not.
+    ConfigPushed(Result<String, String>),
 }
 
 /// UI -> worker.
@@ -96,6 +101,12 @@ pub enum BleCommand {
     /// Write one setting to the config characteristic. The device answers on
     /// the ack characteristic with the value it actually applied.
     Config(ConfigWrite),
+    /// Push a whole radio TOML config (already stripped of comments and
+    /// metadata, at most [`crate::radio::CONFIG_MAX`] bytes) through the bulk
+    /// characteristic. The board forwards it to the WIO-E5, which applies it
+    /// live and stores it. The outcome comes back as
+    /// [`BleEvent::ConfigPushed`].
+    PushConfig(Vec<u8>),
     /// Drop the connection and stay idle until the next `Connect`.
     Disconnect,
 }
@@ -135,6 +146,103 @@ impl ConfigWrite {
                 (b, 6)
             }
         }
+    }
+}
+
+/// How long a push waits for a bulk ack before giving up. Each op is one UART
+/// round-trip inside the board (at most a 2 s WIO timeout), so a link this
+/// quiet is dead, not slow.
+const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One radio-config push through the board's bulk characteristic, advanced one
+/// ack at a time: OP_BEGIN opens the transfer, each OP_DATA carries one chunk,
+/// and OP_END has the WIO verify and apply the file. The board forwards every
+/// op to the WIO over their UART link before acking it (id
+/// [`ble::ACK_ID_BULK`] on the ack characteristic), so the next op is only
+/// sent once the previous ack
+/// is in - pacing by ack is what keeps this from overrunning that link.
+struct ConfigPush {
+    data: Vec<u8>,
+    /// Byte offset of the next OP_DATA chunk.
+    off: usize,
+    /// Sequence number of the next OP_DATA chunk.
+    seq: u16,
+    started: bool,
+    /// OP_END is on the wire; the next bulk ack is the verdict.
+    ending: bool,
+}
+
+/// What a push wants done next.
+enum PushStep {
+    /// Write this to the bulk characteristic and wait for the next bulk ack.
+    Write(Vec<u8>),
+    /// The board verified, applied and stored the config.
+    Done,
+    /// The transfer failed; the message is for the Radio page.
+    Fail(String),
+}
+
+impl ConfigPush {
+    fn new(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            off: 0,
+            seq: 0,
+            started: false,
+            ending: false,
+        }
+    }
+
+    /// The OP_BEGIN frame that opens the transfer, once; `None` after it is
+    /// underway.
+    fn start(&mut self) -> Option<Vec<u8>> {
+        if self.started {
+            return None;
+        }
+        self.started = true;
+        let mut f = vec![ble::OP_BEGIN, ble::KIND_TOML];
+        f.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        f.extend_from_slice(&link::crc32(&self.data).to_le_bytes());
+        // The version field is only meaningful for firmware images; 0 for TOML.
+        f.extend_from_slice(&0u16.to_le_bytes());
+        Some(f)
+    }
+
+    /// Feed the bulk ack for the last op sent; says what to do next.
+    fn on_ack(&mut self, ack: &Ack) -> PushStep {
+        if ack.status != packet::ACK_OK {
+            return PushStep::Fail(push_error(ack.status, self.ending));
+        }
+        if self.ending {
+            return PushStep::Done;
+        }
+        if self.off >= self.data.len() {
+            self.ending = true;
+            return PushStep::Write(vec![ble::OP_END]);
+        }
+        let end = usize::min(self.off + ble::BULK_DATA_MAX, self.data.len());
+        let mut f = vec![ble::OP_DATA];
+        f.extend_from_slice(&self.seq.to_le_bytes());
+        f.extend_from_slice(&self.data[self.off..end]);
+        self.off = end;
+        self.seq = self.seq.wrapping_add(1);
+        PushStep::Write(f)
+    }
+}
+
+/// Why a bulk op was refused, in words the Radio page can show. `at_end` marks
+/// the OP_END ack: the WIO only parses the file there, so a WIO rejection at
+/// that point is usually the file's content rather than the link.
+fn push_error(status: u8, at_end: bool) -> String {
+    match status {
+        ble::ACK_WIO_ERROR if at_end => "the WIO-E5 rejected the config: check for a value \
+                                         out of range or a string that is not one of the choices"
+            .to_string(),
+        packet::ACK_BAD_VALUE => "the board rejected it (bad value or size)".to_string(),
+        ble::ACK_BAD_STATE => "another transfer is already running".to_string(),
+        ble::ACK_WIO_ERROR => "the board could not reach the WIO-E5 (link error)".to_string(),
+        ble::ACK_WIO_TIMEOUT => "the board could not reach the WIO-E5 (no reply)".to_string(),
+        s => format!("the board refused (status {s:#04x})"),
     }
 }
 
@@ -255,6 +363,80 @@ mod tests {
         assert!(remote_event(&blob).is_none());
         // A short blob decodes to nothing rather than panicking.
         assert!(remote_event(&blob[..ble::REMOTE_LEN - 1]).is_none());
+    }
+
+    /// Walk a two-chunk push through its whole life: OP_BEGIN framing, chunk
+    /// sizes and sequence numbers, OP_END, and the final Done. The board
+    /// parses these frames byte-by-byte, so the framing is what must be right.
+    #[test]
+    fn config_push_walks_begin_data_end() {
+        let data: Vec<u8> = (0..=255).collect(); // 256 B: one full chunk + 64
+        let crc = link::crc32(&data);
+        let mut push = ConfigPush::new(data.clone());
+
+        let begin = push.start().unwrap();
+        assert_eq!(begin[0], ble::OP_BEGIN);
+        assert_eq!(begin[1], ble::KIND_TOML);
+        assert_eq!(begin[2..6], 256u32.to_le_bytes());
+        assert_eq!(begin[6..10], crc.to_le_bytes());
+        assert_eq!(begin[10..12], 0u16.to_le_bytes());
+        // Only once: the transfer must not restart on a later pump tick.
+        assert!(push.start().is_none());
+
+        let ok = |value_u32| Ack {
+            id: ble::ACK_ID_BULK,
+            status: packet::ACK_OK,
+            value_u32,
+        };
+        let frame = |step| match step {
+            PushStep::Write(f) => f,
+            _ => panic!("expected a write"),
+        };
+
+        let first = frame(push.on_ack(&ok(Some(0))));
+        assert_eq!(first[0], ble::OP_DATA);
+        assert_eq!(first[1..3], 0u16.to_le_bytes());
+        assert_eq!(&first[3..], &data[..ble::BULK_DATA_MAX]);
+
+        let second = frame(push.on_ack(&ok(Some(1))));
+        assert_eq!(second[1..3], 1u16.to_le_bytes());
+        assert_eq!(&second[3..], &data[ble::BULK_DATA_MAX..]);
+
+        let end = frame(push.on_ack(&ok(Some(2))));
+        assert_eq!(end, vec![ble::OP_END]);
+        assert!(matches!(push.on_ack(&ok(None)), PushStep::Done));
+    }
+
+    /// A NAK at any point fails the push, and a WIO NAK on the final op is
+    /// blamed on the file's content rather than the link.
+    #[test]
+    fn config_push_fails_on_nak() {
+        let nak = Ack {
+            id: ble::ACK_ID_BULK,
+            status: ble::ACK_WIO_ERROR,
+            value_u32: None,
+        };
+
+        let mut push = ConfigPush::new(vec![1, 2, 3]);
+        push.start().unwrap();
+        assert!(matches!(
+            push.on_ack(&nak),
+            PushStep::Fail(m) if m.contains("link error")
+        ));
+
+        let mut push = ConfigPush::new(vec![1, 2, 3]);
+        push.start().unwrap();
+        let ok = Ack {
+            id: ble::ACK_ID_BULK,
+            status: packet::ACK_OK,
+            value_u32: Some(0),
+        };
+        push.on_ack(&ok); // data chunk
+        push.on_ack(&ok); // OP_END
+        assert!(matches!(
+            push.on_ack(&nak),
+            PushStep::Fail(m) if m.contains("rejected the config")
+        ));
     }
 
     #[test]

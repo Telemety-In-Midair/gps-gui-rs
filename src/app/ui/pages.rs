@@ -1169,6 +1169,33 @@ impl MyApp {
                     if ui.add_enabled(self.radio.is_some(), save).clicked() {
                         self.save_radio();
                     }
+                    // Push the editor's config to the board over BLE. Behind
+                    // a confirm popup: it replaces the board's whole config.
+                    let send = egui::Button::new(if self.radio_push_pending {
+                        "Sending..."
+                    } else {
+                        "Send to board"
+                    });
+                    let can_send =
+                        self.radio.is_some() && self.ble_connected && !self.radio_push_pending;
+                    let why = if self.radio.is_none() {
+                        "Load or generate a config first"
+                    } else if !self.ble_connected {
+                        "Connect to the board first (Beacon page)"
+                    } else {
+                        "Waiting for the board to answer"
+                    };
+                    if ui
+                        .add_enabled(can_send, send)
+                        .on_hover_text(
+                            "Send this config to the connected board. The WIO-E5 applies it \
+                             immediately and stores it on the SD card and in flash.",
+                        )
+                        .on_disabled_hover_text(why)
+                        .clicked()
+                    {
+                        self.radio_push_confirm = true;
+                    }
                 });
                 gap(ui, GAP_TIGHT);
                 feedback_label(ui, self.config.ui, &self.radio_feedback);
@@ -1204,6 +1231,7 @@ impl MyApp {
         // The edit-confirm popup floats above the page; a nested Area inside the
         // page's own Area misbehaves, so it is drawn here at the top level.
         self.radio_confirm_popup(ctx, screen);
+        self.radio_push_popup(ctx, screen);
     }
 
     /// The editable settings, grouped by their `[section]`. Each row is a
@@ -1344,6 +1372,46 @@ impl MyApp {
                     }
                     if ui.button("Cancel").clicked() {
                         self.radio_edit = RadioEdit::None;
+                    }
+                });
+            },
+        );
+    }
+
+    /// The floating Send / Cancel popup behind the Send-to-board button. A
+    /// confirm because a push replaces the board's whole config - a key absent
+    /// from the file reverts to its firmware default, not to what the board
+    /// had - and takes effect immediately.
+    fn radio_push_popup(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+        if !self.radio_push_confirm {
+            return;
+        }
+        floating(
+            ctx,
+            "radio_push_confirm",
+            egui::Order::Foreground,
+            screen.center(),
+            egui::Align2::CENTER_CENTER,
+            false,
+            |ui| {
+                ui.set_max_width(em(ui) * 18.0);
+                ui.label("Send this config to the board?");
+                ui.label(
+                    egui::RichText::new(
+                        "It replaces the board's whole config, takes effect immediately \
+                         and is stored on the board.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                gap(ui, GAP_ITEM);
+                ui.horizontal(|ui| {
+                    if ui.button("Send").clicked() {
+                        self.radio_push_confirm = false;
+                        self.push_radio();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.radio_push_confirm = false;
                     }
                 });
             },
