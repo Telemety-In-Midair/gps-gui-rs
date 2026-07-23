@@ -31,6 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use midair_proto::radiocfg::RadioConfig;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 /// The input a field is rendered with, inferred from its TOML value or forced
@@ -275,6 +276,27 @@ impl RadioDoc {
         self.dirty = true;
     }
 
+    /// Overlay the config a board reported over BLE onto this document, so the
+    /// editor shows what the board is actually running while keeping the
+    /// file's comments, help strings and dropdown hints. Only editable fields
+    /// the board blob carries are touched; anything else (a commented-out
+    /// hardware key like `tcxo_volts`, or an app-only field) keeps the
+    /// document's own value, and re-pushing therefore leaves it untouched too.
+    /// Marks the document dirty, since its values now differ from the file on
+    /// disk.
+    pub fn apply_config(&mut self, cfg: &RadioConfig) {
+        let targets: Vec<(String, String)> = self
+            .fields
+            .iter()
+            .map(|f| (f.section.clone(), f.key.clone()))
+            .collect();
+        for (section, key) in targets {
+            if let Some(val) = config_value(cfg, &key) {
+                self.apply(&section, &key, &val);
+            }
+        }
+    }
+
     /// The document as it goes to the board: comments, blank lines and the
     /// `<key>_description` / `<key>_type` metadata keys dropped, each kept
     /// line trimmed. The firmware ignores every stripped byte, and the
@@ -367,6 +389,64 @@ impl RadioDoc {
         self.dirty = true;
         Ok(())
     }
+}
+
+/// Format a beacon field mask as the `fields` string, in the wire order the
+/// payload uses. Names match those the firmware parser and the reference
+/// file's help text use, so the result parses back unchanged.
+fn fields_to_string(mask: u8) -> String {
+    use midair_proto::lora;
+    [
+        (lora::FIELD_LAT, "lat"),
+        (lora::FIELD_LON, "lon"),
+        (lora::FIELD_ALT, "altitude"),
+        (lora::FIELD_SPEED, "speed"),
+        (lora::FIELD_COURSE, "course"),
+        (lora::FIELD_SATS, "sats"),
+        (lora::FIELD_TIME, "time"),
+    ]
+    .iter()
+    .filter(|(bit, _)| mask & bit != 0)
+    .map(|(_, name)| *name)
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
+/// A board's value for a config key, typed to match that field's editor
+/// widget. `None` for a key the read-back blob does not carry (a future or
+/// app-only key), so [`RadioDoc::apply_config`] leaves it at the document's
+/// value. Enum and mask fields render through the shared crate's `as_str`
+/// helpers, which the firmware parser accepts back unchanged.
+fn config_value(cfg: &RadioConfig, key: &str) -> Option<EditVal> {
+    Some(match key {
+        "frequency_hz" => EditVal::Int(cfg.frequency_hz as i64),
+        "spreading_factor" => EditVal::Int(cfg.spreading_factor as i64),
+        "bandwidth_khz" => EditVal::Int(cfg.bandwidth_khz as i64),
+        "coding_rate" => EditVal::Int(cfg.coding_rate as i64),
+        "power_dbm" => EditVal::Int(cfg.power_dbm as i64),
+        "rx_boost" => EditVal::Bool(cfg.rx_boost),
+        "dcdc_enabled" => EditVal::Bool(cfg.dcdc_enabled),
+        "tcxo_volts" => EditVal::Str(cfg.tcxo_volts.as_str().to_string()),
+        "tcxo_startup_ms" => EditVal::Int(cfg.tcxo_startup_ms as i64),
+        "address" => EditVal::Int(cfg.address as i64),
+        "role" => EditVal::Str(cfg.role.as_str().to_string()),
+        "max_hops" => EditVal::Int(cfg.max_hops as i64),
+        "dedup_ttl_s" => EditVal::Int(cfg.dedup_ttl_s as i64),
+        "interval_s" | "beacon_interval_s" => EditVal::Int(cfg.beacon_interval_s as i64),
+        "fields" | "beacon_fields" => EditVal::Str(fields_to_string(cfg.beacon_fields)),
+        "sd_enabled" => EditVal::Bool(cfg.sd_enabled),
+        "verbose" => EditVal::Bool(cfg.verbose),
+        "gps_enabled" => EditVal::Bool(cfg.gps.gps_enabled),
+        "glonass_enabled" => EditVal::Bool(cfg.gps.glonass_enabled),
+        "galileo_enabled" => EditVal::Bool(cfg.gps.galileo_enabled),
+        "beidou_enabled" => EditVal::Bool(cfg.gps.beidou_enabled),
+        "qzss_enabled" => EditVal::Bool(cfg.gps.qzss_enabled),
+        "sbas_enabled" => EditVal::Bool(cfg.gps.sbas_enabled),
+        "power_mode" => EditVal::Str(cfg.gps.power_mode.as_str().to_string()),
+        "meas_rate_ms" => EditVal::Int(cfg.gps.meas_rate_ms as i64),
+        "dynamic_model" | "dyn_model" => EditVal::Str(cfg.gps.dyn_model.as_str().to_string()),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -481,5 +561,50 @@ power_mode_type = \"enum:full,psmoo,psmct\"
         assert!(out.contains("# a comment that must survive a round-trip"));
         assert!(out.contains("frequency_hz_description = \"RF center frequency.\""));
         assert!(d.dirty);
+    }
+
+    /// Overlaying a board's reported config fills the editor with its values
+    /// and, crucially, survives a round-trip back through the firmware parser
+    /// - the enum and mask fields have to render into strings the parser
+    /// accepts, or a fetched config could not be sent back.
+    #[test]
+    fn apply_config_overlays_and_round_trips() {
+        use midair_proto::lora;
+        use midair_proto::radiocfg::{parse, DynModel, GpsConfig, PowerMode, Role};
+
+        let mut d = RadioDoc::default_at("RADIO.toml").unwrap();
+        let cfg = RadioConfig {
+            address: 7,
+            role: Role::Repeater,
+            spreading_factor: 12,
+            beacon_interval_s: 45,
+            beacon_fields: lora::FIELD_LAT | lora::FIELD_LON | lora::FIELD_ALT,
+            gps: GpsConfig {
+                power_mode: PowerMode::PsmCyclic,
+                dyn_model: DynModel::Automotive,
+                ..GpsConfig::default()
+            },
+            ..RadioConfig::default()
+        };
+        d.apply_config(&cfg);
+
+        // The editor now shows the board's values, enums as their spellings.
+        assert_eq!(d.display_at("network", "address"), "7");
+        assert_eq!(d.display_at("network", "role"), "repeater");
+        assert_eq!(d.display_at("beacon", "fields"), "lat,lon,altitude");
+        assert_eq!(d.display_at("gps", "power_mode"), "psmct");
+        assert_eq!(d.display_at("gps", "dynamic_model"), "automotive");
+        assert!(d.dirty);
+
+        // Re-pushing sends exactly those values back: the parser reads them.
+        let text = String::from_utf8(d.wire_bytes()).unwrap();
+        let back = parse(&text).unwrap();
+        assert_eq!(back.address, 7);
+        assert_eq!(back.role, Role::Repeater);
+        assert_eq!(back.spreading_factor, 12);
+        assert_eq!(back.beacon_interval_s, 45);
+        assert_eq!(back.beacon_fields, cfg.beacon_fields);
+        assert_eq!(back.gps.power_mode, PowerMode::PsmCyclic);
+        assert_eq!(back.gps.dyn_model, DynModel::Automotive);
     }
 }

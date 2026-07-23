@@ -1208,6 +1208,28 @@ impl MyApp {
                     {
                         self.radio_push_confirm = true;
                     }
+
+                    // Fill the editor with the connected board's own settings,
+                    // the read-back counterpart to Send. Enabled once the board
+                    // has reported a config it can decode.
+                    let can_fetch = self.board_radio_config.is_some();
+                    let fetch_why = if self.radio_config_unsupported {
+                        "The board's config format is newer than this app can read"
+                    } else {
+                        "Connect on the Beacon page; the board's settings load once it reports \
+                         them (the GPS/LoRa rail must be on)"
+                    };
+                    if ui
+                        .add_enabled(can_fetch, egui::Button::new("Load from board"))
+                        .on_hover_text(
+                            "Fill the editor with the settings the connected board is currently \
+                             running, ready to edit, save or send back.",
+                        )
+                        .on_disabled_hover_text(fetch_why)
+                        .clicked()
+                    {
+                        self.load_radio_from_board();
+                    }
                 });
                 gap(ui, GAP_TIGHT);
                 feedback_label(ui, self.config.ui, &self.radio_feedback);

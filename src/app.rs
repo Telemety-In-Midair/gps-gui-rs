@@ -13,7 +13,7 @@ use walkers::{
     Projector,
 };
 
-use crate::ble::{BleCommand, BleEvent, BleHandle, ConfigWrite, Settings, Telemetry};
+use crate::ble::{BleCommand, BleEvent, BleHandle, ConfigWrite, RadioConfig, Settings, Telemetry};
 use crate::compass::{self, CompassHandle};
 use crate::config::{normalize_mac, AppConfig};
 use crate::gps::GpsFix;
@@ -462,6 +462,12 @@ pub struct MyApp {
     /// The board's settings layout is newer than this build can decode, so
     /// its settings are unknown rather than defaulted.
     settings_unsupported: bool,
+    /// The WIO radio config the connected board last reported, if any. Lets
+    /// the Radio page fill the editor from the board itself; `None` until the
+    /// board reports one (or if the board predates the read-back).
+    board_radio_config: Option<RadioConfig>,
+    /// The board's radio-config layout is newer than this build can decode.
+    radio_config_unsupported: bool,
     /// What the app is currently asking the BLE worker to do. Session state:
     /// `config.ble.enabled` seeds it at startup and nothing writes it back, so
     /// a Disconnect lasts until the next launch rather than becoming a setting.
@@ -606,6 +612,8 @@ impl MyApp {
             board_log: None,
             board_settings: None,
             settings_unsupported: false,
+            board_radio_config: None,
+            radio_config_unsupported: false,
             // Overwritten by `apply_config`/`sync_ble_to_config` below, which
             // is what actually decides whether to connect at startup.
             ble_intent: BleIntent::Idle,
@@ -836,6 +844,11 @@ impl MyApp {
         }
         self.board_settings = None;
         self.settings_unsupported = false;
+        // The next board may run a different config; drop this one so the
+        // Radio page's "load from board" cannot offer a stale board's values.
+        // Any editor document the user loaded is theirs and stays put.
+        self.board_radio_config = None;
+        self.radio_config_unsupported = false;
         self.telemetry = None;
         self.board_log = None;
         self.ble_ack = None;
@@ -1025,6 +1038,42 @@ impl MyApp {
             }
             Err(e) => Err(e),
         });
+    }
+
+    /// Fill the editor with the settings the connected board reported over
+    /// BLE. Overlays them onto the current document (or a fresh default one,
+    /// so the help text and dropdowns are there) rather than a file, and
+    /// leaves it dirty: Save writes it, Send to board pushes it back.
+    fn load_radio_from_board(&mut self) {
+        let Some(cfg) = self.board_radio_config else {
+            self.radio_feedback = Some(Err(if self.radio_config_unsupported {
+                "The board's config format is newer than this app can read.".to_string()
+            } else {
+                "No config from the board yet. Connect on the Beacon page and \
+                 wait for it to report (the GPS/LoRa rail must be on).".to_string()
+            }));
+            return;
+        };
+        // With no document open, start from the firmware defaults so the
+        // overlaid values keep their help strings and enum dropdowns.
+        if self.radio.is_none() {
+            let path = self.radio_path.trim();
+            let path = if path.is_empty() { "RADIO.toml" } else { path };
+            match RadioDoc::default_at(path) {
+                Ok(doc) => self.radio = Some(doc),
+                Err(e) => {
+                    self.radio_feedback = Some(Err(e));
+                    return;
+                }
+            }
+        }
+        self.radio_edit = RadioEdit::None;
+        if let Some(doc) = self.radio.as_mut() {
+            doc.apply_config(&cfg);
+        }
+        self.radio_feedback = Some(Ok(
+            "Loaded the board's current settings. Edit and Save, or Send to board.".to_string(),
+        ));
     }
 
     /// Write the edited RADIO.TOML back, backing up the previous file first.
@@ -1433,6 +1482,14 @@ impl MyApp {
                 BleEvent::SettingsUnsupported => {
                     self.board_settings = None;
                     self.settings_unsupported = true;
+                }
+                BleEvent::RadioConfig(c) => {
+                    self.board_radio_config = Some(c);
+                    self.radio_config_unsupported = false;
+                }
+                BleEvent::RadioConfigUnsupported => {
+                    self.board_radio_config = None;
+                    self.radio_config_unsupported = true;
                 }
                 BleEvent::ConfigPushed(res) => {
                     self.radio_push_pending = false;
