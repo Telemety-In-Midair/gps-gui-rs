@@ -16,6 +16,7 @@ use midair_proto::{ble, link};
 pub use gps_proto::packet::PositionPacket;
 pub use midair_proto::ble::Settings;
 pub use midair_proto::link::Telemetry;
+pub use midair_proto::radiocfg::RadioConfig;
 
 #[cfg(not(target_os = "android"))]
 mod desktop;
@@ -72,6 +73,14 @@ pub enum BleEvent {
     /// The settings blob did not decode: the board's layout version is newer
     /// than this build knows. Its settings are unreadable, not defaulted.
     SettingsUnsupported,
+    /// The WIO's current radio configuration, read on connect and notified on
+    /// every change. Lets the Radio page open on what the board is running
+    /// rather than a local file the user has to hope matches.
+    RadioConfig(RadioConfig),
+    /// The radio-config blob did not decode: the board's layout is newer than
+    /// this build knows. Distinct from "not reported yet" (an all-zero blob),
+    /// which is not surfaced at all.
+    RadioConfigUnsupported,
     /// A [`BleCommand::PushConfig`] finished: the board applied and stored the
     /// config, or why it did not.
     ConfigPushed(Result<String, String>),
@@ -254,6 +263,22 @@ fn settings_event(bytes: &[u8]) -> BleEvent {
         Some(s) => BleEvent::Settings(s),
         None => BleEvent::SettingsUnsupported,
     }
+}
+
+/// Decode a radio-config blob into the event it describes, or `None` when the
+/// board has not reported one yet. The board seeds the characteristic with
+/// zeros (layout version 0) until the WIO sends a snapshot - which, if the
+/// GPS/LoRa rail is off, may not happen until a connect powers it - so an
+/// all-zero blob is "unknown", not a version we cannot read. A non-zero blob
+/// that still fails to decode is a genuine version mismatch.
+fn radio_config_event(bytes: &[u8]) -> Option<BleEvent> {
+    if bytes.first().copied().unwrap_or(0) == 0 {
+        return None;
+    }
+    Some(match RadioConfig::decode(bytes) {
+        Some(c) => BleEvent::RadioConfig(c),
+        None => BleEvent::RadioConfigUnsupported,
+    })
 }
 
 /// Decode a remote-position blob (`[src u8, rssi i16le, PositionPacket]`) from

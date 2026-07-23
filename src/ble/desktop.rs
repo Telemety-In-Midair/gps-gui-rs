@@ -20,8 +20,8 @@ use midair_proto::link::Telemetry;
 use uuid::Uuid;
 
 use super::{
-    remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush, ConfigWrite,
-    DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
+    radio_config_event, remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush,
+    ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
 };
 
 const SERVICE_UUID: Uuid = Uuid::from_u128(packet::SERVICE_UUID_U128);
@@ -34,6 +34,9 @@ const ACK_UUID: Uuid = Uuid::from_u128(packet::ACK_UUID_U128);
 const TELEMETRY_UUID: Uuid = Uuid::from_u128(ble::TELEMETRY_UUID_U128);
 const LOG_UUID: Uuid = Uuid::from_u128(ble::LOG_UUID_U128);
 const SETTINGS_UUID: Uuid = Uuid::from_u128(ble::SETTINGS_UUID_U128);
+// The WIO's current radio config, read on connect and notified on change.
+// esp32c6-gps only, so optional like the other board-status characteristics.
+const RADIO_CONFIG_UUID: Uuid = Uuid::from_u128(ble::RADIO_CONFIG_UUID_U128);
 // Remote-position characteristic: the connected board relays a LoRa node's
 // position here, tagged with the node's address. Absent on the esp32c3 beacon,
 // so optional like the other board-status characteristics.
@@ -396,6 +399,7 @@ async fn connected(
         .find(|c| c.uuid == LOG_UUID && c.properties.contains(CharPropFlags::NOTIFY))
         .cloned();
     let settings = chars.iter().find(|c| c.uuid == SETTINGS_UUID).cloned();
+    let radio_config = chars.iter().find(|c| c.uuid == RADIO_CONFIG_UUID).cloned();
     let remote = chars
         .iter()
         .find(|c| c.uuid == REMOTE_UUID && c.properties.contains(CharPropFlags::NOTIFY))
@@ -424,6 +428,9 @@ async fn connected(
     if let Some(c) = &settings {
         let _ = peripheral.subscribe(c).await;
     }
+    if let Some(c) = &radio_config {
+        let _ = peripheral.subscribe(c).await;
+    }
 
     let mut notifications = peripheral
         .notifications()
@@ -442,6 +449,16 @@ async fn connected(
             }
             Err(e) => {
                 report.status(format!("settings read failed: {e}"));
+            }
+        }
+    }
+    // Same for the radio config. A board that has not reported one yet reads
+    // back all-zero (`radio_config_event` returns `None`); the notify that
+    // follows once it does carries the real value.
+    if let Some(c) = &radio_config {
+        if let Ok(v) = peripheral.read(c).await {
+            if let Some(e) = radio_config_event(&v) {
+                report.send(e);
             }
         }
     }
@@ -558,6 +575,10 @@ async fn connected(
                     }
                 } else if n.uuid == SETTINGS_UUID {
                     report.send(settings_event(&n.value));
+                } else if n.uuid == RADIO_CONFIG_UUID {
+                    if let Some(e) = radio_config_event(&n.value) {
+                        report.send(e);
+                    }
                 }
             }
             Ok(None) => return Err("connection lost".into()),

@@ -23,8 +23,8 @@ use midair_proto::ble;
 use midair_proto::link::Telemetry;
 
 use super::{
-    remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush, ConfigWrite,
-    DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
+    radio_config_event, remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush,
+    ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
 };
 
 /// The compiled dex with rs.gps.gui.BleBridge (see android/build-dex.sh).
@@ -473,6 +473,7 @@ fn session(
         ble::TELEMETRY_UUID,
         ble::LOG_UUID,
         ble::SETTINGS_UUID,
+        ble::RADIO_CONFIG_UUID,
         ble::REMOTE_UUID,
     ] {
         if bridge.set_notify(packet::SERVICE_UUID, chr, true) {
@@ -490,6 +491,7 @@ fn session(
     // routes the read value through the notify callback, so the pump below
     // decodes it on the same path a change notification takes.
     bridge.read_characteristic(packet::SERVICE_UUID, ble::SETTINGS_UUID);
+    bridge.read_characteristic(packet::SERVICE_UUID, ble::RADIO_CONFIG_UUID);
 
     // Pump: notifications out, commands in, until disconnect.
     //
@@ -586,6 +588,10 @@ fn session(
                     }
                 } else if uuid.eq_ignore_ascii_case(ble::SETTINGS_UUID) {
                     report.send(settings_event(&value));
+                } else if uuid.eq_ignore_ascii_case(ble::RADIO_CONFIG_UUID) {
+                    if let Some(e) = radio_config_event(&value) {
+                        report.send(e);
+                    }
                 }
             }
             Ok(Cb::ConnectionState { new_state: 0 }) => return Err("connection lost".into()),
