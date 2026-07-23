@@ -448,6 +448,13 @@ holds these in flash and is the authority on them.
   what the app was asked to do; `ble_status` is the worker's running commentary
   on the attempt. Showing only the second was most of why "nothing seems to
   happen" - a scan that is working looks identical to one that is not.
+- **"Connected" is only claimed while the board is talking.** Both platforms
+  can hold a dead link open for a long time, so `MyApp::board_silence` watches
+  when anything last came off a characteristic (`board_heard`); after three
+  notify intervals of quiet (10 s floor) the intent line switches to
+  "Connected, but nothing from the board for X." and loses the all-well color.
+  The "for X" counts (here and in "Connecting for X") restart per attempt: on
+  every request sent and on the moment a live link drops.
 - **`chase` is what makes the two transports behave the same.** Desktop always
   finds its device by scanning, so chasing only changes its status line. The
   Android worker normally shortcuts a pinned MAC straight to `connectGatt`,

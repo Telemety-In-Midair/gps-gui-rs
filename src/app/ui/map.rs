@@ -321,11 +321,13 @@ impl MyApp {
         };
         // Each remote node draws in its address palette color; its path follows
         // the single `[lora] show_path` toggle under the same master switch.
+        // The marker falls back to the last recorded point when the live view
+        // is gone (a board switch), so a known node never draws as a bare path.
         let remotes: Vec<RemoteDraw> = self
             .remotes
             .iter()
             .map(|(&addr, node)| RemoteDraw {
-                pos: node.pos,
+                pos: node.last_pos(),
                 track: paths(self.config.lora.show_path, &node.track),
                 color: remote_color(addr),
             })
@@ -752,7 +754,7 @@ impl MyApp {
         markers.extend(
             self.remotes
                 .iter()
-                .map(|(&addr, node)| (MarkerKind::Remote(addr), node.pos)),
+                .map(|(&addr, node)| (MarkerKind::Remote(addr), node.last_pos())),
         );
 
         // On a double-click, pick the closest marker within the hit radius; a
@@ -776,7 +778,7 @@ impl MyApp {
             MarkerKind::You => (self.current, self.current_time),
             MarkerKind::Beacon => (self.beacon, self.beacon_time),
             MarkerKind::Remote(addr) => match self.remotes.get(&addr) {
-                Some(node) => (node.pos, node.time),
+                Some(node) => (node.last_pos(), node.last_time()),
                 None => (None, None),
             },
         };

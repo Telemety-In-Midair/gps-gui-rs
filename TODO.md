@@ -74,3 +74,53 @@ line to the beacon and its distance stay. Discarding points moved to Settings.
 better documentation of systems. Maybe mermaid block diagram?
 
 Add name to status page.
+
+List of BLE addresses/names in toml
+
+Mode for BLE sleep while transmitting
+
+Scanning for multiple, should be able to do this while connected?
+
+When do radio settings get applied exactly?
+
+Wio needs to work independent of GPS being active
+
+Currently lose GPS coords of device when swapping BLE connection. Should be a deletion list.
+
+Need to store paths (with time?).
+
+Toml for time since last rx for remote beacon to be inactive for pulse.
+
+Calculate flight time calc settings?
+
+Reset to defaults for radio configs
+
+Read settings from wio.
+
+Board mapping should be based address even if direct from board.
+
+Where is default pulled from firmware.
+
+Only save edits?
+
+~~Connecting for, not properly resetting.~~
+The clock now restarts on every request (even a re-sent one) and when a live
+link drops, so the count is this attempt's rather than the whole session's.
+
+Add heartbeat on radio while no fix?
+
+Get address from esp over BLE.
+
+~~If no current point marker at last.~~
+A remote node's marker (and its popup/center/track targets) falls back to the
+last recorded track point when the live position is gone (board switch), so a
+known tracker never draws as a bare path.
+
+all settings (most) should be dropdowns.
+
+~~"Connected. The board stays awake until you disconnect." Status message can be even when not true.~~
+While connected but nothing has come off any characteristic for 3 notify
+intervals (min 10 s), the line says "Connected, but nothing from the board for
+X." instead, and is not painted in the all-well color.
+
+Last

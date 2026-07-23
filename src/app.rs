@@ -101,6 +101,12 @@ pub(crate) enum BleIntent {
 /// of range or asleep rather than just between packets.
 const SEEN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The least silence from a connected board before the status line stops
+/// claiming a healthy link. A floor rather than the whole story: the board
+/// notifies its position every notify interval, so the effective window also
+/// scales with that (see [`MyApp::board_silence`]).
+const LINK_SILENT: Duration = Duration::from_secs(10);
+
 /// A board seen by the current scan. The address is the map key and the
 /// advertised name is the same on every board, so the sighting itself carries
 /// only what changes: how strong it was, and when.
@@ -362,6 +368,20 @@ struct RemoteNode {
     track: Vec<TrackPoint>,
 }
 
+impl RemoteNode {
+    /// The position to show for this node: the live one, or the newest
+    /// recorded track point once a board switch has dropped the live view.
+    /// A node with any history keeps a visible marker, not just its path.
+    fn last_pos(&self) -> Option<Position> {
+        self.pos.or_else(|| self.track.last().map(|t| t.pos))
+    }
+
+    /// When [`Self::last_pos`] was recorded, for the marker popup's age line.
+    fn last_time(&self) -> Option<SystemTime> {
+        self.time.or_else(|| self.track.last().map(|t| t.time))
+    }
+}
+
 pub struct MyApp {
     /// Standard OpenStreetMap tiles.
     tiles: HttpTiles,
@@ -446,12 +466,19 @@ pub struct MyApp {
     /// `config.ble.enabled` seeds it at startup and nothing writes it back, so
     /// a Disconnect lasts until the next launch rather than becoming a setting.
     ble_intent: BleIntent,
-    /// When `ble_intent` last changed, for the "trying for ..." read-out.
+    /// The base of the "trying for ..." read-out: when the worker was last
+    /// asked for the current intent, or when the link last dropped - whichever
+    /// came later, so the count is this attempt's, not the whole session's.
     intent_since: Instant,
     /// When the current connection came up. The GPS/LoRa rail only powers on
     /// once a central connects, so telemetry is legitimately empty for the
     /// first seconds and the Status page says warming up, not broken.
     connected_at: Option<Instant>,
+    /// When the board itself last said anything (any decoded characteristic),
+    /// seeded at connect. The platform can take a long time to notice a dead
+    /// link, so a quiet stretch here is the earliest sign that "connected" may
+    /// no longer be true; see [`MyApp::board_silence`].
+    board_heard: Option<Instant>,
     /// Wake-check interval input (seconds) on the Beacon page.
     sleep_interval_text: String,
     /// Advertising-window input (seconds) on the Beacon page.
@@ -584,6 +611,7 @@ impl MyApp {
             ble_intent: BleIntent::Idle,
             intent_since: Instant::now(),
             connected_at: None,
+            board_heard: None,
             // The low end of the clamp range, so a stray press arms the
             // shortest sleep rather than the longest.
             sleep_interval_text: ble::ESP_SLEEP_MIN_S.to_string(),
@@ -738,9 +766,10 @@ impl MyApp {
     /// queue in one pass, so the later command simply overwrites the earlier
     /// one and the disconnect never happens.
     pub(crate) fn set_ble_intent(&mut self, intent: BleIntent) {
-        if self.ble_intent != intent {
-            self.intent_since = Instant::now();
-        }
+        // Every call sends a fresh request, so the "for ..." clock restarts
+        // even when the intent itself is unchanged (a re-sent connect or a
+        // restarted scan is a new attempt, not the old one continuing).
+        self.intent_since = Instant::now();
         self.ble_intent = intent;
         // A new scan starts from an empty list: leaving the last one's boards
         // there would show devices that may since have gone.
@@ -793,6 +822,9 @@ impl MyApp {
     /// would delete data the user may want; the points carry their own
     /// timestamps and source. Only the live view (positions the old relay was
     /// showing) is dropped, so the map stops drawing them as the new board's.
+    /// A remote node is still its LoRa address whichever board relays it, so
+    /// its marker stays on the map at its last recorded point (see
+    /// [`RemoteNode::last_pos`]); only the freshness bookkeeping resets.
     fn forget_board_state(&mut self) {
         self.beacon = None;
         self.beacon_time = None;
@@ -866,12 +898,38 @@ impl MyApp {
             (BleIntent::Scanning, _) => {
                 format!("Looking for boards for {waiting}. Not connected to any.")
             }
-            (_, true) => "Connected. The board stays awake until you disconnect.".to_string(),
+            // "Connected" is only claimed while the board is actually talking:
+            // the platform can hold a dead link open for a long time, and this
+            // line saying all is well then is worse than saying nothing.
+            (_, true) => match self.board_silence() {
+                Some(quiet) => format!(
+                    "Connected, but nothing from the board for {}.",
+                    secs_text(quiet.as_secs() as u32)
+                ),
+                None => "Connected. The board stays awake until you disconnect.".to_string(),
+            },
             (BleIntent::Connect, false) => format!("Connecting for {waiting}."),
             (BleIntent::ConnectSleeping, false) => {
                 format!("Scanning for a sleeping board for {waiting}.")
             }
         }
+    }
+
+    /// How long the connected board has been silent beyond what its notify
+    /// cadence allows; `None` while traffic is arriving, before the grace runs
+    /// out, or with no link at all. The grace is three notify intervals (a
+    /// missed packet or two is radio weather) with [`LINK_SILENT`] as the
+    /// floor for boards whose settings are unknown or whose interval is short.
+    pub(crate) fn board_silence(&self) -> Option<Duration> {
+        if !self.ble_connected {
+            return None;
+        }
+        let quiet = self.board_heard?.elapsed();
+        let cadence = self
+            .board_settings
+            .map(|s| Duration::from_millis(u64::from(s.notify_interval_ms) * 3))
+            .unwrap_or(Duration::ZERO);
+        (quiet > cadence.max(LINK_SILENT)).then_some(quiet)
     }
 
     /// The board the app is pinned to, named for a heading or a status line.
@@ -1122,7 +1180,7 @@ impl MyApp {
         targets.extend(
             self.remotes
                 .iter()
-                .filter_map(|(&addr, node)| node.pos.map(|p| (MarkerKind::Remote(addr), p))),
+                .filter_map(|(&addr, node)| node.last_pos().map(|p| (MarkerKind::Remote(addr), p))),
         );
         targets
     }
@@ -1259,6 +1317,13 @@ impl MyApp {
         }
 
         while let Ok(event) = self.ble.events.try_recv() {
+            // Anything decoded off a characteristic proves the board itself is
+            // still talking. Status, scan sightings and link-state changes are
+            // the worker's own and say nothing about the connected board.
+            match &event {
+                BleEvent::Status(_) | BleEvent::Discovered(_) | BleEvent::Connected(_) => {}
+                _ => self.board_heard = Some(Instant::now()),
+            }
             match event {
                 BleEvent::Status(s) => self.ble_status = s,
                 BleEvent::Discovered(device) => {
@@ -1271,8 +1336,17 @@ impl MyApp {
                     );
                 }
                 BleEvent::Connected(c) => {
+                    // A drop restarts the "connecting for ..." clock: the
+                    // retry begins now, not back when connecting was first
+                    // asked for. Only the transition counts - the worker
+                    // repeats Connected(false) on every retry cycle, and
+                    // resetting on each would pin the count near zero.
+                    if self.ble_connected && !c {
+                        self.intent_since = Instant::now();
+                    }
                     self.ble_connected = c;
                     self.connected_at = c.then(Instant::now);
+                    self.board_heard = c.then(Instant::now);
                     if c {
                         // A fresh link re-reads everything below; nothing from
                         // the last session still describes the board.

@@ -346,7 +346,11 @@ impl MyApp {
                         .weak(),
                     );
                 }
-                if self.ble_intent != BleIntent::Idle && !self.ble_connected {
+                // The elapsed counts (connecting-for, board-silent-for) move
+                // by themselves; a one-second tick keeps them honest.
+                if self.ble_intent != BleIntent::Idle
+                    && (!self.ble_connected || self.board_silence().is_some())
+                {
                     ui.ctx().request_repaint_after(Duration::from_secs(1));
                 }
 
@@ -953,7 +957,15 @@ impl MyApp {
         // link state means little without knowing whose it is.
         ui.label(format!("Board: {}", self.selected_device_label()));
         if connected {
-            ui.colored_label(self.config.ui.ok, self.ble_intent_text());
+            // A link that has gone quiet is not shown in the all-well color:
+            // the text is doubting the connection, so the color must not vouch
+            // for it. Its elapsed count also needs the one-second tick.
+            if self.board_silence().is_some() {
+                ui.label(self.ble_intent_text());
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+            } else {
+                ui.colored_label(self.config.ui.ok, self.ble_intent_text());
+            }
         } else if idle {
             ui.label(egui::RichText::new(self.ble_intent_text()).weak());
         } else {
