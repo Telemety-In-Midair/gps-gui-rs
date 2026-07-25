@@ -8,6 +8,7 @@ use walkers::Position;
 
 use midair_proto::ble;
 use midair_proto::link::{TELEM_FLAG_CFG_LOADED, TELEM_FLAG_GPS_FIX, TELEM_FLAG_SD_OK};
+use midair_proto::{lora, radiocfg};
 
 use crate::app::{secs_text, BleIntent, MyApp, Page, PointFilter, RadioEdit, RegionSelect};
 use crate::ble::ConfigWrite;
@@ -1237,6 +1238,7 @@ impl MyApp {
                 if self.radio.is_some() {
                     gap(ui, GAP_ITEM);
                     self.radio_fields_ui(ui);
+                    self.radio_estimate_ui(ui);
                     self.radio_backups_ui(ui);
                 } else {
                     gap(ui, GAP_BLOCK);
@@ -1298,6 +1300,95 @@ impl MyApp {
                 section_shown = section.clone();
             }
             self.radio_field_row(ui, &section, &key, &ty, desc.as_deref());
+        }
+    }
+
+    /// The airtime estimate: exact time-on-air for one beacon at the settings
+    /// currently in the editor, the duty cycle the beacon interval sets, and
+    /// whether one transmission stays under the 400 ms dwell limit the US
+    /// 902-928 MHz band imposes.
+    ///
+    /// The values are read from the editor the same way a push reads them - the
+    /// wire bytes parsed back into a [`RadioConfig`] - so the estimate tracks
+    /// edits the moment they are set, and reflects the same clamping the board
+    /// would apply. An editor holding a value the firmware would reject parses
+    /// to nothing, and the panel simply stays hidden until it is valid again.
+    fn radio_estimate_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.radio.as_ref() else {
+            return;
+        };
+        let Ok(cfg) = radiocfg::parse_bytes(&doc.wire_bytes()) else {
+            return;
+        };
+        let colors = self.config.ui;
+
+        gap(ui, GAP_BLOCK);
+        ui.strong("Airtime estimate");
+        ui.separator();
+
+        let payload = lora::HEADER_LEN + lora::position_msg_len(cfg.beacon_fields);
+        let toa_ms = cfg.beacon_airtime_us() as f32 / 1000.0;
+        ui.label(format!(
+            "Time on air: {toa_ms:.1} ms per beacon \
+             (SF{}, BW{} kHz, CR 4/{}, {payload}-byte frame)",
+            cfg.spreading_factor, cfg.bandwidth_khz, cfg.coding_rate,
+        ));
+
+        // The beacon interval turns airtime into a duty cycle; interval 0 means
+        // the beacon is off, so there is no periodic airtime to report.
+        if cfg.beacon_interval_s == 0 {
+            ui.label(
+                egui::RichText::new("Beacon disabled (interval 0): no periodic airtime.").weak(),
+            );
+        } else {
+            let duty = toa_ms / (cfg.beacon_interval_s as f32 * 1000.0) * 100.0;
+            ui.label(format!(
+                "Beacon interval: {} s  ->  duty cycle {duty:.2}%",
+                cfg.beacon_interval_s,
+            ));
+        }
+
+        // The 902-928 MHz FH rule caps channel dwell at 400 ms per 20 s, which
+        // is a 2% duty cycle. At an interval below 20 s more than one beacon
+        // lands in a 20 s window, so the per-beacon budget tightens to 2% of
+        // the interval (200 ms at the 10 s default); a single transmission can
+        // never top the 400 ms ceiling either. The check only means anything
+        // in-band, so key it off the frequency.
+        const DWELL_MS: f32 = 400.0;
+        const DUTY_LIMIT: f32 = 0.02; // 2% = 400 ms per 20 s
+        if (902_000_000..=928_000_000).contains(&cfg.frequency_hz) {
+            // One beacon's budget: 2% of the interval, never above the 400 ms
+            // dwell ceiling. With the beacon off (interval 0) only the ceiling
+            // is left to test against.
+            let duty_budget_ms = DUTY_LIMIT * cfg.beacon_interval_s as f32 * 1000.0;
+            let budget_ms = if cfg.beacon_interval_s == 0 {
+                DWELL_MS
+            } else {
+                duty_budget_ms.min(DWELL_MS)
+            };
+            let (verdict, color) = if toa_ms <= budget_ms {
+                (
+                    format!("Under the {budget_ms:.0} ms limit (902-928 MHz)"),
+                    colors.ok,
+                )
+            } else {
+                (
+                    format!(
+                        "Over the {budget_ms:.0} ms limit by {:.0} ms (902-928 MHz)",
+                        toa_ms - budget_ms
+                    ),
+                    colors.error,
+                )
+            };
+            ui.colored_label(color, verdict);
+            // Say which of the two limits is binding, so the number is not a
+            // bare figure the reader has to reverse-engineer.
+            let basis = if budget_ms >= DWELL_MS {
+                "400 ms channel dwell per 20 s".to_string()
+            } else {
+                format!("2% duty cycle over the {} s interval", cfg.beacon_interval_s)
+            };
+            ui.label(egui::RichText::new(format!("Limit: {basis}.")).weak());
         }
     }
 
