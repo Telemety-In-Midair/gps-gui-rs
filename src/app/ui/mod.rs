@@ -236,8 +236,20 @@ fn status_bool(ui: &mut egui::Ui, colors: UiColors, label: &str, ok: bool) {
     });
 }
 
-/// Every page in menu order, each with its label and icon. Drives the page
-/// dropdown menu.
+/// Menu-page measures, as fractions of the icon size (which is itself a
+/// fraction of the screen, see [`icon_size_for`]): the height of a button, its
+/// width, the gap between two of them, and the text size inside one.
+///
+/// Written against the icon rather than the body text because these are touch
+/// targets first - the point of the page is that they are comfortable to hit.
+const MENU_ROW_H_FRAC: f32 = 1.3;
+const MENU_ROW_W_FRAC: f32 = 5.0;
+const MENU_ROW_GAP_FRAC: f32 = 0.3;
+const MENU_TEXT_FRAC: f32 = 0.45;
+
+/// Every page in menu order, each with its label and icon. Drives the menu
+/// page. [`Page::Menu`] is deliberately absent: it is the page doing the
+/// listing, so a button back to it would go nowhere.
 fn page_items() -> [(Page, &'static str, egui::ImageSource<'static>); 6] {
     [
         (
@@ -274,57 +286,35 @@ fn page_items() -> [(Page, &'static str, egui::ImageSource<'static>); 6] {
 }
 
 impl MyApp {
-    /// Dropdown menu to jump straight to any page. The current page is marked.
-    /// Rendered inline in the map controls bar and in the floating corner
-    /// toggle on other pages. The trigger glyph crossfades from the hamburger
-    /// to an X while the menu is open.
+    /// The button that opens the menu page, and closes it again. Rendered
+    /// inline in the map controls bar and in the floating corner toggle on
+    /// every other page - including the menu page itself, where it is what
+    /// leaves without picking anything. The glyph crossfades from the
+    /// hamburger to an X once the menu is up.
     fn page_menu(&mut self, ui: &mut egui::Ui, icon: f32) {
         let text = ui.visuals().text_color();
         // Transparent base image: it reserves the icon-sized hit area and owns
-        // the click/menu behavior; the visible glyph is painted on top so it
-        // can crossfade between the hamburger and the X.
+        // the click; the visible glyph is painted on top so it can crossfade
+        // between the hamburger and the X.
         let base = egui::Image::new(egui::include_image!("../../../assets/icons/menu.svg"))
             .fit_to_exact_size(egui::vec2(icon, icon))
             .tint(egui::Color32::TRANSPARENT);
-        let resp = ui.menu_image_button(base, |ui| {
-            // Every measure in the popup is a fraction of the trigger icon,
-            // which is itself a fraction of the screen (see `icon_size_for`).
-            // A fixed row height reads as a sliver beside a 70pt toolbar on a
-            // desktop and crowds the touch targets on a phone.
-            let text_size = icon * 0.35;
-            // `Button::image_and_text` caps the image at the row height of the
-            // button font, so scaling that font is also what lets the row
-            // glyphs grow with the screen.
-            ui.style_mut().text_styles.insert(
-                egui::TextStyle::Button,
-                egui::FontId::proportional(text_size),
-            );
-            ui.spacing_mut().button_padding = egui::vec2(icon * 0.25, icon * 0.2);
-            ui.spacing_mut().item_spacing.y = icon * 0.12;
-            // Wide enough that the longest label never wraps the rows to
-            // different widths.
-            ui.set_min_width(icon * 4.0);
-            for (page, label, src) in page_items() {
-                let image = egui::Image::new(src)
-                    .fit_to_exact_size(egui::vec2(text_size, text_size))
-                    .tint(ui.visuals().text_color());
-                let selected = self.page == page;
-                if ui
-                    .add(egui::Button::image_and_text(image, label).selected(selected))
-                    .clicked()
-                {
-                    self.page = page;
-                    ui.close();
-                }
+        let resp = ui.add(egui::Button::image(base));
+        if resp.clicked() {
+            if self.page == Page::Menu {
+                self.page = self.menu_from;
+            } else {
+                self.menu_from = self.page;
+                self.page = Page::Menu;
             }
-        });
+        }
 
-        // `inner` is `Some` only while the menu popup is shown, so it drives the
-        // open/close crossfade. `animate_bool_with_time` eases it and keeps
-        // requesting repaints until it settles.
-        let open = resp.inner.is_some();
-        let rect =
-            egui::Rect::from_center_size(resp.response.rect.center(), egui::vec2(icon, icon));
+        // Eased open/close crossfade. `animate_bool_with_time` keeps requesting
+        // repaints until it settles. The two places this button is drawn share
+        // the animation id, so the glyph carries on across the frame where the
+        // map's inline copy hands over to the corner one.
+        let open = self.page == Page::Menu;
+        let rect = egui::Rect::from_center_size(resp.rect.center(), egui::vec2(icon, icon));
         let t = ui
             .ctx()
             .animate_bool_with_time(egui::Id::new("page_menu_icon_anim"), open, 0.15);
@@ -335,11 +325,62 @@ impl MyApp {
             .tint(text.gamma_multiply(t))
             .paint_at(ui, rect);
 
-        resp.response.on_hover_text("Pages");
+        resp.on_hover_text(if open { "Close menu" } else { "Pages" });
     }
 
-    /// Floating page menu in the top-right corner. Used on every page but the
-    /// map, where the menu lives at the right end of the controls bar instead.
+    /// The menu, as a page of its own: one large button per entry of
+    /// [`page_items`], centered on an otherwise empty screen. The page it was
+    /// opened from is marked, and the corner toggle floating over it (an X by
+    /// now) is what returns there.
+    pub(crate) fn menu_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+        let top = self.top_inset(ctx);
+        let bottom = self.bottom_inset(ctx);
+        let margin = page_margin(screen);
+        let icon = icon_size_for(screen);
+        let row = egui::vec2(icon * MENU_ROW_W_FRAC, icon * MENU_ROW_H_FRAC);
+        let row_gap = icon * MENU_ROW_GAP_FRAC;
+        let text_size = icon * MENU_TEXT_FRAC;
+        let items = page_items();
+        content_page(ctx, "menu", screen, top, |ui| {
+            // Center the column vertically by hand: the page lives in an `Area`
+            // and so has no height of its own to align against. What is left to
+            // share out is the screen less the frame's two margins, the
+            // safe-area insets, and the gap `content_page` has already laid
+            // down under the top one.
+            let count = items.len() as f32;
+            let content = count * row.y + (count - 1.0) * row_gap;
+            let used = 2.0 * margin + top + bottom + em(ui) * GAP_ITEM;
+            ui.add_space(((screen.height() - used - content) / 2.0).max(0.0));
+
+            // The button font, which the glyph beside it is sized to as well,
+            // so label and icon keep their proportions on any screen.
+            ui.style_mut().text_styles.insert(
+                egui::TextStyle::Button,
+                egui::FontId::proportional(text_size),
+            );
+            ui.spacing_mut().item_spacing.y = row_gap;
+            // A top-down centered layout both centers each button in the page
+            // and centers the glyph and label inside the button, which is what
+            // makes `min_size` alone enough to size a row.
+            ui.vertical_centered(|ui| {
+                for (page, label, src) in items {
+                    let image = egui::Image::new(src)
+                        .fit_to_exact_size(egui::vec2(text_size, text_size))
+                        .tint(ui.visuals().text_color());
+                    let selected = self.menu_from == page;
+                    let button = egui::Button::image_and_text(image, label)
+                        .selected(selected)
+                        .min_size(row);
+                    if ui.add(button).clicked() {
+                        self.page = page;
+                    }
+                }
+            });
+        });
+    }
+
+    /// Floating menu button in the top-right corner. Used on every page but the
+    /// map, where it lives at the right end of the controls bar instead.
     pub(crate) fn page_toggle(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let size = icon_size_for(screen);
         let top = self.top_inset(ctx);

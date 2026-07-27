@@ -12,7 +12,7 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
 - `src/app/ui/` - owns **rendering**. It is a submodule of `app`, so its
   `impl MyApp` blocks can reach `MyApp`'s private fields directly.
   - `mod.rs` - shared scaffolding (the helpers every page builds on), the
-    layout constants, the page-menu dropdown, and the floating corner toggle.
+    layout constants, the menu page, and the floating corner toggle.
   - `map.rs` - the interactive map page: the map itself, the controls bar,
     marker info popups, and the offline region-download selection/progress.
   - `pages.rs` - the non-map pages: Points, Status, Beacon, Settings,
@@ -115,8 +115,8 @@ page holds its proportions on a phone and on a desktop:
   `controls_margin`), the corner inset (`CORNER_MARGIN_FRAC`), the marker hit
   radius, and the smallest drag that counts as a region box.
 - **Fractions of the icon size** for anything sitting beside the toolbar: the
-  button padding, the popup row heights, and how far the floating panels hang
-  below the bar.
+  button padding, the menu page's button sizes, and how far the floating panels
+  hang below the bar.
 - **Text units** (`em(ui)`, the body text height) for everything inside a page:
   the vertical rhythm (`gap(ui, GAP_*)`, five steps from `GAP_HAIR` to
   `GAP_SECTION`) and input widths (`field_width`, a fraction of the screen held
@@ -130,17 +130,26 @@ size whatever the screen is.
 ## Pages and navigation
 
 `Page` (in `app.rs`) is the enum of screens. `page_items()` in `mod.rs` lists
-every page with its label and icon, in menu order, and drives both:
+every page with its label and icon, in menu order, and drives the menu page.
+`Page::Menu` is *not* in that list - it is the page doing the listing - and it
+is reached only from the menu button. `MyApp::menu_from` remembers the page it
+was opened from, which is both the entry marked as current and where leaving
+without picking one goes.
 
-- `page_menu` - the hamburger dropdown that switches pages. On the map it sits
-  inline at the right end of the controls bar; the trigger glyph crossfades
-  between the hamburger and an X while open.
-- `page_toggle` - a floating copy of that menu in the top-right corner, drawn
-  on every page *except* the map (the map uses the inline one). It pads its
-  glyph with `TOGGLE_PAD_FRAC`, not the toolbar's `BUTTON_PAD_*_FRAC`: in the
-  bar that padding doubles as the spacing between buttons and sits on the bar's
-  own fill, while here it would draw a slab three times the glyph over the page
-  text.
+- `menu_page` - the menu as a page of its own: one large button per entry,
+  centered on an empty screen, measured in fractions of the icon size
+  (`MENU_*_FRAC`) because the buttons are touch targets first. The column is
+  centered vertically by hand - the page is an `Area`, which has no height to
+  align against, so the free space is worked out from the screen instead.
+- `page_menu` - the button that opens the menu page and closes it again. On the
+  map it sits inline at the right end of the controls bar; the glyph crossfades
+  between the hamburger and an X.
+- `page_toggle` - a floating copy of that button in the top-right corner, drawn
+  on every page *except* the map (the map uses the inline one); on the menu
+  page it is the X that dismisses it. It pads its glyph with `TOGGLE_PAD_FRAC`,
+  not the toolbar's `BUTTON_PAD_*_FRAC`: in the bar that padding doubles as the
+  spacing between buttons and sits on the bar's own fill, while here it would
+  draw a slab three times the glyph over the page text.
 
 To add a page: add a `Page` variant, a `match` arm in `MyApp::ui`, a renderer
 `impl MyApp` method, and an entry in `page_items()`.

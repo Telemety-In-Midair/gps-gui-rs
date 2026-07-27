@@ -225,9 +225,13 @@ fn far_enough(last: Option<&Position>, pos: Position, min_distance_m: f64) -> bo
     }
 }
 
-/// Which screen is shown. The page menu switches between them.
+/// Which screen is shown. The menu page switches between them.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Page {
+    /// The page menu itself: one large button per page, and the only way to
+    /// reach the others. Not a destination in its own right, so it is left out
+    /// of the list it draws.
+    Menu,
     /// The interactive map with the position marker and track.
     Map,
     /// Searchable list of all recorded GPS points.
@@ -491,6 +495,9 @@ pub struct MyApp {
     adv_window_text: String,
     /// Which screen is currently shown.
     page: Page,
+    /// The page the menu was opened from, so closing it without picking
+    /// anything goes back where it was rather than to a fixed page.
+    menu_from: Page,
     /// Loaded configuration (marker colors, BLE settings).
     config: AppConfig,
     /// What was last pushed into the egui visuals, so
@@ -629,6 +636,7 @@ impl MyApp {
             // unconfigured board already does.
             adv_window_text: ble::ESP_ADV_DEFAULT_S.to_string(),
             page: Page::Map,
+            menu_from: Page::Map,
             config: AppConfig::default(),
             colors_applied: None,
             // The path the auto-load below tries, so Save writes back to the
@@ -1520,6 +1528,7 @@ impl eframe::App for MyApp {
         let screen = ctx.input(|i| i.viewport_rect());
 
         match self.page {
+            Page::Menu => self.menu_page(&ctx, screen),
             Page::Map => self.map_page(&ctx, screen),
             Page::Points => self.points_page(&ctx, screen),
             Page::Status => self.status_page(&ctx, screen),
@@ -1530,6 +1539,7 @@ impl eframe::App for MyApp {
 
         // Every page but the map gets the floating corner toggle; on the map
         // page the toggle lives at the right end of the controls bar instead.
+        // On the menu page it is the X that closes the menu again.
         if !matches!(self.page, Page::Map) {
             self.page_toggle(&ctx, screen);
         }
