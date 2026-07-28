@@ -31,6 +31,10 @@ use super::{
 const BRIDGE_DEX: &[u8] = include_bytes!("../../assets/ble-bridge.dex");
 const BRIDGE_CLASS: &str = "rs.gps.gui.BleBridge";
 
+/// ATT MTU to ask the board for once connected: the largest Android accepts,
+/// so the answer is whatever the board's own limit is (it caps at 251).
+const ATT_MTU_REQUEST: i32 = 517;
+
 /// Events pushed by the Java callbacks (Binder threads) to the worker.
 enum Cb {
     Scan {
@@ -53,6 +57,9 @@ enum Cb {
     },
     DescriptorWrite {
         status: i32,
+    },
+    MtuChanged {
+        mtu: i32,
     },
 }
 
@@ -120,6 +127,12 @@ extern "system" fn native_on_write(_env: JNIEnv, _class: JClass, _uuid: JString,
 
 extern "system" fn native_on_descriptor_write(_env: JNIEnv, _class: JClass, status: jint) {
     push_cb(Cb::DescriptorWrite { status });
+}
+
+/// The status is ignored: a refused exchange still reports the MTU that stays
+/// in force, which is what the caller wants to know.
+extern "system" fn native_on_mtu_changed(_env: JNIEnv, _class: JClass, mtu: jint, _status: jint) {
+    push_cb(Cb::MtuChanged { mtu });
 }
 
 // --- worker ---
@@ -446,6 +459,22 @@ fn session(
     })
     .map_err(|_| "connect timed out")?;
 
+    // Android keeps the 23-byte ATT default unless the central asks for more,
+    // and a notification carries MTU - 3 bytes: at the default the board's
+    // 64-byte log lines arrive cut to 20 characters and its 25-byte remote
+    // reports do not arrive at all. Asked for before anything subscribes, and
+    // not fatal - a stack that refuses just leaves the small default in force.
+    let mut mtu = 0;
+    if bridge.request_mtu(ATT_MTU_REQUEST) {
+        let _ = wait_for(cb_rx, Duration::from_secs(5), |cb| match cb {
+            Cb::MtuChanged { mtu: negotiated } => {
+                mtu = *negotiated;
+                true
+            }
+            _ => false,
+        });
+    }
+
     if !bridge.discover_services() {
         return Err("service discovery call failed".into());
     }
@@ -485,7 +514,12 @@ fn session(
     }
 
     report.send(BleEvent::Connected(true));
-    report.status(format!("connected to {address}"));
+    // The MTU is worth showing: it is what decides whether the longer
+    // notifications (log lines, remote reports) arrive whole.
+    report.status(match mtu {
+        0 => format!("connected to {address}"),
+        mtu => format!("connected to {address} (MTU {mtu})"),
+    });
 
     // Populate the board controls from the board itself rather than assuming
     // defaults for settings it holds in flash across power cycles. The shim
@@ -624,7 +658,11 @@ fn session(
 }
 
 /// Drain callback events until `pred` matches or the deadline passes.
-fn wait_for(cb_rx: &Receiver<Cb>, timeout: Duration, pred: impl Fn(&Cb) -> bool) -> Result<(), ()> {
+fn wait_for(
+    cb_rx: &Receiver<Cb>,
+    timeout: Duration,
+    mut pred: impl FnMut(&Cb) -> bool,
+) -> Result<(), ()> {
     let deadline = Instant::now() + timeout;
     loop {
         let left = deadline.checked_duration_since(Instant::now()).ok_or(())?;
@@ -713,6 +751,11 @@ fn load_bridge(env: &mut JNIEnv, activity: &JObject) -> Result<GlobalRef, AnyErr
                 name: "nativeOnDescriptorWrite".into(),
                 sig: "(I)V".into(),
                 fn_ptr: native_on_descriptor_write as *mut _,
+            },
+            NativeMethod {
+                name: "nativeOnMtuChanged".into(),
+                sig: "(II)V".into(),
+                fn_ptr: native_on_mtu_changed as *mut _,
             },
         ],
     )?;
@@ -814,6 +857,15 @@ impl Bridge<'_> {
     fn discover_services(&mut self) -> bool {
         self.scoped(4, |env, class| {
             env.call_static_method(class, "discoverServices", "()Z", &[])?.z()
+        })
+        .unwrap_or(false)
+    }
+
+    /// The negotiated MTU arrives on the `MtuChanged` callback, not here.
+    fn request_mtu(&mut self, mtu: i32) -> bool {
+        self.scoped(4, |env, class| {
+            env.call_static_method(class, "requestMtu", "(I)Z", &[JValue::Int(mtu)])?
+                .z()
         })
         .unwrap_or(false)
     }

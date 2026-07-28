@@ -48,6 +48,7 @@ public final class BleBridge {
     private static native void nativeOnNotify(String uuid, byte[] value);
     private static native void nativeOnWrite(String uuid, int status);
     private static native void nativeOnDescriptorWrite(int status);
+    private static native void nativeOnMtuChanged(int mtu, int status);
 
     public static boolean init(Context ctx) {
         try {
@@ -124,6 +125,11 @@ public final class BleBridge {
                     nativeOnServicesDiscovered(status);
                 }
 
+                @Override
+                public void onMtuChanged(BluetoothGatt g, int mtu, int status) {
+                    nativeOnMtuChanged(mtu, status);
+                }
+
                 // Fires on Android 12 and below (and again on 13+, where it
                 // is gated off to avoid double delivery).
                 @Override
@@ -177,6 +183,20 @@ public final class BleBridge {
             };
             gatt = device.connectGatt(context, false, cb, BluetoothDevice.TRANSPORT_LE);
             return gatt != null;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Ask the peripheral for a larger ATT MTU; the outcome (and the MTU that
+     * ends up in force either way) arrives on onMtuChanged. Android stays at
+     * the 23-byte default unless this is called, which caps a notification at
+     * 20 bytes.
+     */
+    public static boolean requestMtu(int mtu) {
+        try {
+            return gatt != null && gatt.requestMtu(mtu);
         } catch (Throwable t) {
             return false;
         }
