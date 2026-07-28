@@ -17,10 +17,14 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
     marker info popups, and the offline region-download selection/progress.
   - `pages.rs` - the non-map pages: Points, Status, Beacon, Settings,
     Radio, and the desktop manual-position bar.
+  - `logging.rs` - the Logging page: the CSV recorder's controls, the
+    hand-painted graph, and the export. Its own file because the plot is a
+    self-contained piece of drawing rather than another form.
 
 The page renderers read state that lives outside the UI too: `src/config.rs`
-holds the app's own TOML settings, and `src/radio.rs` holds the WIO-E5
-RADIO.TOML model the Radio page edits (see below).
+holds the app's own TOML settings, `src/radio.rs` holds the WIO-E5 RADIO.TOML
+model the Radio page edits, and `src/logging.rs` holds the CSV recorder behind
+the Logging page (all three below).
 
 The split is deliberate: `app.rs` reads as state + logic, the `ui` modules read
 as "how each page is drawn". Add new state to `MyApp`; add new drawing to a
@@ -67,7 +71,7 @@ content rather than boilerplate:
 - `content_page(ctx, id, screen, top, add)` - a full-screen `Background` area
   filled with the panel color, a `page_margin` margin, with the top safe-area
   inset already skipped. The closure supplies the heading and body. Used by
-  Points, Status, Beacon, Settings, Radio.
+  Points, Status, Beacon, Settings, Radio, Logging.
 
 It **pins the body's width** (`set_width`), and that is load-bearing rather
 than cosmetic. An `Area` sizes itself to whatever it held last frame, so its
@@ -525,6 +529,80 @@ app's) and edits it in place. The model lives in `src/radio.rs`; the page in
   into the editor (unsaved until the next Save). The document tracks a `dirty`
   flag, surfaced as `Save *`.
 
+## The Logging page (`app/ui/logging.rs` + `logging.rs` + `export.rs`)
+
+A CSV of everything that arrives, a graph over it, and a way to get the file
+off the device. The model is `src/logging.rs`; the page is `logging_page`.
+
+- **A row is a report, not a tick.** `MyApp::record` is called from
+  `apply_gps_fix` and from the `Fix` / `Remote` / `NodePing` / `Telemetry` arms
+  of `drain_sources`, so a row is written whenever a source *says something*.
+  That is what keeps a node's position and the signal it was heard at on the
+  same row, which is the pairing the whole feature exists for - a periodic
+  sample would have to guess which RSSI went with which fix. It also means the
+  log is denser than the tracks: a fix is logged whether or not it is far
+  enough from the last one to become a track point (`[track] min_distance`
+  decimates a drawn path, not a record).
+- **Columns a row has nothing to say about stay empty.** Every measurement on
+  `LogRow` is an `Option`, and an unset one writes as an empty cell. A
+  spreadsheet reads that as "no reading"; a zero would be a reading, and
+  `0 dBm` and `0 m` are both plausible ones.
+- **The derived columns are filled in one place.** `MyApp::record` adds where
+  the control device was, the distance from it to whatever reported, and the
+  distance from that to the fixed reference. The call sites only supply what
+  the report itself carried. `dist_user_m` is deliberately left empty on our
+  own fixes: the distance from the device to itself is zero, and a zero there
+  would plot as a source that had arrived.
+- **The reference point** (`[log] ref_lat`/`ref_lon`) is a fixed coordinate
+  every logged position is *also* measured against, so a range test can be read
+  against a surveyed point rather than against a control device that is moving
+  too. Both halves or neither - a lone latitude is a typo and fails the load
+  rather than silently leaving an always-empty column. It has no empty form the
+  way the theme colors and the pinned MAC do (`""` is not a float), so
+  clearing it removes the keys, which is what `set_opt` in `config.rs` is for.
+- **The file is appended to, never truncated.** Stopping and starting again
+  continues the same log; losing a run to a mis-tap is worse than a file with
+  two sessions in it. The header is written only when the file is new or empty.
+  Every row is flushed as it is written - a phone can drop the app at any
+  moment, and a buffered tail would take the most recent part of the run.
+- **The file is the record, the rows in memory are the view.** `Logger` keeps
+  `MAX_ROWS` for the graph and drops the oldest past that (the page says how
+  many, so a shortened plot never quietly misrepresents the run). An export
+  therefore prefers reading the file back and falls back to memory only when
+  there is no file.
+- **The graph is painted by hand** (`MyApp::plot`), not by a plotting crate:
+  the job is a handful of autoscaled series in the config's own colors at a
+  size measured off the screen, and a crate would arrive with its own sizing,
+  theming and gestures to fight. The Y axis is a `LogStat`; the X axis is a
+  `LogAxis` - time, or another stat. Against time a series is a **line** (the
+  rows are in order, and the gaps are part of the story); against another stat
+  it is a **scatter** (the order means nothing, so joining the points would
+  draw a shape that is not in the data). Distance-vs-RSSI is the second kind.
+- **A point needs both axes on the same row**, which is what makes the scatter
+  honest: telemetry rows carry an RSSI but no position, so they contribute
+  nothing to a distance plot rather than a column of points at zero range.
+- **The legend is the filter.** What is drawn and what it is drawn in are the
+  same question, so the legend entries are toggles (`MyApp::log_hidden`,
+  session state). Every source ever seen keeps its entry, hidden or not -
+  otherwise there is no way to bring one back. Colors are `LogSource::color`,
+  which is the map's: your color, the board's, and `remote_color(addr)`.
+- **Export is the one thing that is platform-shaped.** `MyApp::export` is an
+  `Option<export::Saver>` - the same shape as `insets`, so `app.rs` stays free
+  of `cfg`. On Android it is `export::downloads_saver`, which inserts the CSV
+  into `MediaStore.Downloads` over JNI so it lands in the phone's Downloads
+  folder; the app's own data directory, where the log is written, is
+  unreachable from the phone itself. MediaStore is used rather than a plain
+  write because it needs **no storage permission at all** on API 29+. It is
+  also all framework classes, so unlike the BLE and location bridges it needs
+  no Java shim or dex rebuild. On desktop it is `None` and the page writes a
+  timestamped copy beside the log itself, the path there already being one the
+  user typed.
+- **The log path is not a setting until it is saved.** With `[log] file` unset
+  the page starts on a timestamped name beside the config; "Save settings" is
+  what makes the current one stick, since writing a generated name back would
+  pin every later run to the same file. The path input is disabled while
+  recording - the open file is what it names.
+
 ## Manual position bar (desktop)
 
 With no live GPS source (`gps_rx.is_none()`, i.e. desktop), a bottom-anchored
@@ -572,3 +650,5 @@ live-source channels/insets are present:
 - **Compass**: mobile only, and powered only while heading-up is on.
 - **Marker list**: opened by a long press on mobile, a right-click on desktop.
 - **Insets**: non-zero on mobile, zero on desktop.
+- **Log export**: mobile copies into Downloads through MediaStore; desktop
+  writes the copy beside the log itself.

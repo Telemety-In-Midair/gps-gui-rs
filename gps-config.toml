@@ -51,3 +51,14 @@ dotted = true
 # tracking, where it only points the arrow on your marker.
 marker_arrow = true
 arrow_hz = 4.0
+
+[log]
+# The CSV log on the Logging page. Empty `file` means a timestamped name
+# beside this config; set it by hand or with the page's Save settings button.
+auto_start = false
+file = ""
+# A fixed point every logged position is also measured against, so a range
+# test can be read against a surveyed coordinate rather than against a control
+# device that is moving too. Both keys or neither.
+# ref_lat = 51.4779
+# ref_lon = -0.0015

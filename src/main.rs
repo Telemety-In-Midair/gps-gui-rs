@@ -22,6 +22,8 @@ fn main() -> eframe::Result<()> {
             // position entry bar (passing `None` here).
             let ble = ble::spawn(cc.egui_ctx.clone());
             let cache_dir = Some(std::path::PathBuf::from(".cache"));
+            // No platform export either: the log is written to a path typed
+            // on the Logging page, which is already somewhere reachable here.
             Ok(Box::new(MyApp::new(
                 cc.egui_ctx.clone(),
                 None,
@@ -29,6 +31,7 @@ fn main() -> eframe::Result<()> {
                 None,
                 None,
                 ble,
+                None,
             )))
         }),
     )

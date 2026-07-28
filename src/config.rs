@@ -56,6 +56,12 @@
 //! [compass]
 //! marker_arrow = true # point the marker arrow with the compass outside heading-up
 //! arrow_hz = 4.0      # compass rate while only that arrow needs it
+//!
+//! [log]
+//! auto_start = false  # start recording the CSV log as soon as the app launches
+//! file = ""           # log path; empty means a timestamped file beside this one
+//! ref_lat = 51.4779   # fixed reference coordinate; distance to it is a logged
+//! ref_lon = -0.0015   # column. Omit both to leave it unset.
 //! ```
 
 use std::collections::BTreeMap;
@@ -433,6 +439,46 @@ impl Default for CompassSettings {
     }
 }
 
+/// CSV logging settings.
+///
+/// The log is a file rather than a view, so its two settings are a path and
+/// whether to start writing to it unasked. The reference coordinate is here
+/// too because it is what a logged distance is measured against, and a run
+/// measured against a moving control device answers a different question from
+/// one measured against a surveyed point.
+#[derive(Clone, Default)]
+pub struct LogSettings {
+    /// Start recording as soon as the app launches, so a run can be logged
+    /// without remembering to arm it first.
+    pub auto_start: bool,
+    /// Where the CSV is written. `None` generates a timestamped name beside
+    /// the config file, which is the one directory known to be writable on
+    /// both platforms.
+    pub file: Option<String>,
+    /// A fixed coordinate every logged position is also measured against.
+    /// Both halves or neither; a lone latitude is not a point.
+    pub ref_lat: Option<f64>,
+    pub ref_lon: Option<f64>,
+}
+
+impl LogSettings {
+    /// The reference coordinate, when both halves are set.
+    pub fn reference(&self) -> Option<(f64, f64)> {
+        Some((self.ref_lat?, self.ref_lon?))
+    }
+
+    /// Set the reference to a coordinate, or clear it with `None` - both
+    /// halves move together so a half-set reference is never reachable.
+    pub fn set_reference(&mut self, point: Option<(f64, f64)>) {
+        let (lat, lon) = match point {
+            Some(p) => (Some(p.0), Some(p.1)),
+            None => (None, None),
+        };
+        self.ref_lat = lat;
+        self.ref_lon = lon;
+    }
+}
+
 /// Everything a config file can carry.
 #[derive(Clone, Default)]
 pub struct AppConfig {
@@ -444,6 +490,7 @@ pub struct AppConfig {
     pub lora: LoraSettings,
     pub track: TrackSettings,
     pub compass: CompassSettings,
+    pub log: LogSettings,
 }
 
 /// Mirrors the TOML shape; every field optional so a partial file keeps the
@@ -466,6 +513,8 @@ struct RawConfig {
     track: RawTrack,
     #[serde(default)]
     compass: RawCompass,
+    #[serde(default)]
+    log: RawLog,
 }
 
 #[derive(Deserialize, Default)]
@@ -531,6 +580,14 @@ struct RawCompass {
     arrow_hz: Option<f32>,
 }
 
+#[derive(Deserialize, Default)]
+struct RawLog {
+    auto_start: Option<bool>,
+    file: Option<String>,
+    ref_lat: Option<f64>,
+    ref_lon: Option<f64>,
+}
+
 /// Parse a `#rrggbb` (or bare `rrggbb`) hex string into a color.
 fn parse_hex(s: &str) -> Result<Color32, String> {
     let h = s.trim().trim_start_matches('#');
@@ -587,6 +644,23 @@ fn set(doc: &mut DocumentMut, section: &str, key: &str, value: Value) {
         *value.decor_mut() = toml_edit::Decor::new(" ", "");
     }
     table.insert(key, Item::Value(value));
+}
+
+/// Set `[section] key = value` for a setting that may be unset, removing the
+/// key when it is.
+///
+/// Unlike the colors and the MAC, an unset number has no empty form to leave
+/// in the file: `ref_lat = ""` is not a float and would fail to load. So the
+/// key goes away entirely, and its absence is what "unset" reads as.
+fn set_opt(doc: &mut DocumentMut, section: &str, key: &str, value: Option<Value>) {
+    match value {
+        Some(value) => set(doc, section, key, value),
+        None => {
+            if let Some(table) = doc.get_mut(section).and_then(Item::as_table_mut) {
+                table.remove(key);
+            }
+        }
+    }
 }
 
 /// Rewrite `[ble.names]` to match `names`, adding the sub-table when it is
@@ -778,6 +852,15 @@ impl AppConfig {
             "arrow_hz",
             f32_value(self.compass.arrow_hz),
         );
+        set(&mut doc, "log", "auto_start", self.log.auto_start.into());
+        set(
+            &mut doc,
+            "log",
+            "file",
+            self.log.file.clone().unwrap_or_default().into(),
+        );
+        set_opt(&mut doc, "log", "ref_lat", self.log.ref_lat.map(Into::into));
+        set_opt(&mut doc, "log", "ref_lon", self.log.ref_lon.map(Into::into));
         set_names(&mut doc, &self.ble.names);
         set_lora_names(&mut doc, &self.lora.names);
         std::fs::write(path, doc.to_string()).map_err(|e| format!("{path}: {e}"))?;
@@ -809,6 +892,20 @@ impl AppConfig {
                 .iter()
                 .map(|(addr, name)| format!("{addr} = {name:?}\n"))
                 .collect()
+        };
+        // An unset reference has no value to write, so the pair is shown as a
+        // comment: the keys are what a hand-edit needs to see, and a zeroed
+        // pair would be a real coordinate off the coast of Africa.
+        let reference = match self.log.reference() {
+            Some((lat, lon)) => format!(
+                "ref_lat = {lat}\n\
+                 ref_lon = {lon}          # fixed point every logged position is measured against\n"
+            ),
+            None => {
+                "# ref_lat = 51.4779   # a fixed point every logged position is measured against\n\
+                     # ref_lon = -0.0015\n"
+                    .to_string()
+            }
         };
         format!(
             "# gps-gui-rs settings. Every key is optional; a missing one keeps its default.\n\
@@ -861,7 +958,12 @@ impl AppConfig {
              \n\
              [compass]            # heading-up always runs the sensor at full rate\n\
              marker_arrow = {marker_arrow}  # point the marker arrow with the compass in north-up and tracking\n\
-             arrow_hz = {arrow_hz:?}       # sensor rate while only that arrow needs it\n",
+             arrow_hz = {arrow_hz:?}       # sensor rate while only that arrow needs it\n\
+             \n\
+             [log]                # the CSV log on the Logging page\n\
+             auto_start = {auto_start}  # start recording as soon as the app launches\n\
+             file = \"{log_file}\"           # log path; empty is a timestamped file beside this one\n\
+             {reference}",
             track = hex(self.colors.track),
             fixed = hex(self.colors.fixed),
             outline = hex(self.colors.outline),
@@ -892,6 +994,9 @@ impl AppConfig {
             show_track = self.track.show_path,
             marker_arrow = self.compass.marker_arrow,
             arrow_hz = self.compass.arrow_hz,
+            auto_start = self.log.auto_start,
+            log_file = self.log.file.clone().unwrap_or_default(),
+            reference = reference,
         )
     }
 
@@ -1013,6 +1118,30 @@ impl AppConfig {
             }
             config.compass.arrow_hz = v;
         }
+        if let Some(v) = raw.log.auto_start {
+            config.log.auto_start = v;
+        }
+        // Empty is unset, as for the pinned MAC: the key stays in the file as
+        // a template rather than having to be deleted to fall back.
+        config.log.file = raw.log.file.filter(|p| !p.trim().is_empty());
+        // Both halves or neither. A file with only one of them is a typo, and
+        // silently ignoring it would leave a reference-distance column that is
+        // always empty with nothing saying why.
+        match (raw.log.ref_lat, raw.log.ref_lon) {
+            (Some(lat), Some(lon)) => {
+                if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+                    return Err(format!(
+                        "log reference {lat}, {lon} is not a coordinate \
+                         (lat -90..90, lon -180..180)"
+                    ));
+                }
+                config.log.set_reference(Some((lat, lon)));
+            }
+            (None, None) => {}
+            _ => {
+                return Err("log.ref_lat and log.ref_lon must be set together".to_string());
+            }
+        }
         Ok(config)
     }
 }
@@ -1092,6 +1221,52 @@ mod tests {
         assert_eq!(back.sizes.marker, 12.5);
         assert_eq!(back.colors.track, Color32::from_rgb(1, 2, 3));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_log_reference_needs_both_halves() {
+        let cfg = AppConfig::from_toml("[log]\nref_lat = 51.4779\nref_lon = -0.0015\n").unwrap();
+        assert_eq!(cfg.log.reference(), Some((51.4779, -0.0015)));
+        assert_eq!(AppConfig::default().log.reference(), None);
+        // A lone half is a typo, and reads as an error rather than as unset.
+        assert!(AppConfig::from_toml("[log]\nref_lat = 51.4779\n").is_err());
+        assert!(AppConfig::from_toml("[log]\nref_lon = -0.0015\n").is_err());
+        assert!(AppConfig::from_toml("[log]\nref_lat = 91.0\nref_lon = 0.0\n").is_err());
+    }
+
+    #[test]
+    fn clearing_the_reference_removes_the_keys() {
+        let path = std::env::temp_dir().join("gps-gui-rs-log-ref-test.toml");
+        let path = path.to_str().unwrap();
+        std::fs::write(path, "[log]\nref_lat = 51.4779\nref_lon = -0.0015\n").unwrap();
+
+        let mut cfg = AppConfig::load(path).unwrap();
+        assert_eq!(cfg.log.reference(), Some((51.4779, -0.0015)));
+        // An unset coordinate has no empty form, so the keys have to go - left
+        // behind as `""` the file would no longer load.
+        cfg.log.set_reference(None);
+        assert!(!cfg.save(path).unwrap());
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains("ref_lat"), "{text}");
+        assert_eq!(AppConfig::load(path).unwrap().log.reference(), None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_generated_config_reads_back_with_the_log_table() {
+        let mut cfg = AppConfig::default();
+        cfg.log.auto_start = true;
+        cfg.log.file = Some("/tmp/run.csv".to_string());
+        cfg.log.set_reference(Some((51.4779, -0.0015)));
+        let back = AppConfig::from_toml(&cfg.to_toml()).unwrap();
+        assert!(back.log.auto_start);
+        assert_eq!(back.log.file.as_deref(), Some("/tmp/run.csv"));
+        assert_eq!(back.log.reference(), Some((51.4779, -0.0015)));
+        // With nothing set the reference is shown as a comment, so a generated
+        // file still loads and still says what the keys are.
+        let empty = AppConfig::from_toml(&AppConfig::default().to_toml()).unwrap();
+        assert_eq!(empty.log.reference(), None);
+        assert_eq!(empty.log.file, None);
     }
 
     #[test]

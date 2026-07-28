@@ -5,6 +5,7 @@
 //! repeated `Area`/`Frame` setup and the color feedback lines live here as
 //! functions so each page reads as its own content rather than boilerplate.
 
+mod logging;
 mod map;
 mod pages;
 
@@ -254,7 +255,7 @@ const MENU_TEXT_FRAC: f32 = 0.45;
 /// Every page in menu order, each with its label and icon. Drives the menu
 /// page. [`Page::Menu`] is deliberately absent: it is the page doing the
 /// listing, so a button back to it would go nowhere.
-fn page_items() -> [(Page, &'static str, egui::ImageSource<'static>); 6] {
+fn page_items() -> [(Page, &'static str, egui::ImageSource<'static>); 7] {
     [
         (
             Page::Map,
@@ -275,6 +276,11 @@ fn page_items() -> [(Page, &'static str, egui::ImageSource<'static>); 6] {
             Page::Beacon,
             "Beacon",
             egui::include_image!("../../../assets/icons/beacon.svg"),
+        ),
+        (
+            Page::Logging,
+            "Logging",
+            egui::include_image!("../../../assets/icons/log.svg"),
         ),
         (
             Page::Settings,

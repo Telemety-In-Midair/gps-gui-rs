@@ -4,7 +4,11 @@ pub mod ble;
 // target); only the sensor thread behind it is Android-only.
 pub mod compass;
 pub mod config;
+// Getting a recorded file off the control device. Cross-platform type; the
+// Android MediaStore path behind it is the only implementation so far.
+pub mod export;
 pub mod gps;
+pub mod logging;
 pub mod marker;
 pub mod offline;
 pub mod points;
@@ -72,6 +76,9 @@ fn android_main(android_app: egui_winit::winit::platform::android::activity::And
             // The BLE worker also loads the dex shim and applies
             // keep-screen-on through it.
             let ble = ble::spawn(cc.egui_ctx.clone(), vm_ptr, activity_ptr);
+            // The private data dir the log is written to is unreachable from
+            // the phone itself, so exporting goes through MediaStore.
+            let export = Some(export::downloads_saver(vm_ptr, activity_ptr));
             Ok(Box::new(app::MyApp::new(
                 cc.egui_ctx.clone(),
                 Some(gps_rx),
@@ -79,6 +86,7 @@ fn android_main(android_app: egui_winit::winit::platform::android::activity::And
                 compass,
                 insets,
                 ble,
+                export,
             )))
         }),
     );

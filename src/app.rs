@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -18,7 +18,9 @@ use crate::ble::{
 };
 use crate::compass::{self, CompassHandle};
 use crate::config::{normalize_mac, AppConfig};
+use crate::export::Saver;
 use crate::gps::GpsFix;
+use crate::logging::{self, LogAxis, LogRow, LogSource, LogStat, Logger};
 use crate::offline::{self, DownloadProgress};
 use crate::points::{PointSource, TrackPoint};
 use crate::radio::{self, EditVal, RadioDoc};
@@ -231,6 +233,28 @@ fn heard_at(age_s: u16) -> SystemTime {
         .unwrap_or_else(SystemTime::now)
 }
 
+/// The GPS columns of a position packet as a log row, shared by the connected
+/// board's own fixes and the remote nodes' relayed ones: the same packet type
+/// arrives by both routes and has to log identically. The caller adds what the
+/// route itself carried (a node's signal reading).
+///
+/// A packet without a fix still logs a row - `fix = 0` and a satellite count.
+/// A receiver that is up and searching is a different state from one that has
+/// stopped reporting, and only a row can tell them apart afterwards.
+fn packet_row(source: LogSource, packet: PositionPacket, at: SystemTime) -> LogRow {
+    let mut row = LogRow::new(source, at);
+    row.fix = Some(packet.has_fix());
+    row.sats = Some(packet.sats);
+    if packet.has_fix() {
+        row.lat = Some(packet.lat_deg());
+        row.lon = Some(packet.lon_deg());
+        row.alt_m = Some(packet.alt_m());
+        row.speed_mps = Some(packet.speed_mps());
+        row.course_deg = Some(packet.course_deg());
+    }
+    row
+}
+
 fn far_enough(last: Option<&Position>, pos: Position, min_distance_m: f64) -> bool {
     match last {
         None => true,
@@ -259,6 +283,8 @@ pub enum Page {
     Settings,
     /// Viewing and editing the WIO-E5 RADIO.TOML (radio, mesh, beacon, GPS).
     Radio,
+    /// CSV recording of every report, its graph, and the export off the device.
+    Logging,
 }
 
 /// Per-field edit flow on the Radio page. Only one field is in flight at a time:
@@ -623,6 +649,28 @@ pub struct MyApp {
     /// can't center a horizontal row in a single layout pass). `0.0` until the
     /// first frame has measured it.
     controls_width: f32,
+    /// The CSV recorder behind the Logging page.
+    logger: Logger,
+    /// The log path typed on the Logging page. Seeded from `[log] file`, or a
+    /// timestamped name beside the config when that is unset.
+    log_path: String,
+    /// Result of the last log start/stop/export: `Ok` (green) or error (red).
+    log_feedback: Option<Result<String, String>>,
+    /// The graph's axes: what is plotted, and against what.
+    log_x: LogAxis,
+    log_y: LogStat,
+    /// Text buffer behind the reference-coordinate input ("lat, lon"), held
+    /// apart from the config so a half-typed coordinate is not committed.
+    log_ref_text: String,
+    /// The last reference entry failed to parse.
+    log_ref_bad: bool,
+    /// Sources hidden from the graph, toggled from its legend. Session state:
+    /// it is a way to read a busy plot, not a setting worth saving.
+    log_hidden: BTreeSet<LogSource>,
+    /// Writes a file somewhere the user can reach it (Android's Downloads).
+    /// `None` on desktop, where the log path is already reachable and the
+    /// export writes the copy itself.
+    export: Option<Saver>,
 }
 
 impl MyApp {
@@ -633,6 +681,8 @@ impl MyApp {
     /// `compass` is the device-facing heading source (`None` on desktop).
     /// `insets` reports the safe-area insets in physical pixels (`None` on desktop).
     /// `ble` is the worker connected to the ESP32-C3 GPS beacon.
+    /// `export` puts a file where the user can reach it (`None` on desktop,
+    /// where the log is written to a reachable path to begin with).
     pub fn new(
         ctx: egui::Context,
         gps_rx: Option<Receiver<GpsFix>>,
@@ -640,6 +690,7 @@ impl MyApp {
         compass: Option<CompassHandle>,
         insets: Option<Box<dyn Fn() -> [f32; 4]>>,
         ble: BleHandle,
+        export: Option<Saver>,
     ) -> Self {
         // SVG loader for the button icons.
         egui_extras::install_image_loaders(&ctx);
@@ -731,6 +782,17 @@ impl MyApp {
             zoom_tx,
             zoom_rx,
             controls_width: 0.0,
+            logger: Logger::default(),
+            // Replaced below once the config has been loaded, which is what
+            // may name a log file of its own.
+            log_path: String::new(),
+            log_feedback: None,
+            log_x: LogAxis::Time,
+            log_y: LogStat::Distance,
+            log_ref_text: String::new(),
+            log_ref_bad: false,
+            log_hidden: BTreeSet::new(),
+            export,
         };
 
         // Auto-load the default config when present; the Settings page can load
@@ -740,6 +802,12 @@ impl MyApp {
         match AppConfig::load(&startup_path) {
             Ok(cfg) => app.apply_config(cfg),
             Err(_) => app.sync_ble_to_config(),
+        }
+        // After the config, which is where both the path and the auto-start
+        // come from.
+        app.sync_log_to_config();
+        if app.config.log.auto_start {
+            app.start_log();
         }
         app
     }
@@ -752,6 +820,118 @@ impl MyApp {
         self.name_edits.clear();
         self.config = cfg;
         self.sync_ble_to_config();
+        self.sync_log_to_config();
+    }
+
+    // --- CSV logging -------------------------------------------------------
+
+    /// Where a log with no configured path is written: a timestamped file
+    /// beside the config, which is the one directory known to be writable on
+    /// both platforms (on Android the working directory is not).
+    fn default_log_path(&self) -> String {
+        let name = logging::default_log_name(SystemTime::now());
+        match std::path::Path::new(&self.config_path).parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).display().to_string(),
+            _ => name,
+        }
+    }
+
+    /// Seed the log inputs from the config. The path is left alone while a
+    /// recording is running: the file being written to is not something a
+    /// config load should move out from under it.
+    fn sync_log_to_config(&mut self) {
+        if !self.logger.is_recording() {
+            self.log_path = match &self.config.log.file {
+                Some(path) => path.clone(),
+                None => self.default_log_path(),
+            };
+        }
+        self.log_ref_text = match self.config.log.reference() {
+            Some((lat, lon)) => format!("{lat:.5}, {lon:.5}"),
+            None => String::new(),
+        };
+        self.log_ref_bad = false;
+    }
+
+    /// The fixed reference coordinate, when one is configured.
+    fn log_reference(&self) -> Option<Position> {
+        self.config
+            .log
+            .reference()
+            .map(|(lat, lon)| lat_lon(lat, lon))
+    }
+
+    fn start_log(&mut self) {
+        let path = self.log_path.clone();
+        self.log_feedback = match self.logger.start(&path) {
+            Ok(()) => Some(Ok(format!("Recording to {path}"))),
+            Err(e) => Some(Err(e)),
+        };
+    }
+
+    fn stop_log(&mut self) {
+        if !self.logger.is_recording() {
+            return;
+        }
+        self.logger.stop();
+        self.log_feedback = Some(Ok(format!("Stopped after {} rows", self.logger.written())));
+    }
+
+    /// Put a copy of the log where the user can get at it: through the
+    /// platform's export (Android's Downloads) when there is one, otherwise
+    /// straight to a file beside the log, since the desktop path is already
+    /// somewhere reachable.
+    fn export_log(&mut self) {
+        let text = match self.logger.export_text() {
+            Ok(text) => text,
+            Err(e) => {
+                self.log_feedback = Some(Err(e));
+                return;
+            }
+        };
+        let name = logging::default_log_name(SystemTime::now());
+        self.log_feedback = Some(match &self.export {
+            Some(save) => save(&name, &text),
+            None => {
+                let path = match std::path::Path::new(&self.log_path).parent() {
+                    Some(dir) if !dir.as_os_str().is_empty() => dir.join(&name),
+                    _ => PathBuf::from(&name),
+                };
+                std::fs::write(&path, &text)
+                    .map(|()| format!("Copied to {}", path.display()))
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            }
+        });
+    }
+
+    /// Record one report, filling in the columns derived from where we are:
+    /// the control device's own position, and the distances from it and from
+    /// the fixed reference to whatever reported.
+    ///
+    /// Deriving them here rather than at each call site is what keeps a row's
+    /// distance and its signal reading the same instant - the pairing the log
+    /// exists to capture.
+    fn record(&mut self, mut row: LogRow) {
+        if !self.logger.is_recording() {
+            return;
+        }
+        if let Some(user) = self.current {
+            row.user_lat = Some(user.y());
+            row.user_lon = Some(user.x());
+        }
+        if let (Some(lat), Some(lon)) = (row.lat, row.lon) {
+            let pos = lat_lon(lat, lon);
+            // Not for our own fixes: the distance from the control device to
+            // itself is zero, and a zero in that column would read as a source
+            // that had arrived rather than as one the column does not apply to.
+            if row.source != LogSource::Phone {
+                row.dist_user_m = self.current.map(|user| haversine_m(user, pos));
+            }
+            row.dist_ref_m = self.log_reference().map(|r| haversine_m(pos, r));
+        }
+        if let Err(e) = self.logger.push(row) {
+            self.log_feedback = Some(Err(format!("Logging stopped: {e}")));
+        }
     }
 
     /// Push the `[ui]` table into the egui style: the surface and text colors
@@ -1428,6 +1608,15 @@ impl MyApp {
                 time: SystemTime::now(),
             });
         }
+        // Logged on every fix, not only the ones far enough apart to become
+        // track points: the track is a drawn path and wants decimating, the
+        // log is a record and wants the samples.
+        let mut row = LogRow::new(LogSource::Phone, SystemTime::now());
+        row.lat = Some(fix.lat);
+        row.lon = Some(fix.lon);
+        row.course_deg = fix.bearing.map(f64::from);
+        row.fix = Some(true);
+        self.record(row);
     }
 
     /// Pull every pending fix out of the channels, updating the current
@@ -1519,6 +1708,7 @@ impl MyApp {
                             });
                         }
                     }
+                    self.record(packet_row(LogSource::Board, p, SystemTime::now()));
                 }
                 BleEvent::Remote { src, rssi, packet, age_s } => {
                     // Bucket by address so each node keeps its own path.
@@ -1546,6 +1736,12 @@ impl MyApp {
                             });
                         }
                     }
+                    // The row the distance-against-signal plot is made of: a
+                    // node's report carries where it was and how strongly the
+                    // relay heard it, both as of the same moment.
+                    let mut row = packet_row(LogSource::Node(src), packet, at);
+                    row.rssi_dbm = Some(rssi);
+                    self.record(row);
                 }
                 BleEvent::NodePing(ping) => {
                     // A node on the air with no position to give. Its last
@@ -1556,12 +1752,32 @@ impl MyApp {
                     node.rssi = ping.rssi;
                     node.heard = Some(heard_at(ping.age_s));
                     node.no_fix = Some(ping);
+                    // A ping is a range check with no range: the signal is as
+                    // real as a position report's, so the row is worth having
+                    // even with the distance columns empty.
+                    let mut row = LogRow::new(LogSource::Node(ping.src), heard_at(ping.age_s));
+                    row.rssi_dbm = Some(ping.rssi);
+                    row.fix = Some(false);
+                    self.record(row);
                 }
                 BleEvent::Ack(ack) => {
                     self.ble_ack_pending = false;
                     self.ble_ack = Some(ack_message(&ack));
                 }
-                BleEvent::Telemetry(t) => self.telemetry = Some(t),
+                BleEvent::Telemetry(t) => {
+                    self.telemetry = Some(t);
+                    let mut row = LogRow::new(LogSource::Telemetry, SystemTime::now());
+                    row.rssi_dbm = Some(t.last_rssi);
+                    // Centibels in the wire format, decibels in the log: the
+                    // column is what a plot reads, and every other unit there
+                    // is the one it is named in.
+                    row.snr_db = Some(f64::from(t.last_snr_cb) / 100.0);
+                    row.sats = Some(t.sats);
+                    row.rx_count = Some(t.rx_count);
+                    row.tx_count = Some(t.tx_count);
+                    row.secs_since_rx = Some(t.secs_since_rx);
+                    self.record(row);
+                }
                 BleEvent::Log(s) => self.board_log = Some(s),
                 BleEvent::Settings(s) => {
                     // Seed the inputs from the board's own values the first
@@ -1632,6 +1848,7 @@ impl eframe::App for MyApp {
             Page::Beacon => self.beacon_page(&ctx, screen),
             Page::Settings => self.settings_page(&ctx, screen),
             Page::Radio => self.radio_page(&ctx, screen),
+            Page::Logging => self.logging_page(&ctx, screen),
         }
 
         // Every page but the map gets the floating corner toggle; on the map

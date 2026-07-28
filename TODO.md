@@ -123,4 +123,10 @@ While connected but nothing has come off any characteristic for 3 notify
 intervals (min 10 s), the line says "Connected, but nothing from the board for
 X." instead, and is not painted in the all-well color.
 
-Last
+~~Need to make a logging mode, CSV with all stats for graphing. (Logging page with graph?)~~
+A Logging page (`src/logging.rs` + `src/app/ui/logging.rs`) records one CSV row
+per report - phone fix, board fix, node position or ping, telemetry - with the
+distance to you and to a configurable fixed reference filled in on the same row
+as the RSSI. The graph plots any stat against time or against another stat, so
+distance-vs-RSSI is a scatter. Export copies the CSV into the phone's Downloads
+through MediaStore (`src/export.rs`, no dex shim needed).
