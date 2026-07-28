@@ -4,8 +4,8 @@ fixed = "#ff5028"
 # Ring around the position and beacon dots.
 outline = "#ffffff"
 
-# Colors of the pages, not of the map: the places that carry meaning by color,
-# and the two surfaces the rest is drawn on.
+# The pages, not the map: the places that carry meaning by color, the surfaces
+# the rest is drawn on, and how big the text is.
 [ui]
 ok = "#3cb44b"
 error = "#dc503c"
@@ -17,6 +17,9 @@ pulse = "#c82828"
 background = ""
 button = ""
 text = ""
+# Page text size (0.8 - 2.5). The page spacing is measured in text heights, so
+# it follows; the map's icons and overlays keep their own sizes.
+text_scale = 1.0
 
 [ble]
 enabled = true

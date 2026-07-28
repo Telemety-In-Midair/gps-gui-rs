@@ -12,7 +12,9 @@ use midair_proto::{lora, radiocfg};
 
 use crate::app::{secs_text, BleIntent, MyApp, Page, PointFilter, RadioEdit, RegionSelect};
 use crate::ble::ConfigWrite;
-use crate::config::{DistanceUnits, COMPASS_HZ_MAX, COMPASS_HZ_MIN};
+use crate::config::{
+    DistanceUnits, COMPASS_HZ_MAX, COMPASS_HZ_MIN, TEXT_SCALE_MAX, TEXT_SCALE_MIN,
+};
 use crate::gps::GpsFix;
 use crate::points::{age_text, PointSource, TrackPoint};
 use crate::radio::{EditVal, FieldType};
@@ -27,6 +29,15 @@ use super::{
 /// once a central connects, so the WIO has to boot and the GPS has to make a
 /// cold fix before there is anything to report.
 const BOARD_WARMUP: Duration = Duration::from_secs(45);
+
+/// Width of the text-size slider, as a fraction of the screen width, and the
+/// step it moves in.
+///
+/// A fraction of the screen rather than of the text, unlike every other input on
+/// the page: this is the one control whose own text grows while it is dragged,
+/// and a width in text heights would walk out from under the finger setting it.
+const TEXT_SCALE_SLIDER_FRAC: f32 = 0.45;
+const TEXT_SCALE_STEP: f64 = 0.05;
 
 /// Render the type-specific input for an unlocked radio field, bound to `val`.
 /// The kind of widget follows the field's type: a draggable number, a checkbox,
@@ -500,6 +511,42 @@ impl MyApp {
 
                 gap(ui, GAP_ITEM);
                 feedback_label(ui, self.config.ui, &self.config_feedback);
+
+                gap(ui, GAP_SECTION);
+                ui.strong("Text size");
+                gap(ui, GAP_TIGHT);
+                ui.label(
+                    egui::RichText::new(
+                        "Scales the text on every page. The gaps and the input widths are \
+                         measured in text heights, so they grow with it; the map's icons and \
+                         overlays keep their own sizes.",
+                    )
+                    .weak(),
+                );
+                gap(ui, GAP_TIGHT);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().slider_width = screen.width() * TEXT_SCALE_SLIDER_FRAC;
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.config.ui.text_scale,
+                            TEXT_SCALE_MIN..=TEXT_SCALE_MAX,
+                        )
+                        .step_by(TEXT_SCALE_STEP)
+                        .fixed_decimals(2)
+                        .suffix("x"),
+                    );
+                    // Compared with a tolerance of half a step: the slider lands
+                    // on multiples of the step, which need not be exactly 1.0.
+                    let scaled =
+                        (self.config.ui.text_scale - 1.0).abs() > TEXT_SCALE_STEP as f32 / 2.0;
+                    if ui
+                        .add_enabled(scaled, egui::Button::new("Reset"))
+                        .on_hover_text("Back to the default text size")
+                        .clicked()
+                    {
+                        self.config.ui.text_scale = 1.0;
+                    }
+                });
 
                 gap(ui, GAP_SECTION);
                 ui.strong("Marker colors");

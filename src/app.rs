@@ -342,15 +342,17 @@ fn http_options(cache_dir: Option<PathBuf>) -> HttpOptions {
     }
 }
 
-/// What [`MyApp::apply_ui_colors`] last pushed into the egui visuals: the theme
-/// it was built from, and the `[ui]` overrides laid over it. Compared whole, so
-/// the style is rewritten when any one of them moves and at no other time.
+/// What [`MyApp::apply_ui_style`] last pushed into the egui style: the theme the
+/// visuals were built from, the `[ui]` overrides laid over it, and the text
+/// scale. Compared whole, so the style is rewritten when any one of them moves
+/// and at no other time.
 #[derive(Clone, Copy, PartialEq)]
-struct AppliedColors {
+struct AppliedStyle {
     theme: egui::Theme,
     background: Option<egui::Color32>,
     button: Option<egui::Color32>,
     text: Option<egui::Color32>,
+    text_scale: f32,
 }
 
 /// A remote LoRa node relayed over BLE by the connected board, keyed in
@@ -500,9 +502,9 @@ pub struct MyApp {
     menu_from: Page,
     /// Loaded configuration (marker colors, BLE settings).
     config: AppConfig,
-    /// What was last pushed into the egui visuals, so
-    /// [`MyApp::apply_ui_colors`] only writes the style when something moved.
-    colors_applied: Option<AppliedColors>,
+    /// What was last pushed into the egui style, so [`MyApp::apply_ui_style`]
+    /// only writes it when something moved.
+    style_applied: Option<AppliedStyle>,
     /// The config-file path typed on the Settings page.
     config_path: String,
     /// Result of the last load/save: `Ok` message (green) or error (red).
@@ -638,7 +640,7 @@ impl MyApp {
             page: Page::Map,
             menu_from: Page::Map,
             config: AppConfig::default(),
-            colors_applied: None,
+            style_applied: None,
             // The path the auto-load below tries, so Save writes back to the
             // same file without the user having to type it.
             config_path: default_config_path(cache_dir.as_deref()),
@@ -686,29 +688,43 @@ impl MyApp {
         self.sync_ble_to_config();
     }
 
-    /// Push the config's surface and text colors (`[ui] background`, `button`
-    /// and `text`) into the egui visuals for the active theme.
+    /// Push the `[ui]` table into the egui style: the surface and text colors
+    /// (`background`, `button` and `text`) into the visuals for the active
+    /// theme, and `text_scale` into the text styles.
     ///
-    /// Each application starts from `Theme::default_visuals` rather than editing
-    /// what is already there, so clearing an override restores the theme without
-    /// the app keeping a copy of it - and so does switching theme, which is why
-    /// the theme is part of what is compared below.
+    /// Each application starts from `Theme::default_visuals` and
+    /// `default_text_styles` rather than editing what is already there, so
+    /// clearing an override restores the theme without the app keeping a copy of
+    /// it, and a scale is applied to the base sizes rather than compounding on
+    /// the last scaled ones. Switching theme restores the visuals the same way,
+    /// which is why the theme is part of what is compared below.
     ///
     /// Only run when something changed: writing the style clones it, and a map
     /// that repaints continuously would pay for that every frame.
-    fn apply_ui_colors(&mut self, ctx: &egui::Context) {
+    fn apply_ui_style(&mut self, ctx: &egui::Context) {
         let colors = self.config.ui;
         let theme = ctx.theme();
-        let wanted = AppliedColors {
+        let wanted = AppliedStyle {
             theme,
             background: colors.background,
             button: colors.button,
             text: colors.text,
+            text_scale: colors.text_scale,
         };
-        if self.colors_applied == Some(wanted) {
+        if self.style_applied == Some(wanted) {
             return;
         }
-        self.colors_applied = Some(wanted);
+        self.style_applied = Some(wanted);
+
+        // Text size first, and for both themes: the sizes are the same either
+        // way, so switching theme has nothing to redo here.
+        let scale = colors.text_scale;
+        ctx.all_styles_mut(|style| {
+            style.text_styles = egui::style::default_text_styles()
+                .into_iter()
+                .map(|(name, font)| (name, egui::FontId::new(font.size * scale, font.family)))
+                .collect();
+        });
 
         let mut visuals = theme.default_visuals();
         if let Some(c) = colors.background {
@@ -1522,9 +1538,9 @@ impl eframe::App for MyApp {
         self.sync_compass_power();
 
         let ctx = ui.ctx().clone();
-        // Before anything is drawn: the pages read these colors out of the
-        // visuals rather than being handed them.
-        self.apply_ui_colors(&ctx);
+        // Before anything is drawn: the pages read these colors and text sizes
+        // out of the style rather than being handed them.
+        self.apply_ui_style(&ctx);
         let screen = ctx.input(|i| i.viewport_rect());
 
         match self.page {

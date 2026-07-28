@@ -9,7 +9,7 @@ mod map;
 mod pages;
 
 use crate::app::{MyApp, Page};
-use crate::config::UiColors;
+use crate::config::UiSettings;
 
 /// Icon side length as a fraction of the smaller screen dimension, clamped to
 /// this point range. Keeps the toolbar proportional across phone and desktop.
@@ -210,7 +210,11 @@ fn floating(
 /// color on `Err`, and nothing on `None`. Used for the config-load and BLE-ack
 /// feedback. The colors come from the config, so a theme carries through the
 /// pages as well as the map.
-fn feedback_label(ui: &mut egui::Ui, colors: UiColors, feedback: &Option<Result<String, String>>) {
+fn feedback_label(
+    ui: &mut egui::Ui,
+    colors: UiSettings,
+    feedback: &Option<Result<String, String>>,
+) {
     match feedback {
         Some(Ok(msg)) => {
             ui.colored_label(colors.ok, msg);
@@ -224,7 +228,7 @@ fn feedback_label(ui: &mut egui::Ui, colors: UiColors, feedback: &Option<Result<
 
 /// A labeled boolean status row: the label followed by an ok-colored "yes" or
 /// an error-colored "no", for the Status page's health indicators.
-fn status_bool(ui: &mut egui::Ui, colors: UiColors, label: &str, ok: bool) {
+fn status_bool(ui: &mut egui::Ui, colors: UiSettings, label: &str, ok: bool) {
     ui.horizontal(|ui| {
         ui.label(format!("{label}:"));
         let (text, color) = if ok {

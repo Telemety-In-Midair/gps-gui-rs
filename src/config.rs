@@ -14,13 +14,14 @@
 //! fixed = "#ff5028"   # BLE beacon marker, distance line, beacon path
 //! outline = "#ffffff" # ring around the position and beacon dots
 //!
-//! [ui]                # colors of the pages, not of the map
+//! [ui]                # the pages rather than the map: their colors and text
 //! ok = "#3cb44b"      # "yes" and the green feedback lines
 //! error = "#dc503c"   # "no", errors, and the red feedback lines
 //! pulse = "#c82828"   # a toolbar button flagging that it has no target
 //! background = ""     # pages, map bar and popups; empty follows the theme
 //! button = ""         # a button at rest; empty follows the theme
 //! text = ""           # body text and the toolbar glyphs; empty follows the theme
+//! text_scale = 1.0    # multiplier on the page text; 1.0 is the default size
 //!
 //! [sizes]             # screen points; each overlay is sized independently
 //! marker = 8.0        # current-position dot radius
@@ -108,17 +109,17 @@ pub fn remote_color(addr: u8) -> Color32 {
     REMOTE_PALETTE[addr as usize % REMOTE_PALETTE.len()]
 }
 
-/// Colors of the pages rather than the map: the feedback and status lines, the
-/// pulse on a toolbar button that has nothing to act on, and the surfaces and
-/// text everything else is drawn with.
+/// The pages rather than the map: the feedback and status lines, the pulse on a
+/// toolbar button that has nothing to act on, the surfaces and text everything
+/// else is drawn with, and how big that text is.
 ///
-/// The first three carry meaning by color and so are always set. The last three
-/// are overrides of the light/dark theme and default to `None`, which leaves the
-/// theme's own. They are independent, so setting only one of them is a way to
-/// end up with text that cannot be read on its background - the theme is what
-/// keeps them in step, and an override is a promise to do that by hand.
+/// The first three colors carry meaning by color and so are always set. The
+/// next three are overrides of the light/dark theme and default to `None`, which
+/// leaves the theme's own. They are independent, so setting only one of them is
+/// a way to end up with text that cannot be read on its background - the theme
+/// is what keeps them in step, and an override is a promise to do that by hand.
 #[derive(Clone, Copy)]
-pub struct UiColors {
+pub struct UiSettings {
     /// "yes" on the Status page, and the `Ok` feedback lines.
     pub ok: Color32,
     /// "no" on the Status page, error text, and the `Err` feedback lines.
@@ -134,9 +135,17 @@ pub struct UiColors {
     /// Body text, and with it the toolbar glyphs and the weak and strong
     /// shades derived from it. `None` keeps the theme's own.
     pub text: Option<Color32>,
+    /// Multiplier on every text style, for reading the pages at arm's length or
+    /// on a dense phone screen. `1.0` is egui's own sizes.
+    ///
+    /// It carries the page layout with it: the gaps and input widths are
+    /// measured in text heights, so they grow with the text rather than leaving
+    /// larger glyphs in the same cramped rows. The map's icons and overlays keep
+    /// their own sizes - a touch target and a marker dot are not text.
+    pub text_scale: f32,
 }
 
-impl Default for UiColors {
+impl Default for UiSettings {
     fn default() -> Self {
         Self {
             ok: Color32::from_rgb(60, 180, 75),
@@ -145,6 +154,7 @@ impl Default for UiColors {
             background: None,
             button: None,
             text: None,
+            text_scale: 1.0,
         }
     }
 }
@@ -427,7 +437,7 @@ impl Default for CompassSettings {
 #[derive(Clone, Default)]
 pub struct AppConfig {
     pub colors: MarkerColors,
-    pub ui: UiColors,
+    pub ui: UiSettings,
     pub sizes: MarkerSizes,
     pub distance: DistanceSettings,
     pub ble: BleSettings,
@@ -473,6 +483,7 @@ struct RawUi {
     background: Option<String>,
     button: Option<String>,
     text: Option<String>,
+    text_scale: Option<f32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -655,6 +666,13 @@ fn set_lora_names(doc: &mut DocumentMut, names: &BTreeMap<u8, String>) {
 pub const COMPASS_HZ_MIN: f32 = 0.5;
 pub const COMPASS_HZ_MAX: f32 = 30.0;
 
+/// Range the page text scale is accepted (and edited) in. Below 1.0 is there to
+/// walk an overshoot back rather than to shrink the text far; the ceiling is
+/// about where a phone page holds a few words to the line and the buttons stop
+/// fitting their labels.
+pub const TEXT_SCALE_MIN: f32 = 0.8;
+pub const TEXT_SCALE_MAX: f32 = 2.5;
+
 /// Validate an overlay size: finite and strictly positive.
 fn parse_size(name: &str, v: f32) -> Result<f32, String> {
     if !v.is_finite() || v <= 0.0 {
@@ -706,6 +724,7 @@ impl AppConfig {
         );
         set(&mut doc, "ui", "button", hex_opt(self.ui.button).into());
         set(&mut doc, "ui", "text", hex_opt(self.ui.text).into());
+        set(&mut doc, "ui", "text_scale", f32_value(self.ui.text_scale));
         set(&mut doc, "sizes", "marker", f32_value(self.sizes.marker));
         set(&mut doc, "sizes", "beacon", f32_value(self.sizes.beacon));
         set(&mut doc, "sizes", "track", f32_value(self.sizes.track));
@@ -799,7 +818,7 @@ impl AppConfig {
              fixed = \"{fixed}\"   # BLE beacon marker, distance line, beacon path\n\
              outline = \"{outline}\" # ring around the position and beacon dots\n\
              \n\
-             [ui]                 # colors of the pages, not of the map\n\
+             [ui]                 # the pages, not the map: their colors and text\n\
              ok = \"{ok}\"      # \"yes\" and the green feedback lines\n\
              error = \"{error}\"   # \"no\", errors, and the red feedback lines\n\
              pulse = \"{pulse}\"   # a toolbar button flagging that it has no target\n\
@@ -808,6 +827,7 @@ impl AppConfig {
              background = \"{background}\"      # behind the pages, the map bar and the popups\n\
              button = \"{button}\"          # a button at rest; hover and press are shaded from it\n\
              text = \"{text}\"            # body text; weak and strong are shaded from it\n\
+             text_scale = {text_scale:?}      # page text size ({scale_min} - {scale_max}); the page spacing follows it\n\
              \n\
              [sizes]              # screen points; each overlay is sized independently\n\
              marker = {marker:?}          # current-position dot radius\n\
@@ -851,6 +871,9 @@ impl AppConfig {
             background = hex_opt(self.ui.background),
             button = hex_opt(self.ui.button),
             text = hex_opt(self.ui.text),
+            text_scale = self.ui.text_scale,
+            scale_min = TEXT_SCALE_MIN,
+            scale_max = TEXT_SCALE_MAX,
             marker = s.marker,
             beacon = s.beacon,
             track_w = s.track,
@@ -901,6 +924,14 @@ impl AppConfig {
         }
         if let Some(s) = raw.ui.text {
             config.ui.text = parse_hex_opt(&s)?;
+        }
+        if let Some(v) = raw.ui.text_scale {
+            if !v.is_finite() || !(TEXT_SCALE_MIN..=TEXT_SCALE_MAX).contains(&v) {
+                return Err(format!(
+                    "ui.text_scale must be between {TEXT_SCALE_MIN} and {TEXT_SCALE_MAX}, got {v}"
+                ));
+            }
+            config.ui.text_scale = v;
         }
         if let Some(v) = raw.sizes.marker {
             config.sizes.marker = parse_size("marker", v)?;
@@ -1025,6 +1056,7 @@ mod tests {
         assert_eq!(back.ui.ok, cfg.ui.ok);
         assert_eq!(back.ui.error, cfg.ui.error);
         assert_eq!(back.ui.pulse, cfg.ui.pulse);
+        assert_eq!(back.ui.text_scale, cfg.ui.text_scale);
         assert_eq!(back.sizes.distance_text, cfg.sizes.distance_text);
         assert_eq!(back.distance.units, cfg.distance.units);
         assert_eq!(back.track.min_distance, cfg.track.min_distance);
@@ -1204,6 +1236,21 @@ mod tests {
         assert_eq!(back.ui.background, None);
         assert_eq!(back.ui.text, None);
         assert_eq!(back.ui.button, Some(Color32::from_rgb(32, 32, 32)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn text_scale_is_range_checked_and_saved() {
+        assert!(AppConfig::from_toml("[ui]\ntext_scale = 0.1").is_err());
+        assert!(AppConfig::from_toml("[ui]\ntext_scale = 10.0").is_err());
+        let cfg = AppConfig::from_toml("[ui]\ntext_scale = 1.5").unwrap();
+        assert_eq!(cfg.ui.text_scale, 1.5);
+
+        let path = std::env::temp_dir().join("gps-gui-rs-config-text-scale-test.toml");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(cfg.save(path).unwrap());
+        assert_eq!(AppConfig::load(path).unwrap().ui.text_scale, 1.5);
         let _ = std::fs::remove_file(path);
     }
 

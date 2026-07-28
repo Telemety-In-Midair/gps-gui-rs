@@ -102,7 +102,7 @@ Constants at the top of `mod.rs` (`ICON_SIZE_*`, `BUTTON_PAD_*_FRAC`,
 `TOGGLE_PAD_FRAC`, `CORNER_MARGIN_FRAC`, `PAGE_MARGIN_FRAC`, `GAP_*`,
 `FIELD_*_EM`) are the tuning knobs for sizing. The colors that carry meaning are
 not among them: `feedback_label`, `status_bool` and `icon_button_pulse` take a
-`config::UiColors` from the `[ui]` table, so a theme reaches the pages and not
+`config::UiSettings` from the `[ui]` table, so a theme reaches the pages and not
 just the map.
 
 ## Sizing: nothing is a fixed pixel count
@@ -126,6 +126,14 @@ page holds its proportions on a phone and on a desktop:
 The one deliberate exception is `ICON_SIZE_MIN` / `ICON_SIZE_MAX`, which clamp
 the icon in absolute points: it is a touch target, and a fingertip is the same
 size whatever the screen is.
+
+Because the pages are measured in text units, one setting resizes them:
+`[ui] text_scale` multiplies every entry of `Style::text_styles`, so `em(ui)`
+grows and the gaps and input widths grow with it - larger text is not larger
+glyphs in the same cramped rows. What it does not touch is anything measured off
+the screen or the icon: the toolbar, the menu page's buttons (sized to the icon,
+text included, so a scaled label would not fit them) and the map overlays, whose
+sizes are `[sizes]` and are set separately.
 
 ## Pages and navigation
 
@@ -282,10 +290,10 @@ straight to the live `AppConfig` on `MyApp`, so a change shows on the map at
 once; the file is only touched by the buttons.
 
 **The split with the Beacon page is by who owns the setting**, not by subject.
-Settings holds what the app owns and can save: the config file itself, the
-marker colors and overlay sizes, what the map draws (including the beacon path
-and the distance read-out), the compass rate behind the marker arrow, track
-recording, and the offline-map download.
+Settings holds what the app owns and can save: the config file itself, the text
+size of the pages, the marker colors and overlay sizes, what the map draws
+(including the beacon path and the distance read-out), the compass rate behind
+the marker arrow, track recording, and the offline-map download.
 Everything the *board* owns, plus the link that reaches it, is on the Beacon
 page below. The beacon-related app settings (`[ble] enabled`, `mac` and the
 `[ble.names]` nicknames) live there anyway, because they decide how the link is
@@ -309,15 +317,23 @@ sending you back here for it, writing the same file and sharing the same
   `outline` ring around both dots); `[ui]` is the pages: `ok`, `error` and the
   `pulse` on a toolbar button with no target, where the color *is* the message,
   plus `background`, `button` and `text` - the surfaces and the text everything
-  else is drawn with.
+  else is drawn with - and `text_scale`, how big that text is.
 - **Those three are theme overrides, and empty means "don't".**
   `Option<Color32>`, written as `""` when unset so the key stays in the file.
-  `MyApp::apply_ui_colors` pushes them into the visuals before any page is
+  `MyApp::apply_ui_style` pushes them into the visuals before any page is
   drawn: it starts from `Theme::default_visuals` every time rather than editing
   what is there, so clearing an override (or switching theme) restores the theme
-  without the app holding a copy of it. It runs only when the theme or one of
-  the colors moved - writing the style clones it, and the map repaints
-  continuously.
+  without the app holding a copy of it. It runs only when the theme, one of the
+  colors or the text scale moved - writing the style clones it, and the map
+  repaints continuously.
+- **Text size is the fourth key in `[ui]`.** `text_scale` (0.8 - 2.5, edited by
+  the slider under "Text size") is applied by the same function, rebuilding
+  `text_styles` from `egui::style::default_text_styles()` scaled - from the base
+  sizes every time, so dragging the slider never compounds on the last scale.
+  Both themes get it at once, the sizes being the same either way. The slider's
+  own width is a fraction of the *screen*, the one input on the page not measured
+  in text: it is the control whose text grows as it is dragged, and an em-based
+  width would walk out from under the finger setting it.
 - **One color, several states.** `button` fills `inactive`, `hovered`, `active`
   and `open`, the last three blended toward the text color: lighter than the
   button in a dark theme, darker in a light one, so one setting yields three
