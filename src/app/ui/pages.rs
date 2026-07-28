@@ -316,23 +316,25 @@ impl MyApp {
 
                 // Remote nodes heard over LoRa and relayed by the connected
                 // board, each with its last position and the signal it came in
-                // at. Collected first so the config lookup below is free of the
-                // borrow on `remotes`.
-                let heard: Vec<(u8, Position, i16)> = self
+                // at. A node with no position is listed too, with why it has
+                // none: a node searching for the sky is a node that is up, and
+                // leaving it out makes it indistinguishable from one that is
+                // out of range or dead. Collected first so the config lookup
+                // below is free of the borrow on `remotes`.
+                let heard: Vec<(u8, String, i16)> = self
                     .remotes
                     .iter()
-                    .filter_map(|(&addr, n)| n.pos.map(|p| (addr, p, n.rssi)))
+                    .filter(|(_, n)| n.pos.is_some() || n.heard.is_some())
+                    .map(|(&addr, n)| (addr, n.state_text(), n.rssi))
                     .collect();
                 if !heard.is_empty() {
                     gap(ui, GAP_SECTION);
                     ui.strong("Remote nodes");
-                    for (addr, p, rssi) in heard {
+                    for (addr, state, rssi) in heard {
                         ui.label(
                             egui::RichText::new(format!(
-                                "{}: {:.5}, {:.5}  (rssi {rssi})",
+                                "{}: {state}  (rssi {rssi})",
                                 self.config.lora.label_of(addr),
-                                p.y(),
-                                p.x()
                             ))
                             .monospace(),
                         );

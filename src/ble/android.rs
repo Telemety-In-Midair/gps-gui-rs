@@ -23,8 +23,8 @@ use midair_proto::ble;
 use midair_proto::link::Telemetry;
 
 use super::{
-    radio_config_event, remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush,
-    ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
+    node_ping_event, radio_config_event, remote_event, settings_event, BleCommand, BleEvent,
+    BleHandle, ConfigPush, ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
 };
 
 /// The compiled dex with rs.gps.gui.BleBridge (see android/build-dex.sh).
@@ -475,6 +475,7 @@ fn session(
         ble::SETTINGS_UUID,
         ble::RADIO_CONFIG_UUID,
         ble::REMOTE_UUID,
+        ble::NODE_PING_UUID,
     ] {
         if bridge.set_notify(packet::SERVICE_UUID, chr, true) {
             let _ = wait_for(cb_rx, Duration::from_secs(5), |cb| {
@@ -584,6 +585,10 @@ fn session(
                     report.send(BleEvent::Log(String::from_utf8_lossy(&value).into_owned()));
                 } else if uuid.eq_ignore_ascii_case(ble::REMOTE_UUID) {
                     if let Some(e) = remote_event(&value) {
+                        report.send(e);
+                    }
+                } else if uuid.eq_ignore_ascii_case(ble::NODE_PING_UUID) {
+                    if let Some(e) = node_ping_event(&value) {
                         report.send(e);
                     }
                 } else if uuid.eq_ignore_ascii_case(ble::SETTINGS_UUID) {

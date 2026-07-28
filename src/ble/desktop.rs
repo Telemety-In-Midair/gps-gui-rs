@@ -20,8 +20,8 @@ use midair_proto::link::Telemetry;
 use uuid::Uuid;
 
 use super::{
-    radio_config_event, remote_event, settings_event, BleCommand, BleEvent, BleHandle, ConfigPush,
-    ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
+    node_ping_event, radio_config_event, remote_event, settings_event, BleCommand, BleEvent,
+    BleHandle, ConfigPush, ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
 };
 
 const SERVICE_UUID: Uuid = Uuid::from_u128(packet::SERVICE_UUID_U128);
@@ -41,6 +41,9 @@ const RADIO_CONFIG_UUID: Uuid = Uuid::from_u128(ble::RADIO_CONFIG_UUID_U128);
 // position here, tagged with the node's address. Absent on the esp32c3 beacon,
 // so optional like the other board-status characteristics.
 const REMOTE_UUID: Uuid = Uuid::from_u128(ble::REMOTE_UUID_U128);
+// The same for a node that is up but has no fix to report. Newer than the
+// remote-position characteristic, so a board may serve one without the other.
+const NODE_PING_UUID: Uuid = Uuid::from_u128(ble::NODE_PING_UUID_U128);
 // Bulk-transfer characteristic (radio TOML config), esp32c6-gps only.
 const BULK_UUID: Uuid = Uuid::from_u128(ble::BULK_UUID_U128);
 
@@ -404,6 +407,10 @@ async fn connected(
         .iter()
         .find(|c| c.uuid == REMOTE_UUID && c.properties.contains(CharPropFlags::NOTIFY))
         .cloned();
+    let node_ping = chars
+        .iter()
+        .find(|c| c.uuid == NODE_PING_UUID && c.properties.contains(CharPropFlags::NOTIFY))
+        .cloned();
     let bulk = chars.iter().find(|c| c.uuid == BULK_UUID).cloned();
 
     peripheral
@@ -421,6 +428,9 @@ async fn connected(
         let _ = peripheral.subscribe(c).await;
     }
     if let Some(c) = &remote {
+        let _ = peripheral.subscribe(c).await;
+    }
+    if let Some(c) = &node_ping {
         let _ = peripheral.subscribe(c).await;
     }
     // Subscribe before the read below, so a change the board makes between the
@@ -571,6 +581,10 @@ async fn connected(
                     report.send(BleEvent::Log(String::from_utf8_lossy(&n.value).into_owned()));
                 } else if n.uuid == REMOTE_UUID {
                     if let Some(e) = remote_event(&n.value) {
+                        report.send(e);
+                    }
+                } else if n.uuid == NODE_PING_UUID {
+                    if let Some(e) = node_ping_event(&n.value) {
                         report.send(e);
                     }
                 } else if n.uuid == SETTINGS_UUID {

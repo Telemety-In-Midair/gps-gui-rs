@@ -13,7 +13,9 @@ use walkers::{
     Projector,
 };
 
-use crate::ble::{BleCommand, BleEvent, BleHandle, ConfigWrite, RadioConfig, Settings, Telemetry};
+use crate::ble::{
+    BleCommand, BleEvent, BleHandle, ConfigWrite, NodePing, RadioConfig, Settings, Telemetry,
+};
 use crate::compass::{self, CompassHandle};
 use crate::config::{normalize_mac, AppConfig};
 use crate::gps::GpsFix;
@@ -218,6 +220,17 @@ const TRACK_ZOOM_MAX: f64 = 19.0;
 /// Whether `pos` is far enough from the last recorded track point to append it.
 /// Always true for the first point; otherwise the move must be at least
 /// `min_distance_m`, so a track is decimated to points that far apart.
+/// When a report the board aged by `age_s` was actually heard.
+///
+/// A live report is aged 0 and lands on now; one replayed on connect lands
+/// where it belongs in the past, so a node heard ten minutes ago does not
+/// enter the track as if it had just reported.
+fn heard_at(age_s: u16) -> SystemTime {
+    SystemTime::now()
+        .checked_sub(Duration::from_secs(age_s.into()))
+        .unwrap_or_else(SystemTime::now)
+}
+
 fn far_enough(last: Option<&Position>, pos: Position, min_distance_m: f64) -> bool {
     match last {
         None => true,
@@ -372,6 +385,16 @@ struct RemoteNode {
     rssi: i16,
     /// Every recorded position, for the path drawing and the points list.
     track: Vec<TrackPoint>,
+    /// When the board last heard from this node at all, position or ping.
+    /// Separate from `time`, which only moves when a position arrives: a node
+    /// that has lost its fix is still on the air, and the two answer
+    /// different questions.
+    heard: Option<SystemTime>,
+    /// The node's last ping, set while its newest report says it has no fix
+    /// and cleared by its next position. `Some` on a node that also has a
+    /// position means the position is the last one it managed before losing
+    /// the fix.
+    no_fix: Option<NodePing>,
 }
 
 impl RemoteNode {
@@ -385,6 +408,49 @@ impl RemoteNode {
     /// When [`Self::last_pos`] was recorded, for the marker popup's age line.
     fn last_time(&self) -> Option<SystemTime> {
         self.time.or_else(|| self.track.last().map(|t| t.time))
+    }
+
+    /// One line describing where this node is, or why it cannot say.
+    ///
+    /// A node without a position is still worth a line: what a ping reports
+    /// is whether to look at the sky or at the board, since a silent module
+    /// is usually an unpowered rail rather than a receiver that cannot see
+    /// satellites.
+    fn state_text(&self) -> String {
+        match (self.last_pos(), self.no_fix) {
+            (Some(p), None) => format!("{:.5}, {:.5}", p.y(), p.x()),
+            (Some(p), Some(ping)) => {
+                format!("{:.5}, {:.5} (fix lost, {})", p.y(), p.x(), ping_reason(ping))
+            }
+            (None, Some(ping)) => format!("no fix ({})", ping_reason(ping)),
+            (None, None) => "heard, no position yet".to_string(),
+        }
+    }
+}
+
+/// What a ping says about why the node has no position.
+fn ping_reason(ping: NodePing) -> String {
+    if !ping.gps_present {
+        // Not a receiver that cannot find the sky: the module is not talking
+        // at all, which is a power or wiring answer.
+        "gps silent".to_string()
+    } else if ping.had_fix {
+        format!("searching, up {}", uptime_text(ping.uptime_s))
+    } else {
+        format!("no fix since boot, up {}", uptime_text(ping.uptime_s))
+    }
+}
+
+/// A node's uptime in the units it reads best in.
+///
+/// Not [`secs_text`], which renders 0 as "off" - right for a sleep interval,
+/// nonsense for a node that has just booted, which is exactly when an uptime
+/// is worth reading.
+fn uptime_text(secs: u16) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3599 => format!("{} min", secs / 60),
+        _ => format!("{} h", secs / 3600),
     }
 }
 
@@ -865,6 +931,9 @@ impl MyApp {
             node.pos = None;
             node.time = None;
             node.packet = PositionPacket::default();
+            // Both describe what the old relay could hear, not the node.
+            node.heard = None;
+            node.no_fix = None;
         }
         self.board_settings = None;
         self.settings_unsupported = false;
@@ -1451,30 +1520,42 @@ impl MyApp {
                         }
                     }
                 }
-                BleEvent::Remote { src, rssi, packet } => {
-                    // Bucket by address so each node keeps its own path, even
-                    // though the board relays only one remote slot at a time.
+                BleEvent::Remote { src, rssi, packet, age_s } => {
+                    // Bucket by address so each node keeps its own path.
                     let min_distance = self.config.track.min_distance;
+                    // The board notifies once per report and says how long ago
+                    // it heard it, so every event is a report that happened -
+                    // a repeated position means a stationary node, not the
+                    // relay resending its cache. Distance is what decides
+                    // whether it becomes a track point, as for our own fixes.
+                    let at = heard_at(age_s);
                     let node = self.remotes.entry(src).or_default();
-                    // The board re-notifies that one slot every interval, so the
-                    // same packet arrives repeatedly. Only a changed one counts
-                    // as a new report, so the "updated ago" time and the path
-                    // reflect real movement rather than the relay's cadence.
-                    let fresh = node.pos.is_none() || node.packet != packet;
                     node.rssi = rssi;
-                    if fresh && packet.has_fix() {
+                    node.heard = Some(at);
+                    node.no_fix = None;
+                    if packet.has_fix() {
                         node.packet = packet;
                         let pos = lat_lon(packet.lat_deg(), packet.lon_deg());
                         node.pos = Some(pos);
-                        node.time = Some(SystemTime::now());
+                        node.time = Some(at);
                         if far_enough(node.track.last().map(|t| &t.pos), pos, min_distance) {
                             node.track.push(TrackPoint {
                                 pos,
                                 source: PointSource::Remote(src),
-                                time: SystemTime::now(),
+                                time: at,
                             });
                         }
                     }
+                }
+                BleEvent::NodePing(ping) => {
+                    // A node on the air with no position to give. Its last
+                    // known position stays on the map - it is still the last
+                    // place the node was - but the node is now flagged as
+                    // having no fix, so the marker is not read as current.
+                    let node = self.remotes.entry(ping.src).or_default();
+                    node.rssi = ping.rssi;
+                    node.heard = Some(heard_at(ping.age_s));
+                    node.no_fix = Some(ping);
                 }
                 BleEvent::Ack(ack) => {
                     self.ble_ack_pending = false;

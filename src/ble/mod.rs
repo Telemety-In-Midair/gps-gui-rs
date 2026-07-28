@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use gps_proto::packet::{self, Ack};
-use midair_proto::{ble, link};
+use midair_proto::{ble, link, lora};
 pub use gps_proto::packet::PositionPacket;
 pub use midair_proto::ble::Settings;
 pub use midair_proto::link::Telemetry;
@@ -54,11 +54,22 @@ pub enum BleEvent {
     /// read off the remote characteristic. `src` is the originating LoRa
     /// address (1-255); the UI keeps a separate track per address. `rssi` is
     /// the LoRa signal the relay heard it at.
+    ///
+    /// One event per report the board heard, so a repeated position means the
+    /// node is stationary rather than that the board resent its cache.
+    /// `age_s` is how long before the notification the board heard it: 0 for a
+    /// live report, higher for one replayed on connect.
     Remote {
         src: u8,
         rssi: i16,
         packet: PositionPacket,
+        age_s: u16,
     },
+    /// A remote node reporting that it is on the air without a fix. Delivered
+    /// like [`BleEvent::Remote`] and carrying the same `age_s`, but there is
+    /// no position in it - which is the point: a node searching for the sky is
+    /// otherwise indistinguishable from one out of range or dead.
+    NodePing(NodePing),
     /// A config ack: the device confirmed (or rejected) a setting.
     Ack(Ack),
     /// Board telemetry (LoRa link, GPS, SD) from the esp32c6-gps board.
@@ -84,6 +95,29 @@ pub enum BleEvent {
     /// A [`BleCommand::PushConfig`] finished: the board applied and stored the
     /// config, or why it did not.
     ConfigPushed(Result<String, String>),
+}
+
+/// A node heard over LoRa with no position to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodePing {
+    /// Originating LoRa address (1-255).
+    pub src: u8,
+    /// LoRa signal the relay heard it at, in dBm. A ping carries this as
+    /// usefully as a position does, which is what makes one a range check.
+    pub rssi: i16,
+    /// Seconds since the node booted, saturating at 18 h. Against an earlier
+    /// ping it also shows a node that rebooted.
+    pub uptime_s: u16,
+    /// The node's GPS module is producing NMEA. Clear means a silent module -
+    /// usually an unpowered rail or wiring, not a receiver that cannot see
+    /// the sky.
+    pub gps_present: bool,
+    /// The node held a fix at some point since it booted, so this is a fix
+    /// lost rather than one never acquired.
+    pub had_fix: bool,
+    /// How long before the notification the board heard it; see
+    /// [`BleEvent::Remote`].
+    pub age_s: u16,
 }
 
 /// UI -> worker.
@@ -281,13 +315,19 @@ fn radio_config_event(bytes: &[u8]) -> Option<BleEvent> {
     })
 }
 
-/// Decode a remote-position blob (`[src u8, rssi i16le, PositionPacket]`) from
-/// the remote characteristic into a [`BleEvent::Remote`]. `None` for a short
-/// blob, an undecodable packet, or `src` 0 - the board notifies the remote
-/// slot with a zero source when nothing has been heard yet, and 0 is the local
-/// GPS in any case, delivered on the position characteristic instead.
+/// Decode a remote-position blob (`[src u8, rssi i16le, PositionPacket,
+/// age_s u16le]`) from the remote characteristic into a [`BleEvent::Remote`].
+/// `None` for a short blob, an undecodable packet, or `src` 0 - the board
+/// seeds the characteristic with a zero source until it has heard a node, and
+/// 0 is the local GPS in any case, delivered on the position characteristic
+/// instead.
+///
+/// The age field is only read when the blob is long enough to hold it, so a
+/// board running firmware from before it existed still reports positions -
+/// as ages of zero, which is what that firmware effectively claimed by
+/// notifying its cache on a timer.
 fn remote_event(bytes: &[u8]) -> Option<BleEvent> {
-    if bytes.len() < midair_proto::ble::REMOTE_LEN {
+    if bytes.len() < ble::REMOTE_LEN {
         return None;
     }
     let src = bytes[0];
@@ -296,7 +336,40 @@ fn remote_event(bytes: &[u8]) -> Option<BleEvent> {
     }
     let rssi = i16::from_le_bytes([bytes[1], bytes[2]]);
     let packet = PositionPacket::decode(&bytes[3..])?;
-    Some(BleEvent::Remote { src, rssi, packet })
+    Some(BleEvent::Remote { src, rssi, packet, age_s: age_of(bytes, ble::REMOTE_AGE_OFF) })
+}
+
+/// Decode a node-ping blob (`[src u8, rssi i16le, flags u8, uptime_s u16le,
+/// age_s u16le]`) into a [`BleEvent::NodePing`]. `None` for a short blob or
+/// `src` 0, as with a remote position.
+///
+/// Flag bits this build does not know are ignored rather than rejected, so a
+/// node running newer firmware is still reported as alive.
+fn node_ping_event(bytes: &[u8]) -> Option<BleEvent> {
+    if bytes.len() < ble::NODE_PING_LEN {
+        return None;
+    }
+    let src = bytes[0];
+    if src == 0 {
+        return None;
+    }
+    Some(BleEvent::NodePing(NodePing {
+        src,
+        rssi: i16::from_le_bytes([bytes[1], bytes[2]]),
+        uptime_s: u16::from_le_bytes([bytes[4], bytes[5]]),
+        gps_present: bytes[3] & lora::PING_FLAG_GPS_PRESENT != 0,
+        had_fix: bytes[3] & lora::PING_FLAG_HAD_FIX != 0,
+        age_s: age_of(bytes, ble::NODE_PING_AGE_OFF),
+    }))
+}
+
+/// The age field at `off`, or 0 when the board's blob is too short to carry
+/// one.
+fn age_of(bytes: &[u8], off: usize) -> u16 {
+    match bytes.get(off..off + 2) {
+        Some(b) => u16::from_le_bytes([b[0], b[1]]),
+        None => 0,
+    }
 }
 
 /// The UI's handle to the BLE worker.
@@ -369,16 +442,18 @@ mod tests {
             sats: 6,
             ..PositionPacket::default()
         };
-        let mut blob = [0u8; ble::REMOTE_LEN];
+        let mut blob = [0u8; ble::REMOTE_LEN_V2];
         blob[0] = 7; // src address
         blob[1..3].copy_from_slice(&(-92i16).to_le_bytes());
-        blob[3..].copy_from_slice(&packet.encode());
+        blob[3..ble::REMOTE_LEN].copy_from_slice(&packet.encode());
+        blob[ble::REMOTE_AGE_OFF..].copy_from_slice(&41u16.to_le_bytes());
 
         match remote_event(&blob) {
-            Some(BleEvent::Remote { src, rssi, packet: p }) => {
+            Some(BleEvent::Remote { src, rssi, packet: p, age_s }) => {
                 assert_eq!(src, 7);
                 assert_eq!(rssi, -92);
                 assert_eq!(p, packet);
+                assert_eq!(age_s, 41);
             }
             _ => panic!("expected a remote event"),
         }
@@ -388,6 +463,69 @@ mod tests {
         assert!(remote_event(&blob).is_none());
         // A short blob decodes to nothing rather than panicking.
         assert!(remote_event(&blob[..ble::REMOTE_LEN - 1]).is_none());
+    }
+
+    /// A board running firmware from before the age field still reports
+    /// positions, rather than every node vanishing on a firmware mismatch.
+    #[test]
+    fn remote_event_reads_a_board_without_the_age_field() {
+        use gps_proto::packet::{PositionPacket, FLAG_FIX};
+
+        let packet = PositionPacket {
+            lat_e7: 481_173_000,
+            lon_e7: -1_226_760_000,
+            flags: FLAG_FIX,
+            ..PositionPacket::default()
+        };
+        let mut blob = [0u8; ble::REMOTE_LEN];
+        blob[0] = 7;
+        blob[3..].copy_from_slice(&packet.encode());
+
+        match remote_event(&blob) {
+            Some(BleEvent::Remote { src, packet: p, age_s, .. }) => {
+                assert_eq!(src, 7);
+                assert_eq!(p, packet);
+                assert_eq!(age_s, 0);
+            }
+            _ => panic!("expected a remote event"),
+        }
+    }
+
+    #[test]
+    fn node_ping_event_carries_the_flags_and_rejects_local() {
+        let mut blob = [0u8; ble::NODE_PING_LEN];
+        blob[0] = 3; // src address
+        blob[1..3].copy_from_slice(&(-97i16).to_le_bytes());
+        blob[3] = lora::PING_FLAG_GPS_PRESENT;
+        blob[4..6].copy_from_slice(&214u16.to_le_bytes());
+        blob[ble::NODE_PING_AGE_OFF..].copy_from_slice(&5u16.to_le_bytes());
+
+        match node_ping_event(&blob) {
+            Some(BleEvent::NodePing(p)) => {
+                assert_eq!(p.src, 3);
+                assert_eq!(p.rssi, -97);
+                assert_eq!(p.uptime_s, 214);
+                assert!(p.gps_present);
+                assert!(!p.had_fix);
+                assert_eq!(p.age_s, 5);
+            }
+            _ => panic!("expected a node ping event"),
+        }
+
+        // Both flags travel independently, and a bit this build does not
+        // know is ignored rather than making the node disappear.
+        blob[3] = lora::PING_FLAG_HAD_FIX | 0x80;
+        match node_ping_event(&blob) {
+            Some(BleEvent::NodePing(p)) => {
+                assert!(!p.gps_present);
+                assert!(p.had_fix);
+            }
+            _ => panic!("expected a node ping event"),
+        }
+
+        blob[0] = 0;
+        assert!(node_ping_event(&blob).is_none());
+        assert!(node_ping_event(&blob[..ble::NODE_PING_LEN - 1]).is_none());
     }
 
     /// Walk a two-chunk push through its whole life: OP_BEGIN framing, chunk

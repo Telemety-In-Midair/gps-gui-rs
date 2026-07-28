@@ -8,7 +8,9 @@ use egui::emath::Rot2;
 use egui::{epaint::TextShape, Pos2, Shape};
 use walkers::{lat_lon, Map, Position, Projector, Tiles};
 
-use crate::app::{ease_heading, MarkerKind, MyApp, RegionSelect, ARROW_TAU, ROTATE_TAU};
+use crate::app::{
+    ease_heading, ping_reason, MarkerKind, MyApp, RegionSelect, ARROW_TAU, ROTATE_TAU,
+};
 use crate::config::remote_color;
 use crate::marker::{GpsLayer, RemoteDraw};
 use crate::offline;
@@ -774,11 +776,18 @@ impl MyApp {
         }
 
         let Some(kind) = self.selected_marker else { return };
+        // A remote node also carries whether it is currently without a fix,
+        // and when it was last heard at all. Without that, a marker left at
+        // the last position a node managed reads as its current one.
+        let mut no_fix = None;
         let (pos, time) = match kind {
             MarkerKind::You => (self.current, self.current_time),
             MarkerKind::Beacon => (self.beacon, self.beacon_time),
             MarkerKind::Remote(addr) => match self.remotes.get(&addr) {
-                Some(node) => (node.last_pos(), node.last_time()),
+                Some(node) => {
+                    no_fix = node.no_fix.map(|ping| (ping, node.heard));
+                    (node.last_pos(), node.last_time())
+                }
                 None => (None, None),
             },
         };
@@ -796,6 +805,16 @@ impl MyApp {
             Some(t) => format!("Updated {} ago", age_text(now, t)),
             None => "No update yet".to_string(),
         };
+        // The node is still on the air, just without a position: say so, and
+        // say when it last spoke, so the marker above is read as where it was
+        // rather than where it is.
+        let no_fix = no_fix.map(|(ping, heard)| {
+            let when = match heard {
+                Some(t) => format!(", heard {} ago", age_text(now, t)),
+                None => String::new(),
+            };
+            format!("No fix now: {}{when}", ping_reason(ping))
+        });
 
         floating(
             ctx,
@@ -808,6 +827,9 @@ impl MyApp {
             |ui| {
                 ui.label(egui::RichText::new(&label).strong());
                 ui.label(age);
+                if let Some(note) = &no_fix {
+                    ui.label(note);
+                }
             },
         );
         // Keep the elapsed-time text live even without new fixes.
