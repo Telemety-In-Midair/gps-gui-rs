@@ -4,8 +4,12 @@
 //! a reconnect loop: scan (filtered by the GPS service UUID, or pinned to a
 //! MAC), connect, subscribe to position + ack notifications, then pump
 //! notifications and commands until something breaks, and start over.
+//!
+//! Every step that can block is wrapped in [`while_wanted`], so a press does
+//! not have to wait out a connect attempt that may sit for tens of seconds.
 
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::future::Future;
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 use btleplug::api::{
@@ -13,6 +17,7 @@ use btleplug::api::{
     WriteType,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
+use futures::future::Either;
 use futures::StreamExt;
 use gps_proto::packet::{self, PositionPacket};
 use midair_proto::ble;
@@ -20,8 +25,9 @@ use midair_proto::link::Telemetry;
 use uuid::Uuid;
 
 use super::{
-    node_ping_event, radio_config_event, remote_event, settings_event, BleCommand, BleEvent,
-    BleHandle, ConfigPush, ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
+    node_ping_event, radio_config_event, remote_event, settings_event, Aborted, BleEvent,
+    BleHandle, BleRequest, DiscoveredDevice, Ended, Inbox, Interrupt, PushStep, Reporter, Target,
+    Wanted, CMD_POLL, PUSH_ACK_TIMEOUT,
 };
 
 const SERVICE_UUID: Uuid = Uuid::from_u128(packet::SERVICE_UUID_U128);
@@ -52,18 +58,18 @@ pub fn spawn(ctx: egui::Context) -> BleHandle {
     let (cmd_tx, cmd_rx) = channel();
 
     std::thread::spawn(move || {
+        let report = Reporter::new(ctx, event_tx);
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         {
             Ok(rt) => rt,
             Err(e) => {
-                let _ = event_tx.send(BleEvent::Status(format!("tokio runtime failed: {e}")));
-                ctx.request_repaint();
+                report.status(format!("tokio runtime failed: {e}"));
                 return;
             }
         };
-        rt.block_on(worker(ctx, event_tx, cmd_rx));
+        rt.block_on(worker(&report, cmd_rx));
     });
 
     BleHandle {
@@ -72,86 +78,28 @@ pub fn spawn(ctx: egui::Context) -> BleHandle {
     }
 }
 
-/// Sends an event and wakes the UI so it drains the channel promptly.
-struct Reporter {
-    ctx: egui::Context,
-    tx: Sender<BleEvent>,
-}
-
-impl Reporter {
-    fn send(&self, event: BleEvent) -> bool {
-        let ok = self.tx.send(event).is_ok();
-        self.ctx.request_repaint();
-        ok
-    }
-
-    fn status(&self, s: impl Into<String>) -> bool {
-        self.send(BleEvent::Status(s.into()))
-    }
-}
-
-/// What the UI currently wants from us. `connect` and `scan` are mutually
-/// exclusive: a discovery scan has no link, and a connected session does not
-/// scan.
-struct Wanted {
-    connect: bool,
-    /// Run a discovery scan for the device picker; see [`BleCommand::Scan`].
-    scan: bool,
-    mac: Option<String>,
-    /// The board may be asleep; see [`BleCommand::Connect`]. This transport
-    /// always finds its device by scanning, so chasing changes nothing about
-    /// how it connects - only what it tells the user it is waiting for.
-    chase: bool,
-}
-
-/// Drain pending commands. Config writes are queued into `writes` so a
-/// request made while connected is applied in the pump loop (requests made
-/// while disconnected are applied right after the next subscribe). A config
-/// push lands in `push` and is started by the pump loop the same way.
-fn drain_commands(
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
-) -> Result<(), ()> {
+/// Await `op` while still servicing commands, and give up on it the moment the
+/// session is stopped or superseded. The operation is dropped where it stands,
+/// which is the point: a btleplug connect can sit for tens of seconds, and a
+/// Disconnect that waits it out is a delay, not a disconnect.
+async fn while_wanted<T>(
+    op: impl Future<Output = T>,
+    report: &Reporter,
+    inbox: &mut Inbox<'_>,
+    target: &Target,
+) -> Result<T, Aborted> {
+    futures::pin_mut!(op);
     loop {
-        match cmd_rx.try_recv() {
-            Ok(BleCommand::Connect { mac, chase }) => {
-                wanted.connect = true;
-                wanted.scan = false;
-                wanted.mac = mac;
-                wanted.chase = chase;
-            }
-            Ok(BleCommand::Scan) => {
-                wanted.connect = false;
-                wanted.scan = true;
-            }
-            Ok(BleCommand::Disconnect) => {
-                wanted.connect = false;
-                wanted.scan = false;
-            }
-            Ok(BleCommand::Config(w)) => writes.push(w),
-            Ok(BleCommand::PushConfig(data)) => *push = Some(ConfigPush::new(data)),
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => return Err(()),
+        let tick = tokio::time::sleep(CMD_POLL);
+        futures::pin_mut!(tick);
+        match futures::future::select(op.as_mut(), tick).await {
+            Either::Left((out, _)) => return Ok(out),
+            Either::Right(_) => inbox.check(report, target)?,
         }
     }
 }
 
-/// Fail any queued or in-flight config push. Called whenever the session it
-/// rode on ends (or cannot start), so the Radio page is never left waiting on
-/// a transfer that no longer exists.
-fn fail_push(push: &mut Option<ConfigPush>, report: &Reporter) {
-    if push.take().is_some() {
-        report.send(BleEvent::ConfigPushed(Err(
-            "disconnected before the transfer finished".to_string(),
-        )));
-    }
-}
-
-async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCommand>) {
-    let report = Reporter { ctx, tx };
-
+async fn worker(report: &Reporter, cmd_rx: Receiver<BleRequest>) {
     let manager = match Manager::new().await {
         Ok(m) => m,
         Err(e) => {
@@ -160,24 +108,25 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
         }
     };
 
-    let mut wanted = Wanted {
-        connect: false,
-        scan: false,
-        mac: None,
-        chase: false,
+    let mut wanted = Wanted::idle();
+    let mut writes = Vec::new();
+    let mut push = None;
+    let mut inbox = Inbox {
+        rx: &cmd_rx,
+        wanted: &mut wanted,
+        writes: &mut writes,
+        push: &mut push,
     };
-    let mut writes: Vec<ConfigWrite> = Vec::new();
-    let mut push: Option<ConfigPush> = None;
 
     loop {
-        if drain_commands(&cmd_rx, &mut wanted, &mut writes, &mut push).is_err() {
+        if inbox.drain(report).is_err() {
             return; // UI has gone away.
         }
-        if !wanted.connect && !wanted.scan {
+        if !inbox.wanted.connect && !inbox.wanted.scan {
             // A push cannot go anywhere without a link; fail it rather than
             // hold the Radio page in "sending" until some later connect.
-            fail_push(&mut push, &report);
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            inbox.fail_push(report);
+            tokio::time::sleep(CMD_POLL).await;
             continue;
         }
 
@@ -190,17 +139,8 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
             }
         };
 
-        if wanted.scan {
-            if let Err(e) = discover(
-                &adapter,
-                &report,
-                &cmd_rx,
-                &mut wanted,
-                &mut writes,
-                &mut push,
-            )
-            .await
-            {
+        if inbox.wanted.scan {
+            if let Err(e) = discover(&adapter, report, &mut inbox).await {
                 report.status(format!("{e}; retrying"));
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -208,18 +148,11 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
         }
 
         // One connect attempt; on any failure fall through, wait, retry.
-        match session(
-            &adapter,
-            &report,
-            &cmd_rx,
-            &mut wanted,
-            &mut writes,
-            &mut push,
-        )
-        .await
-        {
-            Ok(()) => {} // clean disconnect requested by the UI
-            Err(e) => {
+        match session(&adapter, report, &mut inbox).await {
+            // Stopped or superseded by the UI: whatever it wants now is
+            // served on the next pass, with no retry pause in between.
+            Ok(()) | Err(Ended::Quietly) => {}
+            Err(Ended::Failed(e)) => {
                 report.send(BleEvent::Connected(false));
                 report.status(format!("{e}; retrying"));
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -228,7 +161,7 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
         // A push does not survive its session: half a transfer is dropped by
         // the board, and silently restarting one on reconnect would resend a
         // config the user asked for once.
-        fail_push(&mut push, &report);
+        inbox.fail_push(report);
     }
 }
 
@@ -243,10 +176,7 @@ async fn worker(ctx: egui::Context, tx: Sender<BleEvent>, cmd_rx: Receiver<BleCo
 async fn discover(
     adapter: &Adapter,
     report: &Reporter,
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
+    inbox: &mut Inbox<'_>,
 ) -> Result<(), String> {
     report.status("scanning for boards...");
     adapter
@@ -257,7 +187,7 @@ async fn discover(
         .map_err(|e| format!("scan failed: {e}"))?;
 
     let result = loop {
-        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.scan {
+        if inbox.drain(report).is_err() || !inbox.wanted.scan {
             break Ok(());
         }
         let peripherals = match adapter.peripherals().await {
@@ -289,17 +219,15 @@ async fn discover(
 
 /// Scan for the beacon, connect, run one connected session, then always
 /// disconnect so the next reconnect starts from clean device state.
-async fn session(
-    adapter: &Adapter,
-    report: &Reporter,
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
-) -> Result<(), String> {
-    let session_mac = wanted.mac.clone();
+///
+/// The board this is for is fixed at the start ([`Wanted::target`]) rather
+/// than read live: a press that changes it ends this session instead of
+/// quietly redirecting it, so the connect, the subscribes and the state the UI
+/// is shown all belong to one board.
+async fn session(adapter: &Adapter, report: &Reporter, inbox: &mut Inbox<'_>) -> Result<(), Ended> {
+    let target = inbox.wanted.target();
 
-    report.status(if wanted.chase {
+    report.status(if target.chase {
         "waiting for a wake window..."
     } else {
         "scanning for GPS beacon..."
@@ -315,11 +243,11 @@ async fn session(
     // Poll discovered peripherals until one matches (by MAC when pinned,
     // otherwise by advertised service or name).
     let peripheral = loop {
-        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
+        if inbox.check(report, &target).is_err() {
             let _ = adapter.stop_scan().await;
-            return Ok(());
+            return Err(Ended::Quietly);
         }
-        if let Some(p) = find_match(adapter, wanted.mac.as_deref()).await {
+        if let Some(p) = find_match(adapter, target.mac.as_deref()).await {
             break p;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -337,43 +265,31 @@ async fn session(
 
     // Run the connected session, then unconditionally disconnect. bluez does
     // not tear the link down for us on error, and a lingering half-open device
-    // is exactly what blocks the next reconnect.
-    let result = connected(
-        &peripheral,
-        report,
-        cmd_rx,
-        wanted,
-        &session_mac,
-        writes,
-        push,
-    )
-    .await;
+    // is exactly what blocks the next reconnect. That includes a session cut
+    // short mid-connect: the attempt we dropped may still land.
+    let result = connected(&peripheral, report, inbox, &target).await;
     let _ = peripheral.disconnect().await;
     report.send(BleEvent::Connected(false));
     result
 }
 
 /// Connect to `peripheral`, subscribe, and pump notifications until the UI
-/// disconnects (`Ok`) or the link fails (`Err`). The caller disconnects the
-/// peripheral afterward regardless of the outcome.
+/// stops wanting this session ([`Ended::Quietly`]) or the link fails
+/// ([`Ended::Failed`]). The caller disconnects the peripheral afterward
+/// regardless of the outcome.
 async fn connected(
     peripheral: &Peripheral,
     report: &Reporter,
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    session_mac: &Option<String>,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
-) -> Result<(), String> {
+    inbox: &mut Inbox<'_>,
+    target: &Target,
+) -> Result<(), Ended> {
     let addr = peripheral.address();
     report.status(format!("connecting to {addr}..."));
-    peripheral
-        .connect()
-        .await
+    while_wanted(peripheral.connect(), report, inbox, target)
+        .await?
         .map_err(|e| format!("connect failed: {e}"))?;
-    peripheral
-        .discover_services()
-        .await
+    while_wanted(peripheral.discover_services(), report, inbox, target)
+        .await?
         .map_err(|e| format!("discovery failed: {e}"))?;
 
     let chars = peripheral.characteristics();
@@ -447,6 +363,9 @@ async fn connected(
         .await
         .map_err(|e| format!("notification stream failed: {e}"))?;
 
+    // A press during the subscribes above wins: the UI is never told about a
+    // link it has already asked to be rid of.
+    inbox.check(report, target)?;
     report.send(BleEvent::Connected(true));
     report.status(format!("connected to {addr}"));
 
@@ -479,7 +398,7 @@ async fn connected(
     let mut push_deadline = Instant::now();
     loop {
         // Apply queued config writes.
-        for w in writes.drain(..) {
+        for w in inbox.writes.drain(..) {
             let (buf, n) = w.encode();
             if let Err(e) = peripheral
                 .write(&config, &buf[..n], WriteType::WithResponse)
@@ -490,7 +409,7 @@ async fn connected(
         }
 
         // Start a queued config push, and give up on one whose ack never came.
-        if let Some(p) = push.as_mut() {
+        if let Some(p) = inbox.push.as_mut() {
             if let Some(frame) = p.start() {
                 match &bulk {
                     Some(c) => {
@@ -499,21 +418,21 @@ async fn connected(
                             .write(c, &frame, WriteType::WithResponse)
                             .await
                         {
-                            *push = None;
+                            *inbox.push = None;
                             report.send(BleEvent::ConfigPushed(Err(format!(
                                 "bulk write failed: {e}"
                             ))));
                         }
                     }
                     None => {
-                        *push = None;
+                        *inbox.push = None;
                         report.send(BleEvent::ConfigPushed(Err(
                             "this board has no bulk-transfer characteristic".to_string(),
                         )));
                     }
                 }
             } else if Instant::now() >= push_deadline {
-                *push = None;
+                *inbox.push = None;
                 // Best effort: free the board's transfer state for a retry.
                 if let Some(c) = &bulk {
                     let _ = peripheral
@@ -538,7 +457,7 @@ async fn connected(
                         if a.id == ble::ACK_ID_BULK {
                             // A bulk ack paces the running push; it is not a
                             // setting ack, so it never reaches the Beacon page.
-                            if let Some(p) = push.as_mut() {
+                            if let Some(p) = inbox.push.as_mut() {
                                 push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
                                 match p.on_ack(&a) {
                                     PushStep::Write(frame) => {
@@ -549,7 +468,7 @@ async fn connected(
                                                 .write(c, &frame, WriteType::WithResponse)
                                                 .await
                                             {
-                                                *push = None;
+                                                *inbox.push = None;
                                                 report.send(BleEvent::ConfigPushed(Err(
                                                     format!("bulk write failed: {e}"),
                                                 )));
@@ -557,14 +476,14 @@ async fn connected(
                                         }
                                     }
                                     PushStep::Done => {
-                                        *push = None;
+                                        *inbox.push = None;
                                         report.send(BleEvent::ConfigPushed(Ok(
                                             "Config sent. The board applied and stored it."
                                                 .to_string(),
                                         )));
                                     }
                                     PushStep::Fail(e) => {
-                                        *push = None;
+                                        *inbox.push = None;
                                         report.send(BleEvent::ConfigPushed(Err(e)));
                                     }
                                 }
@@ -609,13 +528,21 @@ async fn connected(
             }
         }
 
-        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
-            report.status("disconnected");
-            return Ok(());
+        if inbox.drain(report).is_err() {
+            return Err(Ended::Quietly);
         }
-        if wanted.mac != *session_mac {
-            // The UI pinned a different device (e.g. a config reload).
-            return Err("switching device".into());
+        // Neither is a failure, so neither costs the retry pause: the caller
+        // drops the link and the worker serves the new request straight away.
+        match inbox.wanted.interrupt(target) {
+            Some(Interrupt::Stopped) => {
+                report.status("disconnected");
+                return Err(Ended::Quietly);
+            }
+            Some(Interrupt::Superseded) => {
+                report.status("starting over");
+                return Err(Ended::Quietly);
+            }
+            None => {}
         }
     }
 }

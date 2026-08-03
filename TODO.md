@@ -17,7 +17,10 @@ Compass now runs in every mode: full rate for heading-up, `compass.arrow_hz`
 (default 4) for the marker arrow in north-up and tracking. `compass.marker_arrow`
 turns the latter off.
 
-Should be a force reconnect from scratch button.
+~~Should be a force reconnect from scratch button.~~
+Connect stays live while connected and reads "Reconnect": every press now bumps
+the request epoch, which ends the running session wherever it had got to and
+starts over from a scan.
 
 More statuses in the app.
 
@@ -33,7 +36,11 @@ App needs to read the stats over usb from ESP as well.
 
 Have receiver mode to get info.
 
-Disconnect button or toggle (Must force disconnect).
+~~Disconnect button or toggle (Must force disconnect).~~
+Disconnect takes effect on the press: the worker drops the attempt mid-connect
+rather than after it, the link state and everything the board reported are
+cleared there and then, and the old session's remaining events are fenced out
+by epoch instead of landing on the next board.
 
 Need to configure advertising window.
 

@@ -454,6 +454,35 @@ holds these in flash and is the authority on them.
   only the strings shown while connected quote `adv_window_s`, and the ones
   shown while trying to connect describe the window without a number, because
   at that point the app has no live value to quote.
+- **Every press is forceful, and the epoch is what makes it so.** `MyApp`
+  numbers its requests (`ble_epoch`, `ble::Epoch`); the number goes out on the
+  `BleRequest` and comes back on every `BleUpdate`. The worker compares what it
+  is being asked for now against the `ble::Target` its session started with
+  (`Wanted::interrupt`) at every step that could stop, so a press ends the
+  running session rather than being noticed once it finishes; the UI drops
+  events older than its current epoch, so the tail of that session cannot land
+  on the pages as if it described the new board. Epoch 0 is the worker speaking
+  before any request reached it (no adapter, no Bluetooth) and is never fenced.
+  This is what fixes "Disconnect, then connect to a different board, and it
+  connects to the first one anyway": the session was reading its target once
+  and the waits inside it serviced no commands at all.
+- **Set-intent resets, it does not request a reset.** `set_ble_intent` drops
+  `ble_connected`, `connected_at`, `board_heard` and everything in
+  `forget_board_state` on the press, without waiting for the worker to confirm.
+  Waiting would leave the pages showing a board the user has already let go of.
+  It is also why Connect stays enabled while connected: pressing it is a real
+  request (start over from a scan), and the only way out of a link that is up
+  but has stopped working. The button reads "Reconnect" then.
+- **Steps that block still service commands.** Desktop wraps its long GATT
+  calls in `while_wanted` (drops the operation the moment the session is
+  superseded); Android's `wait_cb` polls its callback channel and the command
+  channel together, and `ensure_permissions` gives up if the UI stops asking
+  while the dialog is up. Both transports then tear the link down
+  unconditionally on the way out, because a connect walked away from can still
+  land.
+- **Queued config writes belong to a board, not to the app.** `Inbox::drain`
+  throws them away on a Disconnect, a scan, or a change of MAC; only a repeat
+  connect to the same board keeps them.
 - **The link is three explicit buttons, not a toggle** (`ble_link_ui`,
   `MyApp::ble_intent`). Connect / Connect to sleeping / Disconnect map one to
   one onto `BleIntent::{Connect, ConnectSleeping, Idle}`, and each button sends

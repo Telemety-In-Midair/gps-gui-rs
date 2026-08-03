@@ -973,19 +973,27 @@ impl MyApp {
     /// genuinely different - one of them (Disconnect) is the only way to let
     /// the board sleep, and that was impossible to express when connecting was
     /// a checkbox the app re-applied on its own.
+    ///
+    /// Every one of them takes effect on the press. Connect stays live while
+    /// connected because pressing it then is a real request - start over from
+    /// a scan - and it is the way out of a link that is up but not working.
     fn ble_link_ui(&mut self, ui: &mut egui::Ui) {
         let connected = self.ble_connected;
         let idle = self.ble_intent == BleIntent::Idle;
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(!connected, egui::Button::new("Connect"))
-                .on_hover_text("Go straight to the selected board, or scan when it is set to any")
+                .button(if connected { "Reconnect" } else { "Connect" })
+                .on_hover_text(if connected {
+                    "Drop this link and start over from a scan, on the selected board"
+                } else {
+                    "Go straight to the selected board, or scan when it is set to any"
+                })
                 .clicked()
             {
                 self.set_ble_intent(BleIntent::Connect);
             }
             if ui
-                .add_enabled(!connected, egui::Button::new("Connect to sleeping"))
+                .button("Connect to sleeping")
                 .on_hover_text(
                     "Scan without stopping. A sleeping board advertises for only a window per wake, a plain connect can miss.",
                 )
@@ -995,7 +1003,9 @@ impl MyApp {
             }
             if ui
                 .add_enabled(!idle, egui::Button::new("Disconnect"))
-                .on_hover_text("Drop the link and stop trying, so the board can sleep")
+                .on_hover_text(
+                    "Drop the link now, forget what the board reported, and stop trying so it can sleep",
+                )
                 .clicked()
             {
                 self.set_ble_intent(BleIntent::Idle);

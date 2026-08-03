@@ -8,7 +8,8 @@
 //!
 //! The wire protocol lives in the shared gps-proto crate.
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::cell::Cell;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use gps_proto::packet::{self, Ack};
@@ -36,6 +37,33 @@ pub struct DiscoveredDevice {
     pub address: String,
     pub name: Option<String>,
     pub rssi: Option<i16>,
+}
+
+/// Which UI request a command or an event belongs to.
+///
+/// The UI bumps this on every press, so the worker can tell the request it is
+/// already serving from a fresh press for the same thing - the difference
+/// between ignoring a button and starting over. It rides back out on every
+/// event, which is what lets the UI drop the tail of a session it has moved
+/// on from: a fix from the board just disconnected from must not land on the
+/// map as the newly selected board's.
+///
+/// Epoch 0 is "no request yet": whatever the worker says before it has drained
+/// a single command (no adapter, no Bluetooth) carries it, and the UI never
+/// fences that out.
+pub type Epoch = u64;
+
+/// UI -> worker: one request, tagged with the press it came from.
+pub struct BleRequest {
+    pub epoch: Epoch,
+    pub command: BleCommand,
+}
+
+/// Worker -> UI: one event, tagged with the request the worker was serving
+/// when it sent it.
+pub struct BleUpdate {
+    pub epoch: Epoch,
+    pub event: BleEvent,
 }
 
 /// Worker -> UI.
@@ -120,7 +148,10 @@ pub struct NodePing {
     pub age_s: u16,
 }
 
-/// UI -> worker.
+/// UI -> worker. Every command arrives inside a [`BleRequest`], and a request
+/// newer than the one a session started for ends that session at the next step
+/// it can - including a repeat of the command already running, which is what
+/// makes a second press mean "start over" rather than nothing.
 pub enum BleCommand {
     /// Start (or restart) connecting. `mac` pins a specific device; `None`
     /// scans for the first device advertising the GPS service.
@@ -151,6 +182,10 @@ pub enum BleCommand {
     /// [`BleEvent::ConfigPushed`].
     PushConfig(Vec<u8>),
     /// Drop the connection and stay idle until the next `Connect`.
+    ///
+    /// Forceful: it does not wait for the step in progress, and it takes the
+    /// queued config writes with it. Whatever was half-done was aimed at a
+    /// board the user has stopped asking for.
     Disconnect,
 }
 
@@ -197,6 +232,227 @@ impl ConfigWrite {
 /// quiet is dead, not slow.
 const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How often a step that would otherwise block comes up for air to service
+/// commands. Short enough that a press feels like it landed on the press.
+const CMD_POLL: Duration = Duration::from_millis(100);
+
+/// Sends events to the UI and wakes it so it drains the channel promptly.
+///
+/// Also the worker's record of which request it is serving: every event is
+/// tagged with that epoch on the way out (see [`Epoch`]), and the UI throws
+/// away anything older than what it last asked for.
+pub(crate) struct Reporter {
+    ctx: egui::Context,
+    tx: Sender<BleUpdate>,
+    epoch: Cell<Epoch>,
+}
+
+impl Reporter {
+    pub(crate) fn new(ctx: egui::Context, tx: Sender<BleUpdate>) -> Self {
+        Self {
+            ctx,
+            tx,
+            epoch: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn send(&self, event: BleEvent) {
+        let _ = self.tx.send(BleUpdate {
+            epoch: self.epoch.get(),
+            event,
+        });
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn status(&self, s: impl Into<String>) {
+        self.send(BleEvent::Status(s.into()));
+    }
+}
+
+/// What the UI currently wants from the worker. `connect` and `scan` are
+/// mutually exclusive: a discovery scan has no link, and a connected session
+/// does not scan.
+pub(crate) struct Wanted {
+    /// The request the rest of this came from; see [`Epoch`].
+    epoch: Epoch,
+    pub(crate) connect: bool,
+    /// Run a discovery scan for the device picker; see [`BleCommand::Scan`].
+    pub(crate) scan: bool,
+    pub(crate) mac: Option<String>,
+    /// The board may be asleep; see [`BleCommand::Connect`].
+    pub(crate) chase: bool,
+}
+
+/// The request one connect session is serving. Taken when the session starts
+/// and compared against [`Wanted`] at every step it could stop at, so a
+/// session survives exactly the presses that did not change what was asked
+/// for - and no others.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Target {
+    epoch: Epoch,
+    pub(crate) mac: Option<String>,
+    pub(crate) chase: bool,
+}
+
+/// Why a running session has to end before it otherwise would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Interrupt {
+    /// Disconnect, or a discovery scan: stop, and do not retry.
+    Stopped,
+    /// A newer request replaces this one - a different board, a different
+    /// chase mode, or the same board asked for again, which means start over
+    /// rather than carry on.
+    Superseded,
+}
+
+impl Wanted {
+    /// Nothing wanted, which is how a worker starts: the UI has to ask.
+    pub(crate) fn idle() -> Self {
+        Self {
+            epoch: 0,
+            connect: false,
+            scan: false,
+            mac: None,
+            chase: false,
+        }
+    }
+
+    /// What a session started now would be serving.
+    pub(crate) fn target(&self) -> Target {
+        Target {
+            epoch: self.epoch,
+            mac: self.mac.clone(),
+            chase: self.chase,
+        }
+    }
+
+    /// Whether the session started for `target` may still run.
+    pub(crate) fn interrupt(&self, target: &Target) -> Option<Interrupt> {
+        if !self.connect {
+            return Some(Interrupt::Stopped);
+        }
+        (self.target() != *target).then_some(Interrupt::Superseded)
+    }
+}
+
+/// The UI has gone away, so there is nothing left to serve.
+pub(crate) struct Gone;
+
+/// A step gave up because the UI asked for something else (or went away).
+/// Sessions unwind on it without an error: nothing failed and there is nothing
+/// to retry - the worker's next pass serves whatever is wanted now.
+pub(crate) struct Aborted;
+
+/// How a connect session ended.
+pub(crate) enum Ended {
+    /// It stopped because the UI said so. The worker just carries on.
+    Quietly,
+    /// Something broke; the worker reports it and retries after a pause.
+    Failed(String),
+}
+
+impl From<Aborted> for Ended {
+    fn from(_: Aborted) -> Self {
+        Ended::Quietly
+    }
+}
+
+impl From<String> for Ended {
+    fn from(e: String) -> Self {
+        Ended::Failed(e)
+    }
+}
+
+impl From<&str> for Ended {
+    fn from(e: &str) -> Self {
+        Ended::Failed(e.to_string())
+    }
+}
+
+/// The UI's side of the worker: the command channel and everything a command
+/// changes. Bundled because every step that can block has to keep servicing it
+/// - a Disconnect that only lands once a 20 s connect attempt has finished is
+/// not a disconnect, it is a delay - and because both transports then share
+/// one implementation of what each command means.
+pub(crate) struct Inbox<'a> {
+    pub(crate) rx: &'a Receiver<BleRequest>,
+    pub(crate) wanted: &'a mut Wanted,
+    /// Config writes waiting for a link.
+    pub(crate) writes: &'a mut Vec<ConfigWrite>,
+    /// The radio-config push riding the current session, if any.
+    pub(crate) push: &'a mut Option<ConfigPush>,
+}
+
+impl Inbox<'_> {
+    /// Apply every pending command. Config writes are queued into `writes` so
+    /// a request made while connected is applied by the pump loop; a config
+    /// push lands in `push` and is started there the same way.
+    ///
+    /// Anything the link was carrying for a board we are no longer talking to
+    /// is dropped here rather than replayed at the next board: a queued write
+    /// was aimed at the board that was selected when it was made.
+    pub(crate) fn drain(&mut self, report: &Reporter) -> Result<(), Gone> {
+        loop {
+            let request = match self.rx.try_recv() {
+                Ok(request) => request,
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => return Err(Gone),
+            };
+            // A command from a request already replaced by a later one. The UI
+            // sends in order, so this only catches a straggler queued behind a
+            // press that overtook it.
+            if request.epoch < self.wanted.epoch {
+                continue;
+            }
+            match request.command {
+                BleCommand::Connect { mac, chase } => {
+                    if mac != self.wanted.mac {
+                        self.writes.clear();
+                    }
+                    self.wanted.connect = true;
+                    self.wanted.scan = false;
+                    self.wanted.mac = mac;
+                    self.wanted.chase = chase;
+                }
+                BleCommand::Scan => {
+                    self.wanted.connect = false;
+                    self.wanted.scan = true;
+                    self.writes.clear();
+                }
+                BleCommand::Disconnect => {
+                    self.wanted.connect = false;
+                    self.wanted.scan = false;
+                    self.writes.clear();
+                }
+                BleCommand::Config(w) => self.writes.push(w),
+                BleCommand::PushConfig(data) => *self.push = Some(ConfigPush::new(data)),
+            }
+            self.wanted.epoch = request.epoch;
+            report.epoch.set(request.epoch);
+        }
+    }
+
+    /// Drain, then say whether the session serving `target` may continue.
+    pub(crate) fn check(&mut self, report: &Reporter, target: &Target) -> Result<(), Aborted> {
+        self.drain(report).map_err(|Gone| Aborted)?;
+        match self.wanted.interrupt(target) {
+            Some(_) => Err(Aborted),
+            None => Ok(()),
+        }
+    }
+
+    /// Fail any queued or in-flight config push. Called whenever the session
+    /// it rode on ends (or cannot start), so the Radio page is never left
+    /// waiting on a transfer that no longer exists.
+    pub(crate) fn fail_push(&mut self, report: &Reporter) {
+        if self.push.take().is_some() {
+            report.send(BleEvent::ConfigPushed(Err(
+                "disconnected before the transfer finished".to_string(),
+            )));
+        }
+    }
+}
+
 /// One radio-config push through the board's bulk characteristic, advanced one
 /// ack at a time: OP_BEGIN opens the transfer, each OP_DATA carries one chunk,
 /// and OP_END has the WIO verify and apply the file. The board forwards every
@@ -204,7 +460,10 @@ const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`ble::ACK_ID_BULK`] on the ack characteristic), so the next op is only
 /// sent once the previous ack
 /// is in - pacing by ack is what keeps this from overrunning that link.
-struct ConfigPush {
+///
+/// Visible to the crate only because [`Inbox`] holds one; nothing outside
+/// this module builds or steps a push.
+pub(crate) struct ConfigPush {
     data: Vec<u8>,
     /// Byte offset of the next OP_DATA chunk.
     off: usize,
@@ -374,8 +633,8 @@ fn age_of(bytes: &[u8], off: usize) -> u16 {
 
 /// The UI's handle to the BLE worker.
 pub struct BleHandle {
-    pub events: Receiver<BleEvent>,
-    pub commands: Sender<BleCommand>,
+    pub events: Receiver<BleUpdate>,
+    pub commands: Sender<BleRequest>,
 }
 
 /// Spawn the BLE worker thread. It starts idle; send [`BleCommand::Connect`]
@@ -396,6 +655,250 @@ pub fn spawn(ctx: egui::Context, vm: usize, activity: usize) -> BleHandle {
 mod tests {
     use super::*;
     use midair_proto::ble;
+    use std::sync::mpsc::channel;
+
+    /// A worker's command side with no BLE behind it. What the transports
+    /// share is what a command *means* - which session it ends, what it
+    /// throws away - so that is what these drive, once, for both platforms.
+    struct Worker {
+        commands: Sender<BleRequest>,
+        rx: Receiver<BleRequest>,
+        report: Reporter,
+        events: Receiver<BleUpdate>,
+        wanted: Wanted,
+        writes: Vec<ConfigWrite>,
+        push: Option<ConfigPush>,
+        /// The next epoch a press will use, as the UI would number them.
+        epoch: Epoch,
+    }
+
+    impl Worker {
+        fn new() -> Self {
+            let (commands, rx) = channel();
+            let (event_tx, events) = channel();
+            Self {
+                commands,
+                rx,
+                report: Reporter::new(egui::Context::default(), event_tx),
+                events,
+                wanted: Wanted::idle(),
+                writes: Vec::new(),
+                push: None,
+                epoch: 0,
+            }
+        }
+
+        /// One press: a fresh epoch, as [`super::Epoch`] describes.
+        fn press(&mut self, command: BleCommand) {
+            self.epoch += 1;
+            let _ = self.commands.send(BleRequest {
+                epoch: self.epoch,
+                command,
+            });
+        }
+
+        /// A command that rides the current request rather than making a new
+        /// one (a config write from a page, say).
+        fn under_current_request(&self, command: BleCommand) {
+            let _ = self.commands.send(BleRequest {
+                epoch: self.epoch,
+                command,
+            });
+        }
+
+        fn drain(&mut self) {
+            let mut inbox = Inbox {
+                rx: &self.rx,
+                wanted: &mut self.wanted,
+                writes: &mut self.writes,
+                push: &mut self.push,
+            };
+            assert!(inbox.drain(&self.report).is_ok(), "UI still there");
+        }
+
+        fn connect(mac: Option<&str>) -> BleCommand {
+            BleCommand::Connect {
+                mac: mac.map(str::to_string),
+                chase: false,
+            }
+        }
+
+        /// The epoch stamped on the events the worker is sending now.
+        fn event_epochs(&self) -> Vec<Epoch> {
+            self.report.status("marker");
+            self.events.try_iter().map(|u| u.epoch).collect()
+        }
+    }
+
+    /// The reported bug: Disconnect pressed while connecting to one board,
+    /// then a connect to a different one. The session that was running has to
+    /// end - both because it was told to stop and because it is now aimed at
+    /// the wrong board - or the app connects to the first board and only then
+    /// notices.
+    #[test]
+    fn disconnect_then_another_board_ends_the_running_session() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(Some("AA:01")));
+        w.drain();
+        // What the session that is now scanning/connecting is serving.
+        let first = w.wanted.target();
+        assert!(w.wanted.interrupt(&first).is_none(), "nothing has changed");
+
+        w.press(BleCommand::Disconnect);
+        w.drain();
+        assert_eq!(w.wanted.interrupt(&first), Some(Interrupt::Stopped));
+        assert!(!w.wanted.connect && !w.wanted.scan);
+
+        w.press(Worker::connect(Some("BB:02")));
+        w.drain();
+        // Still ended - now because it is the wrong board - and the next
+        // session goes to the board that was actually asked for.
+        assert_eq!(w.wanted.interrupt(&first), Some(Interrupt::Superseded));
+        let second = w.wanted.target();
+        assert_eq!(second.mac.as_deref(), Some("BB:02"));
+        assert!(w.wanted.interrupt(&second).is_none());
+    }
+
+    /// Pressing Connect again is a request to start over, not a no-op: it is
+    /// the way out of a link that is up but has stopped working.
+    #[test]
+    fn pressing_connect_again_starts_over() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(Some("AA:01")));
+        w.drain();
+        let running = w.wanted.target();
+
+        w.press(Worker::connect(Some("AA:01")));
+        w.drain();
+        assert_eq!(w.wanted.interrupt(&running), Some(Interrupt::Superseded));
+        assert_eq!(w.wanted.mac.as_deref(), Some("AA:01"));
+    }
+
+    /// Chasing is a different way of connecting, so switching to it while a
+    /// plain connect is running has to restart rather than be swallowed as
+    /// "already connecting to that board".
+    #[test]
+    fn switching_to_chase_restarts() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(Some("AA:01")));
+        w.drain();
+        let plain = w.wanted.target();
+
+        w.press(BleCommand::Connect {
+            mac: Some("AA:01".to_string()),
+            chase: true,
+        });
+        w.drain();
+        assert_eq!(w.wanted.interrupt(&plain), Some(Interrupt::Superseded));
+        assert!(w.wanted.chase);
+    }
+
+    /// A scan drops any live link: only one board is ever connected, and the
+    /// picker cannot fill itself from a session that is holding the radio.
+    #[test]
+    fn a_scan_ends_a_connect() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(None));
+        w.drain();
+        let connecting = w.wanted.target();
+
+        w.press(BleCommand::Scan);
+        w.drain();
+        assert_eq!(w.wanted.interrupt(&connecting), Some(Interrupt::Stopped));
+        assert!(w.wanted.scan && !w.wanted.connect);
+    }
+
+    /// A queued write was aimed at the board that was selected when it was
+    /// made. Disconnecting, or moving to another board, must not deliver it to
+    /// whatever is connected next.
+    #[test]
+    fn writes_do_not_outlive_the_board_they_were_meant_for() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(Some("AA:01")));
+        w.under_current_request(BleCommand::Config(ConfigWrite::Flag {
+            id: ble::CFG_PWR_EN,
+            on: true,
+        }));
+        w.drain();
+        assert_eq!(w.writes.len(), 1);
+
+        w.press(BleCommand::Disconnect);
+        w.drain();
+        assert!(w.writes.is_empty(), "disconnect drops queued writes");
+
+        // The same on a switch, without a disconnect in between.
+        w.press(Worker::connect(Some("AA:01")));
+        w.under_current_request(BleCommand::Config(ConfigWrite::Interval(2000)));
+        w.drain();
+        assert_eq!(w.writes.len(), 1);
+        w.press(Worker::connect(Some("BB:02")));
+        w.drain();
+        assert!(w.writes.is_empty(), "switching boards drops queued writes");
+    }
+
+    /// A write made while connected to the board still selected is kept: only
+    /// a change of board (or of mind) throws them away.
+    #[test]
+    fn a_write_survives_a_reconnect_to_the_same_board() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(Some("AA:01")));
+        w.under_current_request(BleCommand::Config(ConfigWrite::Interval(1500)));
+        w.drain();
+        w.press(Worker::connect(Some("AA:01")));
+        w.drain();
+        assert_eq!(w.writes.len(), 1);
+    }
+
+    /// Events are stamped with the request the worker is serving, which is
+    /// what lets the UI tell the last board's parting words from this one's.
+    #[test]
+    fn events_carry_the_request_they_belong_to() {
+        let mut w = Worker::new();
+        // Before any command: the worker speaking for itself (no adapter, no
+        // Bluetooth), which the UI never fences out.
+        assert_eq!(w.event_epochs(), vec![0]);
+
+        w.press(Worker::connect(None));
+        w.drain();
+        assert_eq!(w.event_epochs(), vec![1]);
+
+        w.press(BleCommand::Disconnect);
+        w.drain();
+        assert_eq!(w.event_epochs(), vec![2]);
+    }
+
+    /// A command left over from a request that has already been replaced is
+    /// dropped rather than applied on top of the newer one.
+    #[test]
+    fn a_command_from_a_replaced_request_is_ignored() {
+        let mut w = Worker::new();
+        w.press(Worker::connect(Some("AA:01")));
+        w.drain();
+
+        w.press(BleCommand::Disconnect);
+        // Sent under the older request, and overtaken by the Disconnect above.
+        let _ = w.commands.send(BleRequest {
+            epoch: w.epoch - 1,
+            command: Worker::connect(Some("AA:01")),
+        });
+        w.drain();
+        assert!(!w.wanted.connect, "the stale connect did not revive the link");
+    }
+
+    /// The UI going away is the one thing that ends the worker itself.
+    #[test]
+    fn a_dropped_ui_reports_gone() {
+        let mut w = Worker::new();
+        let (dead, rx) = channel::<BleRequest>();
+        drop(dead);
+        let mut inbox = Inbox {
+            rx: &rx,
+            wanted: &mut w.wanted,
+            writes: &mut w.writes,
+            push: &mut w.push,
+        };
+        assert!(inbox.drain(&w.report).is_err());
+    }
 
     /// The board parses `[id, len, value...]`, so the framing is what has to
     /// be right - a wrong length byte is read as a different value entirely.

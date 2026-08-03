@@ -14,7 +14,8 @@ use walkers::{
 };
 
 use crate::ble::{
-    BleCommand, BleEvent, BleHandle, ConfigWrite, NodePing, RadioConfig, Settings, Telemetry,
+    BleCommand, BleEvent, BleHandle, BleRequest, ConfigWrite, Epoch, NodePing, RadioConfig,
+    Settings, Telemetry,
 };
 use crate::compass::{self, CompassHandle};
 use crate::config::{normalize_mac, AppConfig};
@@ -570,6 +571,11 @@ pub struct MyApp {
     /// `config.ble.enabled` seeds it at startup and nothing writes it back, so
     /// a Disconnect lasts until the next launch rather than becoming a setting.
     ble_intent: BleIntent,
+    /// Which request the worker is being held to; bumped by every press. It
+    /// rides out on the command and back on every event, so what the previous
+    /// request was still saying can be told apart from what this one says -
+    /// see [`Epoch`].
+    ble_epoch: Epoch,
     /// The base of the "trying for ..." read-out: when the worker was last
     /// asked for the current intent, or when the link last dropped - whichever
     /// came later, so the count is this attempt's, not the whole session's.
@@ -743,6 +749,8 @@ impl MyApp {
             // Overwritten by `apply_config`/`sync_ble_to_config` below, which
             // is what actually decides whether to connect at startup.
             ble_intent: BleIntent::Idle,
+            // 0 is "nothing asked for yet"; the first request is 1.
+            ble_epoch: 0,
             intent_since: Instant::now(),
             connected_at: None,
             board_heard: None,
@@ -1035,26 +1043,68 @@ impl MyApp {
         self.set_ble_intent(intent);
     }
 
+    /// Send one request to the worker under the current epoch.
+    fn send_ble(&self, command: BleCommand) {
+        let _ = self.ble.commands.send(BleRequest {
+            epoch: self.ble_epoch,
+            command,
+        });
+    }
+
     /// Ask the worker for a new connection state, and say so even when the
     /// intent has not changed - that is what makes the buttons re-send a
     /// request with an edited MAC, or restart a scan that has given up.
     ///
-    /// Each button sends exactly one command. They must not be composed (a
-    /// Disconnect followed by a Connect, say): the worker drains its whole
+    /// Every press is forceful. Bumping the epoch first is what makes it so:
+    /// the worker abandons whatever session it was running at the next step it
+    /// reaches rather than finishing a connect to a board nobody is asking for
+    /// any more, and everything the old session goes on to say is fenced out
+    /// in [`Self::drain_sources`]. So the link state is dropped here too - a
+    /// disconnect ends it, and a connect (even to the same board) re-reads all
+    /// of it from scratch.
+    ///
+    /// Each button still sends exactly one command. They must not be composed
+    /// (a Disconnect followed by a Connect, say): the worker drains its whole
     /// queue in one pass, so the later command simply overwrites the earlier
     /// one and the disconnect never happens.
     pub(crate) fn set_ble_intent(&mut self, intent: BleIntent) {
+        self.ble_epoch += 1;
         // Every call sends a fresh request, so the "for ..." clock restarts
         // even when the intent itself is unchanged (a re-sent connect or a
         // restarted scan is a new attempt, not the old one continuing).
         self.intent_since = Instant::now();
         self.ble_intent = intent;
+        // Not "we will be disconnected shortly": as of this press there is no
+        // link, and nothing the last board said still describes anything.
+        // Waiting for the worker to confirm would leave the pages showing a
+        // board the user has already let go of.
+        self.ble_connected = false;
+        self.connected_at = None;
+        self.board_heard = None;
+        self.forget_board_state();
+        // A radio push was riding the link this press just ended. Its outcome
+        // is either never coming or belongs to the request being replaced, so
+        // the page is answered here rather than left waiting for an event that
+        // will be fenced out.
+        if self.radio_push_pending {
+            self.radio_push_pending = false;
+            self.radio_feedback = Some(Err(
+                "Send cancelled: the link was dropped before it finished.".to_string(),
+            ));
+        }
         // A new scan starts from an empty list: leaving the last one's boards
         // there would show devices that may since have gone.
         if intent == BleIntent::Scanning {
             self.discovered.clear();
         }
-        let cmd = match intent {
+        // The worker's own commentary is a moment behind; until it catches up
+        // its last line describes the session just abandoned.
+        self.ble_status = match intent {
+            BleIntent::Idle => "idle".to_string(),
+            BleIntent::Scanning => "starting a scan...".to_string(),
+            BleIntent::Connect | BleIntent::ConnectSleeping => "starting a connect...".to_string(),
+        };
+        self.send_ble(match intent {
             BleIntent::Idle => BleCommand::Disconnect,
             BleIntent::Scanning => BleCommand::Scan,
             BleIntent::Connect => BleCommand::Connect {
@@ -1065,8 +1115,7 @@ impl MyApp {
                 mac: self.config.ble.mac.clone(),
                 chase: true,
             },
-        };
-        let _ = self.ble.commands.send(cmd);
+        });
     }
 
     /// Pin `mac` (or `None` for "any board") as the device to connect to. When
@@ -1231,7 +1280,7 @@ impl MyApp {
     /// stay disabled until the ack lands, so only one write is ever in flight
     /// and the state shown is always one the board has confirmed.
     pub(crate) fn send_config(&mut self, write: ConfigWrite) {
-        let _ = self.ble.commands.send(BleCommand::Config(write));
+        self.send_ble(BleCommand::Config(write));
         self.ble_ack = None;
         self.ble_ack_pending = true;
     }
@@ -1386,7 +1435,7 @@ impl MyApp {
             )));
             return;
         }
-        let _ = self.ble.commands.send(BleCommand::PushConfig(data));
+        self.send_ble(BleCommand::PushConfig(data));
         self.radio_push_pending = true;
         self.radio_feedback = Some(Ok("Sending config to the board...".to_string()));
     }
@@ -1647,7 +1696,17 @@ impl MyApp {
             self.compass = None;
         }
 
-        while let Ok(event) = self.ble.events.try_recv() {
+        while let Ok(update) = self.ble.events.try_recv() {
+            // The tail of a session the user has already moved on from: a fix
+            // from the board just disconnected from, or a settings blob from
+            // the board just switched away from. Both would otherwise land as
+            // if they described what is selected now. Epoch 0 is the worker
+            // speaking for itself before any request reached it (no adapter,
+            // no Bluetooth), which is always worth hearing.
+            if update.epoch != 0 && update.epoch < self.ble_epoch {
+                continue;
+            }
+            let event = update.event;
             // Anything decoded off a characteristic proves the board itself is
             // still talking. Status, scan sightings and link-state changes are
             // the worker's own and say nothing about the connected board.
@@ -1872,6 +1931,242 @@ impl eframe::App for MyApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ble::{BleUpdate, Inbox, Interrupt, Reporter, Wanted};
+    use std::sync::mpsc::channel;
+
+    /// An app wired to a worker that is not there: the test reads the command
+    /// channel and pushes events back by hand. That is the whole of the BLE
+    /// contract from the UI's side, so the buttons can be driven without a
+    /// radio.
+    fn test_app() -> (MyApp, Receiver<BleRequest>, Sender<BleUpdate>) {
+        let (event_tx, event_rx) = channel();
+        let (cmd_tx, cmd_rx) = channel();
+        // A cache directory under the system temp dir is what keeps the
+        // startup config auto-load away from any real gps-config.toml: the
+        // app starts on its defaults rather than on the working directory's.
+        let cache = std::env::temp_dir().join("gps-gui-rs-tests").join("tiles");
+        let app = MyApp::new(
+            egui::Context::default(),
+            None,
+            Some(cache),
+            None,
+            None,
+            BleHandle {
+                events: event_rx,
+                commands: cmd_tx,
+            },
+            None,
+        );
+        (app, cmd_rx, event_tx)
+    }
+
+    /// A board's position report.
+    fn fix() -> PositionPacket {
+        PositionPacket {
+            lat_e7: 481_173_000,
+            lon_e7: -1_226_760_000,
+            flags: packet::FLAG_FIX,
+            sats: 7,
+            ..PositionPacket::default()
+        }
+    }
+
+    /// Everything the connected board has told us, as the pages read it.
+    fn board_state(app: &MyApp) -> (bool, bool, bool, bool) {
+        (
+            app.ble_connected,
+            app.beacon.is_some(),
+            app.board_settings.is_some(),
+            app.board_log.is_some(),
+        )
+    }
+
+    /// Feed one event as the worker would, under the request the app is
+    /// currently making.
+    fn report(events: &Sender<BleUpdate>, app: &MyApp, event: BleEvent) {
+        events
+            .send(BleUpdate {
+                epoch: app.ble_epoch,
+                event,
+            })
+            .expect("the app holds the receiver");
+    }
+
+    /// Disconnect is not a request to stop eventually: as of the press there
+    /// is no link, and nothing the board said is still on the pages.
+    #[test]
+    fn disconnect_drops_the_link_and_the_board_state() {
+        let (mut app, cmds, events) = test_app();
+        let session = app.ble_epoch;
+
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Fix(fix()));
+        report(&events, &app, BleEvent::Settings(Settings::default()));
+        report(&events, &app, BleEvent::Log("wio: ok".to_string()));
+        app.drain_sources();
+        assert_eq!(board_state(&app), (true, true, true, true));
+
+        app.set_ble_intent(BleIntent::Idle);
+        assert_eq!(
+            board_state(&app),
+            (false, false, false, false),
+            "the press itself ends the link and drops what the board said"
+        );
+        assert!(app.connected_at.is_none() && app.board_heard.is_none());
+
+        // The tail of that session - already on its way when the button was
+        // pressed - must not put any of it back.
+        let stale = |event| {
+            events
+                .send(BleUpdate {
+                    epoch: session,
+                    event,
+                })
+                .unwrap()
+        };
+        stale(BleEvent::Connected(true));
+        stale(BleEvent::Fix(fix()));
+        stale(BleEvent::Settings(Settings::default()));
+        app.drain_sources();
+        assert_eq!(board_state(&app), (false, false, false, false));
+
+        // And the worker was told, as one command.
+        let sent: Vec<_> = cmds.try_iter().collect();
+        assert!(matches!(
+            sent.last(),
+            Some(BleRequest {
+                command: BleCommand::Disconnect,
+                ..
+            })
+        ));
+    }
+
+    /// The reported bug, from the press through to what the worker does with
+    /// it: Disconnect while connecting to one board, then connect to another.
+    /// The session already running for the first board has to end, or the app
+    /// connects to it and only then notices it wanted the other one.
+    #[test]
+    fn disconnect_then_another_board_repoints_the_worker() {
+        let (mut app, cmds, _events) = test_app();
+        app.select_device(Some("AA:BB:CC:DD:EE:01"));
+        app.set_ble_intent(BleIntent::Connect);
+
+        // The worker takes the request and starts a session for it.
+        let (event_tx, _worker_events) = channel();
+        let reporter = Reporter::new(egui::Context::default(), event_tx);
+        let mut wanted = Wanted::idle();
+        let mut writes = Vec::new();
+        let mut push = None;
+        let mut inbox = Inbox {
+            rx: &cmds,
+            wanted: &mut wanted,
+            writes: &mut writes,
+            push: &mut push,
+        };
+        assert!(inbox.drain(&reporter).is_ok());
+        let first = inbox.wanted.target();
+        assert_eq!(first.mac.as_deref(), Some("AA:BB:CC:DD:EE:01"));
+
+        // Disconnect part-way through, then pick a different board and
+        // connect to that.
+        app.set_ble_intent(BleIntent::Idle);
+        app.select_device(Some("AA:BB:CC:DD:EE:02"));
+        app.set_ble_intent(BleIntent::Connect);
+
+        assert!(inbox.drain(&reporter).is_ok());
+        assert_eq!(inbox.wanted.interrupt(&first), Some(Interrupt::Superseded));
+        assert_eq!(
+            inbox.wanted.target().mac.as_deref(),
+            Some("AA:BB:CC:DD:EE:02"),
+            "the next session goes to the board that was asked for"
+        );
+    }
+
+    /// Connect pressed while connected is a real request - start over - and
+    /// the way out of a link that is up but has stopped working.
+    #[test]
+    fn connect_while_connected_starts_over() {
+        let (mut app, cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Settings(Settings::default()));
+        app.drain_sources();
+        let connected_epoch = app.ble_epoch;
+        let _ = cmds.try_iter().count();
+
+        app.set_ble_intent(BleIntent::Connect);
+        assert!(app.ble_epoch > connected_epoch, "a new request");
+        assert_eq!(
+            board_state(&app),
+            (false, false, false, false),
+            "the link is dropped and re-read rather than kept"
+        );
+        let sent: Vec<_> = cmds.try_iter().collect();
+        assert_eq!(sent.len(), 1, "one command per press, never composed");
+        assert!(matches!(
+            sent[0].command,
+            BleCommand::Connect { chase: false, .. }
+        ));
+        assert_eq!(sent[0].epoch, app.ble_epoch);
+    }
+
+    /// Picking another board while connected switches to it there and then:
+    /// only one board is ever connected, so the choice is the switch.
+    #[test]
+    fn picking_another_board_while_connected_switches_now() {
+        let (mut app, cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Fix(fix()));
+        app.drain_sources();
+        let _ = cmds.try_iter().count();
+
+        app.select_device(Some("AA:BB:CC:DD:EE:02"));
+        assert!(!app.ble_connected);
+        assert!(app.beacon.is_none(), "the old board's fix is not the new board's");
+        let sent: Vec<_> = cmds.try_iter().collect();
+        assert!(matches!(
+            &sent.last().expect("a switch is sent at once").command,
+            BleCommand::Connect { mac, .. } if mac.as_deref() == Some("AA:BB:CC:DD:EE:02")
+        ));
+    }
+
+    /// A page waiting on the link is answered by the press that drops it,
+    /// rather than by an event from the session it was riding - which is no
+    /// longer coming, or would be fenced out if it did.
+    #[test]
+    fn disconnecting_mid_push_answers_the_radio_page() {
+        let (mut app, _cmds, _events) = test_app();
+        app.radio_push_pending = true;
+
+        app.set_ble_intent(BleIntent::Idle);
+        assert!(!app.radio_push_pending);
+        assert!(matches!(app.radio_feedback, Some(Err(_))));
+    }
+
+    /// A scan is not a link, so starting one clears the connection state as
+    /// firmly as a disconnect does - and empties the picker, which is about
+    /// what is on the air now.
+    #[test]
+    fn scanning_drops_the_link() {
+        let (mut app, _cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Fix(fix()));
+        report(
+            &events,
+            &app,
+            BleEvent::Discovered(crate::ble::DiscoveredDevice {
+                address: "AA:BB:CC:DD:EE:01".to_string(),
+                name: None,
+                rssi: Some(-60),
+            }),
+        );
+        app.drain_sources();
+        assert!(!app.discovered.is_empty());
+
+        app.set_ble_intent(BleIntent::Scanning);
+        assert!(!app.ble_connected);
+        assert!(app.beacon.is_none());
+        assert!(app.discovered.is_empty());
+    }
 
     /// Reading 0 as "off" is what the interval read-outs want, and is exactly
     /// wrong for an elapsed time - the wake-mode line clamps off zero for it.

@@ -10,7 +10,7 @@
 //! The Java callbacks arrive on Binder threads; they only push onto a channel
 //! that this worker thread drains, so no locking beyond the channel is needed.
 
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -23,8 +23,9 @@ use midair_proto::ble;
 use midair_proto::link::Telemetry;
 
 use super::{
-    node_ping_event, radio_config_event, remote_event, settings_event, BleCommand, BleEvent,
-    BleHandle, ConfigPush, ConfigWrite, DiscoveredDevice, PushStep, PUSH_ACK_TIMEOUT,
+    node_ping_event, radio_config_event, remote_event, settings_event, Aborted, BleEvent,
+    BleHandle, BleRequest, DiscoveredDevice, Ended, Inbox, Interrupt, PushStep, Reporter, Target,
+    Wanted, CMD_POLL, PUSH_ACK_TIMEOUT,
 };
 
 /// The compiled dex with rs.gps.gui.BleBridge (see android/build-dex.sh).
@@ -142,10 +143,7 @@ pub fn spawn(ctx: egui::Context, vm: usize, activity: usize) -> BleHandle {
     let (cmd_tx, cmd_rx) = channel();
 
     std::thread::spawn(move || {
-        let report = Reporter {
-            ctx,
-            tx: event_tx.clone(),
-        };
+        let report = Reporter::new(ctx, event_tx);
         if let Err(e) = worker(&report, cmd_rx, vm, activity) {
             report.status(format!("BLE stopped: {e}"));
         }
@@ -154,22 +152,6 @@ pub fn spawn(ctx: egui::Context, vm: usize, activity: usize) -> BleHandle {
     BleHandle {
         events: event_rx,
         commands: cmd_tx,
-    }
-}
-
-struct Reporter {
-    ctx: egui::Context,
-    tx: Sender<BleEvent>,
-}
-
-impl Reporter {
-    fn send(&self, event: BleEvent) {
-        let _ = self.tx.send(event);
-        self.ctx.request_repaint();
-    }
-
-    fn status(&self, s: impl Into<String>) {
-        self.send(BleEvent::Status(s.into()));
     }
 }
 
@@ -189,7 +171,7 @@ struct Bridge<'a> {
 
 fn worker(
     report: &Reporter,
-    cmd_rx: Receiver<BleCommand>,
+    cmd_rx: Receiver<BleRequest>,
     vm: usize,
     activity: usize,
 ) -> Result<(), AnyError> {
@@ -220,25 +202,26 @@ fn worker(
         return Ok(());
     }
 
-    let mut wanted = Wanted {
-        connect: false,
-        scan: false,
-        mac: None,
-        chase: false,
+    let mut wanted = Wanted::idle();
+    let mut writes = Vec::new();
+    let mut push = None;
+    let mut inbox = Inbox {
+        rx: &cmd_rx,
+        wanted: &mut wanted,
+        writes: &mut writes,
+        push: &mut push,
     };
-    let mut writes: Vec<ConfigWrite> = Vec::new();
-    let mut push: Option<ConfigPush> = None;
     let mut permissions_done = false;
 
     loop {
-        if drain_commands(&cmd_rx, &mut wanted, &mut writes, &mut push).is_err() {
+        if inbox.drain(report).is_err() {
             return Ok(()); // UI has gone away
         }
-        if !wanted.connect && !wanted.scan {
+        if !inbox.wanted.connect && !inbox.wanted.scan {
             // A push cannot go anywhere without a link; fail it rather than
             // hold the Radio page in "sending" until some later connect.
-            fail_push(&mut push, report);
-            std::thread::sleep(Duration::from_millis(200));
+            inbox.fail_push(report);
+            std::thread::sleep(CMD_POLL);
             continue;
         }
 
@@ -246,39 +229,26 @@ fn worker(
         // gate covers both.
         if !permissions_done {
             report.status("waiting for Bluetooth permissions...");
-            bridge.ensure_permissions()?;
+            if !bridge.ensure_permissions(report, &mut inbox)? {
+                // The UI gave up while the dialog was in front of it.
+                continue;
+            }
             permissions_done = true;
         }
 
-        if wanted.scan {
-            if let Err(e) = discover(
-                &mut bridge,
-                report,
-                &cb_rx,
-                &cmd_rx,
-                &mut wanted,
-                &mut writes,
-                &mut push,
-            ) {
+        if inbox.wanted.scan {
+            if let Err(e) = discover(&mut bridge, report, &cb_rx, &mut inbox) {
                 report.status(format!("{e}; retrying"));
                 std::thread::sleep(Duration::from_secs(2));
             }
             continue;
         }
 
-        match session(
-            &mut bridge,
-            report,
-            &cb_rx,
-            &cmd_rx,
-            &mut wanted,
-            &mut writes,
-            &mut push,
-        ) {
-            Ok(()) => {} // clean stop requested by the UI
-            Err(e) => {
-                bridge.disconnect();
-                report.send(BleEvent::Connected(false));
+        match session(&mut bridge, report, &cb_rx, &mut inbox) {
+            // Stopped or superseded by the UI: whatever it wants now is
+            // served on the next pass, with no retry pause in between.
+            Ok(()) | Err(Ended::Quietly) => {}
+            Err(Ended::Failed(e)) => {
                 report.status(format!("{e}; retrying"));
                 std::thread::sleep(Duration::from_secs(2));
             }
@@ -286,60 +256,7 @@ fn worker(
         // A push does not survive its session: half a transfer is dropped by
         // the board, and silently restarting one on reconnect would resend a
         // config the user asked for once.
-        fail_push(&mut push, report);
-    }
-}
-
-/// What the UI currently wants from us. `connect` and `scan` are mutually
-/// exclusive: a discovery scan has no link, and a connected session does not
-/// scan.
-struct Wanted {
-    connect: bool,
-    /// Run a discovery scan for the device picker; see [`BleCommand::Scan`].
-    scan: bool,
-    mac: Option<String>,
-    /// The board may be asleep; see [`BleCommand::Connect`].
-    chase: bool,
-}
-
-fn drain_commands(
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
-) -> Result<(), ()> {
-    loop {
-        match cmd_rx.try_recv() {
-            Ok(BleCommand::Connect { mac, chase }) => {
-                wanted.connect = true;
-                wanted.scan = false;
-                wanted.mac = mac;
-                wanted.chase = chase;
-            }
-            Ok(BleCommand::Scan) => {
-                wanted.connect = false;
-                wanted.scan = true;
-            }
-            Ok(BleCommand::Disconnect) => {
-                wanted.connect = false;
-                wanted.scan = false;
-            }
-            Ok(BleCommand::Config(w)) => writes.push(w),
-            Ok(BleCommand::PushConfig(data)) => *push = Some(ConfigPush::new(data)),
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => return Err(()),
-        }
-    }
-}
-
-/// Fail any queued or in-flight config push. Called whenever the session it
-/// rode on ends (or cannot start), so the Radio page is never left waiting on
-/// a transfer that no longer exists.
-fn fail_push(push: &mut Option<ConfigPush>, report: &Reporter) {
-    if push.take().is_some() {
-        report.send(BleEvent::ConfigPushed(Err(
-            "disconnected before the transfer finished".to_string(),
-        )));
+        inbox.fail_push(report);
     }
 }
 
@@ -351,10 +268,7 @@ fn discover(
     bridge: &mut Bridge,
     report: &Reporter,
     cb_rx: &Receiver<Cb>,
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
+    inbox: &mut Inbox<'_>,
 ) -> Result<(), String> {
     // Drop stale callbacks from a previous session so old sightings cannot be
     // reported as if they were fresh.
@@ -366,10 +280,10 @@ fn discover(
     }
 
     let result = loop {
-        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.scan {
+        if inbox.drain(report).is_err() || !inbox.wanted.scan {
             break Ok(());
         }
-        match cb_rx.recv_timeout(Duration::from_millis(300)) {
+        match cb_rx.recv_timeout(CMD_POLL) {
             Ok(Cb::Scan {
                 address,
                 name,
@@ -394,18 +308,20 @@ fn discover(
     result
 }
 
-/// One scan+connect+subscribe+pump attempt. `Ok(())` means the UI asked to
-/// stop; `Err` means retry.
+/// One scan+connect+subscribe+pump attempt, with the link dropped on the way
+/// out however it ended.
+///
+/// The board this is for is fixed at the start ([`Wanted::target`]) rather
+/// than read live: a press that changes it ends this session instead of
+/// quietly redirecting it, so the connect, the subscribes and the state the UI
+/// is shown all belong to one board.
 fn session(
     bridge: &mut Bridge,
     report: &Reporter,
     cb_rx: &Receiver<Cb>,
-    cmd_rx: &Receiver<BleCommand>,
-    wanted: &mut Wanted,
-    writes: &mut Vec<ConfigWrite>,
-    push: &mut Option<ConfigPush>,
-) -> Result<(), String> {
-    let session_mac = wanted.mac.clone();
+    inbox: &mut Inbox<'_>,
+) -> Result<(), Ended> {
+    let target = inbox.wanted.target();
 
     // Drop stale callback events from a previous session (e.g. a disconnect
     // that raced the teardown), so the waits below cannot match them.
@@ -418,8 +334,8 @@ fn session(
     // advertising window for a long time. Chasing therefore scans instead - always
     // listening, so any window is caught the moment it opens - and matches
     // the pinned address among the hits, exactly as the desktop worker does.
-    let address = match session_mac.clone() {
-        Some(m) if !wanted.chase => m,
+    let address = match target.mac.clone() {
+        Some(m) if !target.chase => m,
         pinned => {
             report.status(if pinned.is_some() {
                 "waiting for a wake window..."
@@ -430,11 +346,11 @@ fn session(
                 return Err("scan failed (Bluetooth off?)".into());
             }
             let found = loop {
-                if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
+                if inbox.check(report, &target).is_err() {
                     bridge.stop_scan();
-                    return Ok(());
+                    return Err(Ended::Quietly);
                 }
-                match cb_rx.recv_timeout(Duration::from_millis(300)) {
+                match cb_rx.recv_timeout(CMD_POLL) {
                     Ok(Cb::Scan { address, .. }) => match &pinned {
                         // Another GPS board answering the same service filter.
                         Some(m) if !address.eq_ignore_ascii_case(m) => {}
@@ -450,14 +366,35 @@ fn session(
         }
     };
 
+    let result = connected(bridge, report, cb_rx, inbox, &target, &address);
+    // Android keeps the GATT client open until it is told otherwise, and a
+    // connect we walked away from can still land, so the teardown is
+    // unconditional.
+    bridge.disconnect();
+    report.send(BleEvent::Connected(false));
+    result
+}
+
+/// Connect to `address`, subscribe, and pump notifications until the UI stops
+/// wanting this session or the link fails. The caller drops the link
+/// afterwards either way.
+fn connected(
+    bridge: &mut Bridge,
+    report: &Reporter,
+    cb_rx: &Receiver<Cb>,
+    inbox: &mut Inbox<'_>,
+    target: &Target,
+    address: &str,
+) -> Result<(), Ended> {
     report.status(format!("connecting to {address}..."));
-    if !bridge.connect(&address) {
+    if !bridge.connect(address) {
         return Err("connect call failed".into());
     }
-    wait_for(cb_rx, Duration::from_secs(20), |cb| {
+    if !wait_cb(cb_rx, report, inbox, target, Duration::from_secs(20), |cb| {
         matches!(cb, Cb::ConnectionState { new_state: 2 })
-    })
-    .map_err(|_| "connect timed out")?;
+    })? {
+        return Err("connect timed out".into());
+    }
 
     // Android keeps the 23-byte ATT default unless the central asks for more,
     // and a notification carries MTU - 3 bytes: at the default the board's
@@ -466,22 +403,25 @@ fn session(
     // not fatal - a stack that refuses just leaves the small default in force.
     let mut mtu = 0;
     if bridge.request_mtu(ATT_MTU_REQUEST) {
-        let _ = wait_for(cb_rx, Duration::from_secs(5), |cb| match cb {
-            Cb::MtuChanged { mtu: negotiated } => {
-                mtu = *negotiated;
-                true
+        let _ = wait_cb(cb_rx, report, inbox, target, Duration::from_secs(5), |cb| {
+            match cb {
+                Cb::MtuChanged { mtu: negotiated } => {
+                    mtu = *negotiated;
+                    true
+                }
+                _ => false,
             }
-            _ => false,
-        });
+        })?;
     }
 
     if !bridge.discover_services() {
         return Err("service discovery call failed".into());
     }
-    wait_for(cb_rx, Duration::from_secs(10), |cb| {
+    if !wait_cb(cb_rx, report, inbox, target, Duration::from_secs(10), |cb| {
         matches!(cb, Cb::ServicesDiscovered { status: 0 })
-    })
-    .map_err(|_| "service discovery timed out")?;
+    })? {
+        return Err("service discovery timed out".into());
+    }
 
     // Subscribe to position + ack. Each CCCD write must complete before the
     // next GATT operation starts (Android runs one at a time).
@@ -489,10 +429,11 @@ fn session(
         if !bridge.set_notify(packet::SERVICE_UUID, chr, true) {
             return Err("subscribe call failed".into());
         }
-        wait_for(cb_rx, Duration::from_secs(5), |cb| {
+        if !wait_cb(cb_rx, report, inbox, target, Duration::from_secs(5), |cb| {
             matches!(cb, Cb::DescriptorWrite { status: 0 })
-        })
-        .map_err(|_| "subscribe timed out")?;
+        })? {
+            return Err("subscribe timed out".into());
+        }
     }
     // Optional board-status subscriptions (esp32c6-gps; absent on the c3
     // beacon, so a missing characteristic is not an error). Settings is
@@ -507,12 +448,15 @@ fn session(
         ble::NODE_PING_UUID,
     ] {
         if bridge.set_notify(packet::SERVICE_UUID, chr, true) {
-            let _ = wait_for(cb_rx, Duration::from_secs(5), |cb| {
+            let _ = wait_cb(cb_rx, report, inbox, target, Duration::from_secs(5), |cb| {
                 matches!(cb, Cb::DescriptorWrite { status: 0 })
-            });
+            })?;
         }
     }
 
+    // A press during the subscribes above wins: the UI is never told about a
+    // link it has already asked to be rid of.
+    inbox.check(report, target)?;
     report.send(BleEvent::Connected(true));
     // The MTU is worth showing: it is what decides whether the longer
     // notifications (log lines, remote reports) arrive whole.
@@ -534,7 +478,7 @@ fn session(
     // while no push is running.
     let mut push_deadline = Instant::now();
     loop {
-        for w in writes.drain(..) {
+        for w in inbox.writes.drain(..) {
             let (buf, n) = w.encode();
             if !bridge.write_characteristic(packet::SERVICE_UUID, packet::CONFIG_UUID, &buf[..n]) {
                 report.status("config write failed");
@@ -545,17 +489,17 @@ fn session(
         // Android runs one GATT op at a time, but each bulk op is only sent
         // after the previous one's ack notification - and the board sends its
         // write response before that ack, so the queue is always free here.
-        if let Some(p) = push.as_mut() {
+        if let Some(p) = inbox.push.as_mut() {
             if let Some(frame) = p.start() {
                 push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
                 if !bridge.write_characteristic(packet::SERVICE_UUID, ble::BULK_UUID, &frame) {
-                    *push = None;
+                    *inbox.push = None;
                     report.send(BleEvent::ConfigPushed(Err(
                         "bulk write failed (a board without the bulk characteristic?)".to_string(),
                     )));
                 }
             } else if Instant::now() >= push_deadline {
-                *push = None;
+                *inbox.push = None;
                 // Best effort: free the board's transfer state for a retry.
                 let _ = bridge.write_characteristic(
                     packet::SERVICE_UUID,
@@ -579,7 +523,7 @@ fn session(
                         if a.id == ble::ACK_ID_BULK {
                             // A bulk ack paces the running push; it is not a
                             // setting ack, so it never reaches the Beacon page.
-                            if let Some(p) = push.as_mut() {
+                            if let Some(p) = inbox.push.as_mut() {
                                 push_deadline = Instant::now() + PUSH_ACK_TIMEOUT;
                                 match p.on_ack(&a) {
                                     PushStep::Write(frame) => {
@@ -588,21 +532,21 @@ fn session(
                                             ble::BULK_UUID,
                                             &frame,
                                         ) {
-                                            *push = None;
+                                            *inbox.push = None;
                                             report.send(BleEvent::ConfigPushed(Err(
                                                 "bulk write failed".to_string(),
                                             )));
                                         }
                                     }
                                     PushStep::Done => {
-                                        *push = None;
+                                        *inbox.push = None;
                                         report.send(BleEvent::ConfigPushed(Ok(
                                             "Config sent. The board applied and stored it."
                                                 .to_string(),
                                         )));
                                     }
                                     PushStep::Fail(e) => {
-                                        *push = None;
+                                        *inbox.push = None;
                                         report.send(BleEvent::ConfigPushed(Err(e)));
                                     }
                                 }
@@ -642,34 +586,51 @@ fn session(
             Err(RecvTimeoutError::Disconnected) => return Err("worker gone".into()),
         }
 
-        if drain_commands(cmd_rx, wanted, writes, push).is_err() || !wanted.connect {
-            bridge.disconnect();
-            report.send(BleEvent::Connected(false));
-            report.status("disconnected");
-            return Ok(());
+        if inbox.drain(report).is_err() {
+            return Err(Ended::Quietly);
         }
-        if wanted.mac != session_mac {
-            // The UI pinned a different device (e.g. a config reload).
-            bridge.disconnect();
-            report.send(BleEvent::Connected(false));
-            return Err("switching device".into());
+        // Neither is a failure, so neither costs the retry pause: the caller
+        // drops the link and the worker serves the new request straight away.
+        match inbox.wanted.interrupt(target) {
+            Some(Interrupt::Stopped) => {
+                report.status("disconnected");
+                return Err(Ended::Quietly);
+            }
+            Some(Interrupt::Superseded) => {
+                report.status("starting over");
+                return Err(Ended::Quietly);
+            }
+            None => {}
         }
     }
 }
 
-/// Drain callback events until `pred` matches or the deadline passes.
-fn wait_for(
+/// Drain callback events until `pred` matches (`Ok(true)`) or `timeout` passes
+/// (`Ok(false)`), servicing UI commands the whole time. That is what keeps a
+/// press from having to wait out a 20 s connect attempt to be noticed;
+/// `Err(Aborted)` is the press winning.
+fn wait_cb(
     cb_rx: &Receiver<Cb>,
+    report: &Reporter,
+    inbox: &mut Inbox<'_>,
+    target: &Target,
     timeout: Duration,
     mut pred: impl FnMut(&Cb) -> bool,
-) -> Result<(), ()> {
+) -> Result<bool, Aborted> {
     let deadline = Instant::now() + timeout;
     loop {
-        let left = deadline.checked_duration_since(Instant::now()).ok_or(())?;
+        inbox.check(report, target)?;
+        let left = match deadline.checked_duration_since(Instant::now()) {
+            Some(left) => left.min(CMD_POLL),
+            None => return Ok(false),
+        };
         match cb_rx.recv_timeout(left) {
-            Ok(cb) if pred(&cb) => return Ok(()),
+            Ok(cb) if pred(&cb) => return Ok(true),
             Ok(_) => {}
-            Err(_) => return Err(()),
+            Err(RecvTimeoutError::Timeout) => {}
+            // The sender is a process-lifetime static, so this cannot really
+            // happen; a wait that can never be satisfied is a timeout.
+            Err(RecvTimeoutError::Disconnected) => return Ok(false),
         }
     }
 }
@@ -934,7 +895,15 @@ impl Bridge<'_> {
     /// Android 12+ makes BLUETOOTH_SCAN / BLUETOOTH_CONNECT runtime
     /// permissions. Request them (one dialog) and poll until granted, so a
     /// grant from Settings also unblocks us.
-    fn ensure_permissions(&mut self) -> Result<(), AnyError> {
+    ///
+    /// `Ok(false)` means the UI stopped asking for anything while the dialog
+    /// was in front of it - a wait for a permission is still a wait, and a
+    /// Disconnect during one has to be answered like any other.
+    fn ensure_permissions(
+        &mut self,
+        report: &Reporter,
+        inbox: &mut Inbox<'_>,
+    ) -> Result<bool, AnyError> {
         let sdk = self
             .env
             .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
@@ -942,7 +911,7 @@ impl Bridge<'_> {
         if sdk < 31 {
             // Pre-31 scanning rides on ACCESS_FINE_LOCATION, which the GPS
             // source already requests.
-            return Ok(());
+            return Ok(true);
         }
 
         const PERMS: [&str; 2] = [
@@ -960,7 +929,10 @@ impl Bridge<'_> {
                 })
             };
             if granted {
-                return Ok(());
+                return Ok(true);
+            }
+            if inbox.drain(report).is_err() || (!inbox.wanted.connect && !inbox.wanted.scan) {
+                return Ok(false);
             }
             // (Re-)request at most every 20s; the GPS thread may be showing
             // its own dialog first, in which case ours can get dropped.
