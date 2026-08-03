@@ -8,7 +8,7 @@ use walkers::Position;
 
 use midair_proto::ble;
 use midair_proto::link::{TELEM_FLAG_CFG_LOADED, TELEM_FLAG_GPS_FIX, TELEM_FLAG_SD_OK};
-use midair_proto::{lora, radiocfg};
+use midair_proto::{lora, radiocfg, session};
 
 use crate::app::{secs_text, BleIntent, MyApp, Page, PointFilter, RadioEdit, RegionSelect};
 use crate::ble::ConfigWrite;
@@ -1183,6 +1183,19 @@ impl MyApp {
                 "How long each wake advertises before going back to sleep. Clamped to {} - {}.",
                 secs_text(ble::ESP_ADV_MIN_S),
                 secs_text(ble::ESP_ADV_MAX_S),
+            ))
+            .weak(),
+        );
+        // Two firmware behaviors that otherwise read as the board ignoring the
+        // window, and the shorter the window the more they stand out: the
+        // budget for a wake is taken when that wake starts, and a disconnect
+        // replaces what is left of it with a fixed linger so the app can come
+        // straight back.
+        ui.label(
+            egui::RichText::new(format!(
+                "A new window takes effect at the next wake, not the current one, and the \
+                 stretch right after you disconnect is always {} however short the window is.",
+                secs_text(session::LINGER_S as u32),
             ))
             .weak(),
         );

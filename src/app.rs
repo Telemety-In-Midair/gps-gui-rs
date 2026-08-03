@@ -40,6 +40,7 @@ fn setting_name(id: u8) -> &'static str {
         ble::CFG_WIO_SLEEP => "WIO-E5 sleep",
         ble::CFG_GPS_SLEEP => "GPS backup mode",
         ble::CFG_ESP_SLEEP_S => "wake-check interval",
+        ble::CFG_ESP_ADV_WINDOW_S => "advertising window",
         _ => "setting",
     }
 }
@@ -48,6 +49,11 @@ fn setting_name(id: u8) -> &'static str {
 /// the value it actually applied, which for the intervals may be a clamped
 /// version of what was asked for. The on/off settings ack without a value;
 /// their new state arrives in the settings blob instead.
+///
+/// Every setting that carries a number says which number the board took.
+/// That is the only place the clamping is visible: ask for a one-second
+/// window on a board whose floor is higher and the ack is what tells you it
+/// stored something else, rather than the setting appearing to be ignored.
 fn ack_message(ack: &Ack) -> Result<String, String> {
     let name = setting_name(ack.id);
     let applied = ack.value_u32.unwrap_or(0);
@@ -59,6 +65,12 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             ble::CFG_ESP_SLEEP_S if applied == 0 => "Board applied: sleep disabled".to_string(),
             ble::CFG_ESP_SLEEP_S => {
                 format!("Board applied: wake check every {}", secs_text(applied))
+            }
+            ble::CFG_ESP_ADV_WINDOW_S => {
+                format!(
+                    "Board applied: advertising {} per wake",
+                    secs_text(applied)
+                )
             }
             _ => format!("Board applied: {name}"),
         }),
@@ -2213,5 +2225,37 @@ mod tests {
             }),
             Ok("Board applied: sleep disabled".to_string())
         );
+    }
+
+    /// A setting that carries a number has to say which number the board
+    /// took. The advertising window had neither a name nor a value arm, so
+    /// every window write acked as the literal "Board applied: setting" - and
+    /// a clamped window was indistinguishable from one applied as asked.
+    #[test]
+    fn ack_message_quotes_the_window_the_board_stored() {
+        let acked = |secs| {
+            ack_message(&Ack {
+                id: ble::CFG_ESP_ADV_WINDOW_S,
+                status: packet::ACK_OK,
+                value_u32: Some(secs),
+            })
+        };
+        assert_eq!(
+            acked(ble::ESP_ADV_MIN_S),
+            Ok(format!(
+                "Board applied: advertising {} per wake",
+                secs_text(ble::ESP_ADV_MIN_S)
+            ))
+        );
+        // The clamped case is the one that matters: asking for less than the
+        // floor has to read as the board's number, not as agreement.
+        assert!(acked(30).unwrap().contains("30 s"));
+        assert!(ack_message(&Ack {
+            id: ble::CFG_ESP_ADV_WINDOW_S,
+            status: packet::ACK_BAD_VALUE,
+            value_u32: None,
+        })
+        .unwrap_err()
+        .contains("advertising window"));
     }
 }

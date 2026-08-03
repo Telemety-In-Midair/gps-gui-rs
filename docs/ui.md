@@ -442,13 +442,26 @@ holds these in flash and is the authority on them.
   no way back in beyond waiting.
 - **The advertising window has no Disable, unlike the interval next to it.**
   `CFG_ESP_ADV_WINDOW_S` sets how long each wake advertises, clamped to
-  3 s - 60 s. The wake-check interval takes 0 to mean "never sleep", which is
+  `ble::ESP_ADV_MIN_S` - `ESP_ADV_MAX_S` (1 s - 60 s; the page reads the
+  constants rather than quoting numbers). The wake-check interval takes 0 to
+  mean "never sleep", which is
   the safe direction; a 0-length window is the opposite, leaving a sleeping
   board unreachable by anything but a physical reset, so the board clamps 0 up
   to the floor and the page offers no button that asks for it. The two controls
   sit together because they are the same decision - the interval and the window
   are the duty cycle, and so the battery life - but only one of them can be
   turned off.
+- **Every acked number is quoted back.** `ack_message` names the setting and
+  the value the board stored, because the clamping is otherwise invisible: ask
+  for a window under the floor and the only sign it was changed is the ack. The
+  advertising window had no arm at all and acked as the literal "Board applied:
+  setting", which read as a write that did nothing in particular.
+- **Two window behaviors are said out loud on the page.** The board takes its
+  budget when a wake starts (`session::Window::new`), so a new window applies
+  at the *next* wake; and a disconnect replaces what is left of the budget with
+  `session::LINGER_S` so the app can come straight back. Both read as the board
+  ignoring the setting, the more so the shorter the window, so the page says
+  them rather than leaving them to be discovered.
 - **Text that quotes a board value reads it from the board.** The window used
   to be a fixed 15 s and several strings said so; now that it is configurable
   only the strings shown while connected quote `adv_window_s`, and the ones
