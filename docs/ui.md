@@ -205,8 +205,11 @@ edges. The key wrinkles:
   `MyApp::map` and handed to `GpsLayer` as `beacon_pulse`; the animation runs on
   `request_repaint_after(PULSE_FRAME)` rather than a per-frame repaint, so an
   otherwise idle map is not pinned at full frame rate.
-- **Tracking mode.** The track button (`tracking_beacon: Option<usize>` is the
-  active index into `MyApp::beacon_targets`) frames the user and one beacon board
+- **Tracking mode.** The track button (`tracking_beacon: Option<MarkerKind>` is
+  the board being followed - the board itself, not its place in
+  `MyApp::beacon_targets`, which is ordered and grows in the middle, so an index
+  would move to another board as soon as the connected board got a fix or a
+  lower-numbered node was heard) frames the user and one beacon board
   together: `tracking_orientation` centers the view on their midpoint, picks a
   zoom that fits the pair inside the screen height less a top/bottom margin
   (`TRACK_MARGIN_FRAC`), and returns the user->board bearing that feeds the same
@@ -217,8 +220,10 @@ edges. The key wrinkles:
   tapping it enters the mode and **cycles through every beacon board** - the
   connected board first, then each remote node (`beacon_targets`, connected board
   then remotes in address order) - leaving the mode on the press after the last
-  one. The heading button is hidden while tracking (which owns the map's
-  orientation), as it is whenever no heading source is available at all.
+  one (`MyApp::cycle_tracking`, with `next_tracking` deciding where a press
+  goes and `tracking_hint` naming it). The heading button is hidden while
+  tracking (which owns the map's orientation), as it is whenever no heading
+  source is available at all.
 - **Zoom is driven manually.** The map lives in a `Background` area, and
   walkers' built-in zoom only fires when the map is the top interactable layer
   under the pointer - which a background area never is. So walkers' zoom gesture

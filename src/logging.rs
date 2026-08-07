@@ -607,6 +607,34 @@ mod tests {
         assert!(text.contains(",node,2,"));
     }
 
+    /// The graph keeps a bounded window; the file keeps everything. What
+    /// scrolled off has to be counted, because the page says so - a run that
+    /// silently lost its first hour would read as a run that never had one.
+    #[test]
+    fn the_graph_window_drops_the_oldest_and_says_how_many() {
+        let mut log = Logger::default();
+        for i in 0..MAX_ROWS as u64 {
+            log.push(LogRow::new(LogSource::Phone, at(i))).unwrap();
+        }
+        assert_eq!(log.rows().len(), MAX_ROWS);
+        assert_eq!(log.dropped(), 0);
+        assert_eq!(log.rows()[0].time, at(0));
+
+        // One past the window: the oldest row goes, not the newest.
+        log.push(LogRow::new(LogSource::Board, at(MAX_ROWS as u64)))
+            .unwrap();
+        assert_eq!(log.rows().len(), MAX_ROWS);
+        assert_eq!(log.dropped(), 1);
+        assert_eq!(log.rows()[0].time, at(1));
+        assert_eq!(log.rows().last().unwrap().source, LogSource::Board);
+
+        // Emptying the graph resets the count with it: nothing has scrolled
+        // off a window that was cleared on purpose.
+        log.clear_rows();
+        assert!(log.rows().is_empty());
+        assert_eq!(log.dropped(), 0);
+    }
+
     #[test]
     fn stats_read_the_columns_they_name() {
         let mut row = LogRow::new(LogSource::Node(1), UNIX_EPOCH);

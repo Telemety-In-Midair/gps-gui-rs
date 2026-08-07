@@ -1073,6 +1073,59 @@ mod tests {
         assert!(matches!(push.on_ack(&ok(None)), PushStep::Done));
     }
 
+    /// A config that divides exactly into chunks must not send a trailing
+    /// empty OP_DATA: the board reads a zero-length chunk as a framing error,
+    /// so the push would fail at the last byte rather than the first.
+    #[test]
+    fn config_push_ends_cleanly_on_a_chunk_boundary() {
+        let data = vec![0xABu8; ble::BULK_DATA_MAX * 2];
+        let mut push = ConfigPush::new(data.clone());
+        push.start().unwrap();
+        let ok = Ack {
+            id: ble::ACK_ID_BULK,
+            status: packet::ACK_OK,
+            value_u32: None,
+        };
+
+        let mut chunks = Vec::new();
+        loop {
+            match push.on_ack(&ok) {
+                PushStep::Write(f) if f[0] == ble::OP_DATA => chunks.push(f[3..].to_vec()),
+                PushStep::Write(f) => {
+                    assert_eq!(f, vec![ble::OP_END]);
+                    break;
+                }
+                other => panic!(
+                    "expected a write, got {}",
+                    match other {
+                        PushStep::Done => "done",
+                        _ => "a failure",
+                    }
+                ),
+            }
+        }
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|c| c.len() == ble::BULK_DATA_MAX));
+        assert_eq!(chunks.concat(), data);
+        assert!(matches!(push.on_ack(&ok), PushStep::Done));
+    }
+
+    /// An empty config still has to walk BEGIN -> END rather than stall: the
+    /// board opened a transfer on the BEGIN and would sit on it otherwise.
+    #[test]
+    fn config_push_with_no_bytes_still_closes_the_transfer() {
+        let mut push = ConfigPush::new(Vec::new());
+        let begin = push.start().unwrap();
+        assert_eq!(begin[2..6], 0u32.to_le_bytes());
+        let ok = Ack {
+            id: ble::ACK_ID_BULK,
+            status: packet::ACK_OK,
+            value_u32: None,
+        };
+        assert!(matches!(push.on_ack(&ok), PushStep::Write(f) if f == vec![ble::OP_END]));
+        assert!(matches!(push.on_ack(&ok), PushStep::Done));
+    }
+
     /// A NAK at any point fails the push, and a WIO NAK on the final op is
     /// blamed on the file's content rather than the link.
     #[test]

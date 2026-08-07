@@ -41,9 +41,36 @@ pub fn interval_us(hz: f32) -> i32 {
     (1_000_000.0 / hz).clamp(1.0, 10_000_000.0) as i32
 }
 
+/// Azimuth in degrees clockwise from north from a rotation-vector quaternion
+/// `(x, y, z, w)`. Mirrors Android's `getRotationMatrixFromVector` followed by
+/// `getOrientation` (azimuth = `atan2(R[1], R[4])`).
+///
+/// Outside `imp` so it builds - and is tested - on the host: it is the
+/// arithmetic that decides which way the map points, and none of it needs the
+/// NDK. Only the sensor loop calls it, so off Android it is used by the tests
+/// alone.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn azimuth_degrees(x: f32, y: f32, z: f32, w: f32) -> f32 {
+    let r1 = 2.0 * (x * y - z * w);
+    let r4 = 1.0 - 2.0 * (x * x + z * z);
+    (r1.atan2(r4).to_degrees() + 360.0) % 360.0
+}
+
+/// Smallest absolute difference between two headings, in degrees (0..=180).
+/// Host-side only the tests reach it; see [`azimuth_degrees`].
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn angle_diff(a: f32, b: f32) -> f32 {
+    let d = (a - b).abs() % 360.0;
+    if d > 180.0 {
+        360.0 - d
+    } else {
+        d
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::interval_us;
+    use super::{angle_diff, azimuth_degrees, interval_us};
 
     #[test]
     fn rates_become_intervals_and_bad_ones_a_second() {
@@ -53,6 +80,54 @@ mod tests {
         assert_eq!(interval_us(0.5), 2_000_000);
         assert_eq!(interval_us(0.0), 1_000_000);
         assert_eq!(interval_us(f32::NAN), 1_000_000);
+    }
+
+    /// A quaternion for a device lying flat, rotated `deg` clockwise from
+    /// north about the vertical axis. That is a rotation about -z in the
+    /// world frame, which is what the azimuth measures.
+    fn flat_facing(deg: f32) -> (f32, f32, f32, f32) {
+        let half = (-deg).to_radians() / 2.0;
+        (0.0, 0.0, half.sin(), half.cos())
+    }
+
+    /// North up, east to the right: a heading read a quadrant out would turn
+    /// the map the wrong way in heading-up mode.
+    #[test]
+    fn azimuth_reads_clockwise_from_north() {
+        for want in [0.0, 45.0, 90.0, 180.0, 270.0, 359.0] {
+            let (x, y, z, w) = flat_facing(want);
+            let got = azimuth_degrees(x, y, z, w);
+            assert!(
+                angle_diff(got, want) < 0.01,
+                "quaternion for {want} deg read as {got}"
+            );
+        }
+    }
+
+    /// Never negative and never past a full turn: the callers feed this
+    /// straight into a rotation and into [`angle_diff`].
+    #[test]
+    fn azimuth_stays_within_one_turn() {
+        for deg in (-720..=720).step_by(7) {
+            let (x, y, z, w) = flat_facing(deg as f32);
+            let az = azimuth_degrees(x, y, z, w);
+            assert!((0.0..360.0).contains(&az), "{deg} deg gave {az}");
+        }
+    }
+
+    /// What gates a heading being sent at all, so a difference measured the
+    /// long way round would either spam the channel or silence it.
+    #[test]
+    fn angle_diff_takes_the_short_way_round() {
+        assert_eq!(angle_diff(10.0, 10.0), 0.0);
+        assert_eq!(angle_diff(10.0, 20.0), 10.0);
+        assert_eq!(angle_diff(20.0, 10.0), 10.0);
+        // Across north, which is the case a plain subtraction gets wrong.
+        assert_eq!(angle_diff(350.0, 10.0), 20.0);
+        assert_eq!(angle_diff(10.0, 350.0), 20.0);
+        // Directly opposite is the largest it can be.
+        assert_eq!(angle_diff(0.0, 180.0), 180.0);
+        assert_eq!(angle_diff(90.0, 270.0), 180.0);
     }
 }
 
@@ -65,7 +140,7 @@ mod imp {
 
     use ndk_sys as ns;
 
-    use super::{interval_us, CompassHandle};
+    use super::{angle_diff, azimuth_degrees, interval_us, CompassHandle};
 
     /// Rate the sensor starts at until the UI asks for another.
     const DEFAULT_HZ: f32 = 60.0;
@@ -208,24 +283,6 @@ mod imp {
         ns::ASensorManager_destroyEventQueue(manager, queue);
     }
 
-    /// Azimuth in degrees clockwise from north from a rotation-vector quaternion
-    /// `(x, y, z, w)`. Mirrors Android's `getRotationMatrixFromVector` followed by
-    /// `getOrientation` (azimuth = `atan2(R[1], R[4])`).
-    fn azimuth_degrees(x: f32, y: f32, z: f32, w: f32) -> f32 {
-        let r1 = 2.0 * (x * y - z * w);
-        let r4 = 1.0 - 2.0 * (x * x + z * z);
-        (r1.atan2(r4).to_degrees() + 360.0) % 360.0
-    }
-
-    /// Smallest absolute difference between two headings, in degrees (0..=180).
-    fn angle_diff(a: f32, b: f32) -> f32 {
-        let d = (a - b).abs() % 360.0;
-        if d > 180.0 {
-            360.0 - d
-        } else {
-            d
-        }
-    }
 }
 
 #[cfg(target_os = "android")]

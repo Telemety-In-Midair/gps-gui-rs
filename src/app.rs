@@ -165,7 +165,11 @@ fn haversine_m(a: Position, b: Position) -> f64 {
     let dlat = (b.y() - a.y()).to_radians();
     let dlon = (b.x() - a.x()).to_radians();
     let h = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * EARTH_RADIUS_M * h.sqrt().asin()
+    // `h` is a squared sine and so cannot exceed 1 in exact arithmetic, but for
+    // near-antipodal points rounding carries it a few ulps past, where `asin`
+    // is undefined. Clamping there costs nothing and keeps a NaN - which would
+    // spread through every distance comparison it reached - out of the app.
+    2.0 * EARTH_RADIUS_M * h.clamp(0.0, 1.0).sqrt().asin()
 }
 
 /// Initial great-circle bearing from `a` to `b`, in degrees clockwise from
@@ -359,7 +363,7 @@ impl PointFilter {
 }
 
 /// A map marker the user can double-click/tap to inspect.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MarkerKind {
     /// The phone / manual position dot.
     You,
@@ -530,10 +534,16 @@ pub struct MyApp {
     /// Session state, like `heading_up` and the base layer: it clears the map
     /// for a moment, and the settings it overrides are the saved ones.
     show_paths: bool,
-    /// Tracking mode: index into the available beacons of the one being kept in
-    /// frame (user near the bottom, beacon near the top). `None` is off. The
-    /// track button cycles it; the heading button exits.
-    tracking_beacon: Option<usize>,
+    /// Tracking mode: which beacon is being kept in frame (user near the
+    /// bottom, beacon near the top). `None` is off. The track button cycles it;
+    /// the heading button exits.
+    ///
+    /// The board itself rather than its place in [`MyApp::beacon_targets`]:
+    /// that list is ordered (the connected board, then the nodes by address)
+    /// and grows in the middle, so an index would quietly move to another
+    /// board the moment the connected board got a fix or a lower-numbered node
+    /// was heard.
+    tracking_beacon: Option<MarkerKind>,
     /// Rotation angle actually drawn, eased toward the live heading each frame so
     /// the map turns smoothly instead of snapping between sensor readings.
     smoothed_heading: Option<f32>,
@@ -1573,8 +1583,64 @@ impl MyApp {
     /// `None` until that board has a position.
     fn distance_target(&self) -> Option<(MarkerKind, Position)> {
         match self.tracking_beacon {
-            Some(idx) => self.beacon_targets().get(idx).copied(),
+            Some(kind) => self.beacon_target(kind),
             None => self.beacon.map(|p| (MarkerKind::Beacon, p)),
+        }
+    }
+
+    /// One board out of [`Self::beacon_targets`], or `None` when it has no
+    /// position to point at any more.
+    fn beacon_target(&self, kind: MarkerKind) -> Option<(MarkerKind, Position)> {
+        self.beacon_targets().into_iter().find(|&(k, _)| k == kind)
+    }
+
+    /// Whether tracking mode can be entered: it frames the user and a board
+    /// together, so it needs both.
+    fn can_track(&self) -> bool {
+        self.current.is_some() && !self.beacon_targets().is_empty()
+    }
+
+    /// Where the tracking button would go next: the board after the one being
+    /// followed, or the first board when the mode is off. `None` means the next
+    /// press leaves the mode.
+    ///
+    /// A followed board that has dropped off the list entirely (its node
+    /// forgotten on a board switch) starts the walk over rather than ending it,
+    /// so the button never reads as "exit" for a board that is no longer there.
+    fn next_tracking(&self) -> Option<MarkerKind> {
+        let targets = self.beacon_targets();
+        let after = self.tracking_beacon.and_then(|current| {
+            targets
+                .iter()
+                .position(|&(kind, _)| kind == current)
+                .map(|i| targets.get(i + 1).map(|&(kind, _)| kind))
+        });
+        match after {
+            // The followed board is listed; the answer is whatever follows it.
+            Some(next) => next,
+            // Not tracking, or tracking something no longer listed.
+            None => targets.first().map(|&(kind, _)| kind),
+        }
+    }
+
+    /// Advance the tracking selection, as the map bar's track button does: into
+    /// the mode on the first board, along the list, and out of it after the
+    /// last one. A single board is therefore a plain on/off toggle.
+    fn cycle_tracking(&mut self) {
+        let next = self.next_tracking();
+        // Tracking and heading-up are mutually exclusive.
+        if next.is_some() && self.tracking_beacon.is_none() {
+            self.heading_up = false;
+        }
+        self.tracking_beacon = next;
+    }
+
+    /// What the track button's press would do, for its hover text.
+    fn tracking_hint(&self) -> &'static str {
+        match (self.tracking_beacon, self.next_tracking()) {
+            (None, _) => "Track beacon",
+            (Some(_), Some(_)) => "Next beacon",
+            (Some(_), None) => "Exit tracking",
         }
     }
 
@@ -1586,12 +1652,6 @@ impl MyApp {
             (Some(cur), Some((_, target))) => Some(haversine_m(cur, target)),
             _ => None,
         }
-    }
-
-    /// The beacon boards tracking mode can cycle through, as positions. Backs
-    /// the tracking index and the "can track" test.
-    fn beacon_positions(&self) -> Vec<Position> {
-        self.beacon_targets().into_iter().map(|(_, p)| p).collect()
     }
 
     /// A marker's display name, resolving a remote node's nickname from the
@@ -1609,13 +1669,12 @@ impl MyApp {
     /// near the top and the user near the bottom, or `None` when not tracking
     /// or a position is missing.
     fn tracking_orientation(&mut self, ctx: &egui::Context, screen: egui::Rect) -> Option<f32> {
-        let idx = self.tracking_beacon?;
-        let beacons = self.beacon_positions();
+        let kind = self.tracking_beacon?;
         // Tracking needs both the user position and the chosen beacon. If either
-        // is gone (no fix yet, beacon disconnected, index now out of range),
-        // leave tracking mode and return `None` so the map unlocks instead of
-        // freezing on a view it can no longer manage.
-        let (Some(user), Some(&beacon)) = (self.current, beacons.get(idx)) else {
+        // is gone (no fix yet, beacon disconnected, the node forgotten on a
+        // board switch), leave tracking mode and return `None` so the map
+        // unlocks instead of freezing on a view it can no longer manage.
+        let (Some(user), Some((_, beacon))) = (self.current, self.beacon_target(kind)) else {
             self.tracking_beacon = None;
             return None;
         };
@@ -2258,4 +2317,302 @@ mod tests {
         .unwrap_err()
         .contains("advertising window"));
     }
+
+    /// The distance every range reading in the log and every label on the map
+    /// is measured with. Checked against published figures rather than against
+    /// itself, so an error in the formula cannot agree with the test.
+    #[test]
+    fn haversine_matches_known_distances() {
+        let close = |got: f64, want: f64| {
+            assert!(
+                (got - want).abs() / want < 0.005,
+                "got {got} m, wanted about {want} m"
+            );
+        };
+        // A degree of latitude is about 111.2 km anywhere.
+        close(haversine_m(lat_lon(0.0, 0.0), lat_lon(1.0, 0.0)), 111_195.0);
+        // A degree of longitude shortens with the cosine of the latitude.
+        close(haversine_m(lat_lon(60.0, 0.0), lat_lon(60.0, 1.0)), 55_597.0);
+        // London to Paris.
+        close(
+            haversine_m(lat_lon(51.5074, -0.1278), lat_lon(48.8566, 2.3522)),
+            343_600.0,
+        );
+        // A point is no distance from itself, and the measure is symmetric.
+        let (a, b) = (lat_lon(51.4779, -0.0015), lat_lon(48.8566, 2.3522));
+        assert_eq!(haversine_m(a, a), 0.0);
+        assert_eq!(haversine_m(a, b), haversine_m(b, a));
+    }
+
+    /// Two points on opposite sides of the earth. Nothing in the app puts a
+    /// node there on purpose, but a garbled packet can decode to any
+    /// coordinate at all, and a NaN escaping into the log or the tracking
+    /// zoom is far worse than a wrong number: it poisons every comparison it
+    /// reaches.
+    ///
+    /// The last pair is the case that made this necessary: near-antipodal
+    /// coordinates drive the haversine's `h` a few ulps past 1, where `asin`
+    /// is undefined.
+    #[test]
+    fn antipodal_points_have_a_finite_distance() {
+        for (a, b) in [
+            (lat_lon(0.0, 0.0), lat_lon(0.0, 180.0)),
+            (lat_lon(90.0, 0.0), lat_lon(-90.0, 0.0)),
+            (lat_lon(51.4779, -0.0015), lat_lon(-51.4779, 179.9985)),
+            (
+                lat_lon(-66.541_632_612_071_34, -140.469_191_196_212_96),
+                lat_lon(66.541_632_611_688_09, 39.530_808_804_097_774),
+            ),
+        ] {
+            let d = haversine_m(a, b);
+            assert!(d.is_finite(), "{a:?} -> {b:?} gave {d}");
+            // Half the circumference, give or take the earth's shape.
+            assert!((d - 20_015_000.0).abs() < 2_000.0, "{d} m");
+        }
+    }
+
+    /// Tracking mode turns the map by this, so a wrong quadrant points the
+    /// user backwards.
+    #[test]
+    fn bearing_points_the_right_way() {
+        let origin = lat_lon(51.0, 0.0);
+        let close = |got: f32, want: f32| {
+            let delta = (got - want + 540.0).rem_euclid(360.0) - 180.0;
+            assert!(delta.abs() < 0.5, "got {got} deg, wanted {want}");
+        };
+        close(bearing_deg(origin, lat_lon(52.0, 0.0)), 0.0);
+        close(bearing_deg(origin, lat_lon(51.0, 1.0)), 90.0);
+        close(bearing_deg(origin, lat_lon(50.0, 0.0)), 180.0);
+        close(bearing_deg(origin, lat_lon(51.0, -1.0)), 270.0);
+        // Never negative: the callers feed this straight into a rotation.
+        assert!((0.0..360.0).contains(&bearing_deg(origin, lat_lon(51.0, -0.5))));
+    }
+
+    /// What decimates a track: the first point always lands, and later ones
+    /// only once they have moved far enough to be worth a segment.
+    #[test]
+    fn far_enough_decimates_a_track() {
+        let a = lat_lon(51.4779, -0.0015);
+        // About 11 m north.
+        let b = lat_lon(51.477_9 + 0.000_1, -0.0015);
+        assert!(far_enough(None, a, 10.0));
+        assert!(!far_enough(Some(&a), a, 10.0));
+        assert!(far_enough(Some(&a), b, 10.0));
+        assert!(!far_enough(Some(&a), b, 20.0));
+        // A zero minimum records everything, which is what turning decimation
+        // off has to mean.
+        assert!(far_enough(Some(&a), a, 0.0));
+    }
+
+    /// A node's uptime, which unlike an interval has to render 0 as a time.
+    #[test]
+    fn uptime_text_scales_without_calling_zero_off() {
+        assert_eq!(uptime_text(0), "0 s");
+        assert_eq!(uptime_text(59), "59 s");
+        assert_eq!(uptime_text(60), "1 min");
+        assert_eq!(uptime_text(3599), "59 min");
+        assert_eq!(uptime_text(3600), "1 h");
+        // The field saturates at 18 h, so this is the largest it ever reads.
+        assert_eq!(uptime_text(u16::MAX), "18 h");
+    }
+
+    /// A silent GPS module is a wiring answer and a searching one is a sky
+    /// answer; the whole point of the ping is telling them apart.
+    #[test]
+    fn ping_reason_separates_a_silent_module_from_a_search() {
+        let ping = |gps_present, had_fix, uptime_s| NodePing {
+            src: 3,
+            rssi: -90,
+            uptime_s,
+            gps_present,
+            had_fix,
+            age_s: 0,
+        };
+        assert_eq!(ping_reason(ping(false, false, 120)), "gps silent");
+        // A module that is talking is never called silent, even if it has
+        // never had a fix.
+        assert_eq!(ping_reason(ping(true, false, 120)), "no fix since boot, up 2 min");
+        assert_eq!(ping_reason(ping(true, true, 120)), "searching, up 2 min");
+    }
+
+    /// A node the board replayed on connect belongs where it was heard, not at
+    /// the moment it reached us: a ten-minute-old report entering the track as
+    /// current would draw a path the node never took.
+    #[test]
+    fn heard_at_places_a_replayed_report_in_the_past() {
+        let now = SystemTime::now();
+        let live = heard_at(0);
+        assert!(live.duration_since(now).unwrap_or_default() < Duration::from_secs(1));
+        let replayed = heard_at(600);
+        let age = now.duration_since(replayed).expect("in the past");
+        assert!(
+            age >= Duration::from_secs(599) && age <= Duration::from_secs(601),
+            "{age:?}"
+        );
+        // The largest age the field can carry must still be a real time.
+        assert!(heard_at(u16::MAX) < now);
+    }
+
+    /// A receiver that is up and searching is a different state from one that
+    /// has stopped reporting, so a fixless packet still logs - with the
+    /// coordinate columns empty rather than at the null island.
+    #[test]
+    fn packet_row_leaves_a_fixless_packet_without_coordinates() {
+        let with_fix = packet_row(LogSource::Board, fix(), SystemTime::UNIX_EPOCH);
+        assert_eq!(with_fix.fix, Some(true));
+        assert_eq!(with_fix.sats, Some(7));
+        assert!(with_fix.lat.is_some() && with_fix.lon.is_some());
+
+        let searching = PositionPacket {
+            sats: 2,
+            ..PositionPacket::default()
+        };
+        let row = packet_row(LogSource::Node(4), searching, SystemTime::UNIX_EPOCH);
+        assert_eq!(row.fix, Some(false));
+        assert_eq!(row.sats, Some(2));
+        assert_eq!(row.lat, None);
+        assert_eq!(row.lon, None);
+        assert_eq!(row.alt_m, None);
+        assert_eq!(row.speed_mps, None);
+    }
+
+    /// The points page filter. Remote admits every address, since the filter is
+    /// "any node" rather than a particular one.
+    #[test]
+    fn point_filter_admits_only_its_own_sources() {
+        use PointSource::{Esp, Phone, Remote};
+        for source in [Phone, Esp, Remote(1), Remote(255)] {
+            assert!(PointFilter::All.admits(source));
+        }
+        assert!(PointFilter::Phone.admits(Phone));
+        assert!(!PointFilter::Phone.admits(Esp));
+        assert!(!PointFilter::Esp.admits(Remote(1)));
+        assert!(PointFilter::Remote.admits(Remote(1)));
+        assert!(PointFilter::Remote.admits(Remote(255)));
+        assert!(!PointFilter::Remote.admits(Phone));
+    }
+
+    /// Give a node a position, as a relayed report would.
+    fn place_node(app: &mut MyApp, addr: u8, lat: f64) {
+        app.remotes.entry(addr).or_default().pos = Some(lat_lon(lat, 0.0));
+    }
+
+    /// The board being tracked must not change under the user.
+    ///
+    /// [`MyApp::beacon_targets`] is ordered - the connected board, then the
+    /// nodes by address - and grows in the middle. Tracking used to hold an
+    /// index into it, so the connected board getting a fix, or a
+    /// lower-numbered node being heard, shifted every later entry along and
+    /// silently handed tracking (and the distance read-out, and the line drawn
+    /// on the map) to a different board.
+    #[test]
+    fn tracking_stays_on_the_board_it_was_pointed_at() {
+        let (mut app, _cmds, _events) = test_app();
+        let tracked = |app: &MyApp| app.distance_target().map(|(kind, _)| kind);
+
+        app.current = Some(lat_lon(51.0, 0.0));
+        place_node(&mut app, 5, 51.1);
+        app.cycle_tracking();
+        assert_eq!(tracked(&app), Some(MarkerKind::Remote(5)));
+
+        // The connected board gets a fix of its own, which lists ahead of
+        // every node.
+        app.beacon = Some(lat_lon(52.0, 1.0));
+        assert_eq!(tracked(&app), Some(MarkerKind::Remote(5)));
+
+        // A lower-numbered node is heard, which lists ahead of node 5.
+        place_node(&mut app, 3, 51.05);
+        assert_eq!(tracked(&app), Some(MarkerKind::Remote(5)));
+
+        // And the node the user is on going quiet does not promote a
+        // neighbour into its place.
+        app.remotes.remove(&5);
+        assert_eq!(tracked(&app), None);
+    }
+
+    /// The track button walks the boards in list order and leaves the mode
+    /// after the last one, so a single board is a plain on/off toggle.
+    #[test]
+    fn the_track_button_walks_every_board_and_then_exits() {
+        let (mut app, _cmds, _events) = test_app();
+        app.current = Some(lat_lon(51.0, 0.0));
+
+        // Nothing to track: the mode cannot be entered at all.
+        assert!(!app.can_track());
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, None);
+
+        app.beacon = Some(lat_lon(51.2, 0.0));
+        place_node(&mut app, 3, 51.3);
+        place_node(&mut app, 9, 51.4);
+        assert!(app.can_track());
+
+        assert_eq!(app.tracking_hint(), "Track beacon");
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Beacon));
+        assert_eq!(app.tracking_hint(), "Next beacon");
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Remote(3)));
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Remote(9)));
+        // The last one, so the next press is the way out.
+        assert_eq!(app.tracking_hint(), "Exit tracking");
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, None);
+    }
+
+    /// Entering tracking turns heading-up off - the two both rotate the map -
+    /// but a press that cannot enter must not turn it off for nothing.
+    #[test]
+    fn entering_tracking_leaves_heading_up() {
+        let (mut app, _cmds, _events) = test_app();
+        app.heading_up = true;
+        // No board to track: nothing happens, heading-up included.
+        app.cycle_tracking();
+        assert!(app.heading_up);
+
+        app.current = Some(lat_lon(51.0, 0.0));
+        app.beacon = Some(lat_lon(51.2, 0.0));
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Beacon));
+        assert!(!app.heading_up);
+    }
+
+    /// A board that goes away while it is being tracked: the walk starts over
+    /// rather than reading as "the last board", which would have the button
+    /// say "exit" for something that is no longer on the list.
+    #[test]
+    fn tracking_a_board_that_disappears_starts_the_walk_over() {
+        let (mut app, _cmds, _events) = test_app();
+        app.current = Some(lat_lon(51.0, 0.0));
+        place_node(&mut app, 7, 51.5);
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Remote(7)));
+
+        // Node 7 is forgotten and another board takes the air.
+        app.remotes.remove(&7);
+        app.beacon = Some(lat_lon(51.2, 0.0));
+        assert_eq!(app.tracking_hint(), "Next beacon");
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Beacon));
+    }
+
+    /// The config has to be saved somewhere writable. On Android the working
+    /// directory is not, so the path is derived from the cache directory the
+    /// platform handed over.
+    #[test]
+    fn default_config_path_lands_beside_the_cache() {
+        assert_eq!(
+            default_config_path(Some(std::path::Path::new("/data/app/files/tiles"))),
+            "/data/app/files/gps-config.toml"
+        );
+        // No cache directory, or one with no parent to speak of: the bare
+        // filename, which on desktop is the working directory.
+        assert_eq!(default_config_path(None), DEFAULT_CONFIG_NAME);
+        assert_eq!(
+            default_config_path(Some(std::path::Path::new("tiles"))),
+            DEFAULT_CONFIG_NAME
+        );
+    }
 }
+

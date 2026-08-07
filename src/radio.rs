@@ -297,16 +297,24 @@ impl RadioDoc {
         }
     }
 
-    /// The document as it goes to the board: comments, blank lines and the
-    /// `<key>_description` / `<key>_type` metadata keys dropped, each kept
-    /// line trimmed. The firmware ignores every stripped byte, and the
-    /// documented file is several times [`CONFIG_MAX`], so stripping is what
-    /// makes a push fit at all - not a size optimization.
+    /// The document as it goes to the board: comments (whole-line and
+    /// trailing a setting), blank lines and the `<key>_description` /
+    /// `<key>_type` metadata keys dropped, each kept line trimmed. The
+    /// firmware ignores every stripped byte, and the documented file is
+    /// several times [`CONFIG_MAX`], so stripping is what makes a push fit at
+    /// all - not a size optimization.
     pub fn wire_bytes(&self) -> Vec<u8> {
         let mut out = String::new();
         for line in self.doc.to_string().lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+            // Everything from the first `#` is comment, whether the line is
+            // one outright or a setting with a note after it. Cutting at the
+            // same place the firmware parser does means nothing is dropped
+            // here that the board would have read.
+            let trimmed = match line.split_once('#') {
+                Some((before, _)) => before.trim(),
+                None => line.trim(),
+            };
+            if trimmed.is_empty() {
                 continue;
             }
             let key = trimmed.split('=').next().unwrap_or("").trim();
@@ -524,6 +532,37 @@ power_mode_type = \"enum:full,psmoo,psmct\"
         let rx_boost = d.fields.iter().find(|f| f.key == "rx_boost").unwrap();
         assert_eq!(rx_boost.ty, FieldType::Bool);
         assert!(rx_boost.description.is_some());
+    }
+
+    /// Stripping is what makes a push fit under [`CONFIG_MAX`] at all, so it
+    /// has to take every comment - including one trailing a setting, which a
+    /// hand-edited file is full of. The board drops everything after a `#`
+    /// too, so nothing sent that way was ever going to be read.
+    #[test]
+    fn wire_bytes_strips_comments_trailing_a_setting() {
+        const COMMENTED: &str = "\
+[radio]
+frequency_hz = 915000000  # keep it inside the band
+spreading_factor = 7# no space before the hash either
+# a whole-line comment
+power_mode = \"full\"
+";
+        let d = RadioDoc {
+            doc: COMMENTED.parse().unwrap(),
+            fields: collect_fields(&COMMENTED.parse().unwrap()),
+            path: PathBuf::from("RADIO.toml"),
+            dirty: false,
+        };
+        let wire = String::from_utf8(d.wire_bytes()).unwrap();
+        assert!(!wire.contains('#'), "{wire}");
+        assert_eq!(
+            wire,
+            "[radio]\nfrequency_hz = 915000000\nspreading_factor = 7\npower_mode = \"full\"\n"
+        );
+        // And it still parses as the settings it carried.
+        let back = midair_proto::radiocfg::parse(&wire).unwrap();
+        assert_eq!(back.frequency_hz, 915_000_000);
+        assert_eq!(back.spreading_factor, 7);
     }
 
     #[test]

@@ -1649,3 +1649,49 @@ impl MyApp {
             });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lat_lon;
+
+    /// The manual position bar on desktop, and the only way to place the
+    /// marker without a GNSS.
+    #[test]
+    fn coordinates_parse_with_either_separator() {
+        assert_eq!(parse_lat_lon("51.4779, -0.0015"), Some((51.4779, -0.0015)));
+        assert_eq!(parse_lat_lon("51.4779 -0.0015"), Some((51.4779, -0.0015)));
+        assert_eq!(parse_lat_lon("  51.4779 ,  -0.0015  "), Some((51.4779, -0.0015)));
+        assert_eq!(parse_lat_lon("0 0"), Some((0.0, 0.0)));
+        // The poles and the antimeridian are places, so the ends are inclusive.
+        assert_eq!(parse_lat_lon("90, 180"), Some((90.0, 180.0)));
+        assert_eq!(parse_lat_lon("-90, -180"), Some((-90.0, -180.0)));
+    }
+
+    /// Half a coordinate, or one with something after it, is a coordinate
+    /// still being typed rather than one to move the marker to.
+    #[test]
+    fn incomplete_and_trailing_input_is_refused() {
+        assert_eq!(parse_lat_lon(""), None);
+        assert_eq!(parse_lat_lon("   "), None);
+        assert_eq!(parse_lat_lon("51.4779"), None);
+        assert_eq!(parse_lat_lon("51.4779,"), None);
+        assert_eq!(parse_lat_lon("51.4779, -0.0015, 12"), None);
+        assert_eq!(parse_lat_lon("51.4779, -0.0015 m"), None);
+        assert_eq!(parse_lat_lon("north, west"), None);
+    }
+
+    /// Out of range is a typo, not a place - and the non-finite spellings
+    /// `f64` accepts have to be caught here, since a NaN would move the marker
+    /// somewhere no comparison could get it back from.
+    #[test]
+    fn out_of_range_and_non_finite_coordinates_are_refused() {
+        assert_eq!(parse_lat_lon("90.001, 0"), None);
+        assert_eq!(parse_lat_lon("-90.001, 0"), None);
+        assert_eq!(parse_lat_lon("0, 180.001"), None);
+        assert_eq!(parse_lat_lon("0, -180.001"), None);
+        assert_eq!(parse_lat_lon("nan, 0"), None);
+        assert_eq!(parse_lat_lon("0, nan"), None);
+        assert_eq!(parse_lat_lon("inf, 0"), None);
+        assert_eq!(parse_lat_lon("0, -inf"), None);
+    }
+}

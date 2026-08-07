@@ -425,10 +425,7 @@ impl MyApp {
 
         // Time is plotted from the window's own start, so the axis reads as
         // elapsed rather than as a ten-digit epoch count.
-        let x_origin = match self.log_x {
-            LogAxis::Time => x_min,
-            LogAxis::Stat(_) => 0.0,
-        };
+        let x_origin = x_origin(self.log_x, series);
         let x_span = (x_max - x_min).max(f64::EPSILON);
         let y_span = (y_max - y_min).max(f64::EPSILON);
         let to_screen = |p: [f64; 2]| {
@@ -517,7 +514,7 @@ impl MyApp {
             label_color,
         );
         let x_label = match self.log_x {
-            LogAxis::Time => format!("Time from {}", iso8601(first_time(self))),
+            LogAxis::Time => format!("Time from {}", iso8601(unix_time(x_origin))),
             LogAxis::Stat(s) => match s.unit() {
                 "" => s.label().to_string(),
                 unit => format!("{} ({unit})", s.label()),
@@ -589,13 +586,34 @@ impl MyApp {
     }
 }
 
-/// The time the plotted window starts at, for the X axis caption.
-fn first_time(app: &MyApp) -> std::time::SystemTime {
-    app.logger
-        .rows()
-        .first()
-        .map(|r| r.time)
-        .unwrap_or_else(std::time::SystemTime::now)
+/// What the X tick labels count from.
+///
+/// The time axis reads as elapsed, so it counts from the earliest point that
+/// is actually on the plot - not from the padded edge of the frame, which sits
+/// a twentieth of the span earlier and would have the first sample read as
+/// minutes into a run it starts. It is also not the first recorded row: a row
+/// carrying neither axis, or belonging to a hidden source, is not on the plot
+/// and cannot be what the axis begins at. A stat axis reads its own values, so
+/// it counts from nothing.
+///
+/// Only called with a non-empty series (the plot leaves early otherwise), so
+/// the minimum is a real value.
+fn x_origin(axis: LogAxis, series: &[Series]) -> f64 {
+    match axis {
+        LogAxis::Time => series
+            .iter()
+            .flat_map(|s| &s.points)
+            .map(|p| p[0])
+            .fold(f64::INFINITY, f64::min),
+        LogAxis::Stat(_) => 0.0,
+    }
+}
+
+/// Seconds since the epoch back into a timestamp, for the axis caption. A
+/// negative can only come from a device whose clock is set before 1970, which
+/// [`iso8601`] clamps in the same direction.
+fn unix_time(unix_s: f64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(unix_s.max(0.0))
 }
 
 /// The data's extent on both axes, padded so a series never runs along an
@@ -679,6 +697,49 @@ mod tests {
         assert_eq!(time_tick_text(3725.0), "1:02:05");
         // A negative can only come from float error at the origin.
         assert_eq!(time_tick_text(-0.001), "0s");
+    }
+
+    /// The elapsed axis and the wall-clock caption printed beside it have to
+    /// agree about when the run started, and the first sample has to read as
+    /// zero seconds into it.
+    ///
+    /// The origin used to be the padded edge of the plot frame, which sits a
+    /// twentieth of the span before any data: on an hour-long run the first
+    /// sample read as three minutes in, and the caption named a time three
+    /// minutes after the axis actually began.
+    #[test]
+    fn the_time_axis_counts_from_the_first_plotted_point() {
+        let start = 1_700_000_000.0;
+        let hour = 3600.0;
+        let series = vec![
+            Series {
+                source: LogSource::Phone,
+                color: egui::Color32::WHITE,
+                points: vec![[start, 1.0], [start + hour, 2.0]],
+            },
+            // A later source must not move the origin off the earliest point.
+            Series {
+                source: LogSource::Node(3),
+                color: egui::Color32::WHITE,
+                points: vec![[start + hour / 2.0, 9.0]],
+            },
+        ];
+
+        let origin = x_origin(LogAxis::Time, &series);
+        assert_eq!(origin, start);
+        // What the first sample reads on the axis, and the half-hour one.
+        assert_eq!(time_tick_text(start - origin), "0s");
+        assert_eq!(time_tick_text(start + hour / 2.0 - origin), "30:00");
+        // The caption names that same instant, so the two can be added up.
+        assert_eq!(iso8601(unix_time(origin)), "2023-11-14T22:13:20Z");
+
+        // The padding that keeps the series off the frame edge is still there;
+        // it just no longer moves what the labels count from.
+        let (x_min, x_max, ..) = bounds(&series).unwrap();
+        assert!(x_min < start && x_max > start + hour);
+
+        // A stat axis is absolute - it reads its own values, not an offset.
+        assert_eq!(x_origin(LogAxis::Stat(LogStat::Rssi), &series), 0.0);
     }
 
     #[test]

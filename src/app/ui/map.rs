@@ -165,34 +165,18 @@ impl MyApp {
                 // least one beacon; with either missing the button pulses red and
                 // does nothing (entering with a piece missing would lock the map
                 // on a view it can't frame).
-                let beacons = self.beacon_positions();
-                let can_track = self.current.is_some() && !beacons.is_empty();
-                let tracking_hint = match self.tracking_beacon {
-                    Some(i) if i + 1 < beacons.len() => "Next beacon",
-                    Some(_) => "Exit tracking",
-                    None => "Track beacon",
-                };
+                let can_track = self.can_track();
                 if icon_button_pulse(
                     ui,
                     icon,
                     egui::include_image!("../../../assets/icons/track.svg"),
                     (!can_track).then_some(self.config.ui.pulse),
                 )
-                .on_hover_text(tracking_hint)
+                .on_hover_text(self.tracking_hint())
                 .clicked()
                     && can_track
                 {
-                    self.tracking_beacon = match self.tracking_beacon {
-                        // Advance to the next beacon; past the last one the
-                        // mode ends, so a single beacon is a plain on/off toggle.
-                        Some(i) if i + 1 < beacons.len() => Some(i + 1),
-                        Some(_) => None,
-                        None => {
-                            // Tracking and heading-up are mutually exclusive.
-                            self.heading_up = false;
-                            Some(0)
-                        }
-                    };
+                    self.cycle_tracking();
                 }
 
                 // Base-layer toggle: like the rotate button, the glyph shows the
