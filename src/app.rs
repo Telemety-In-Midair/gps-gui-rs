@@ -124,6 +124,12 @@ const SEEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// scales with that (see [`MyApp::board_silence`]).
 const LINK_SILENT: Duration = Duration::from_secs(10);
 
+/// How long after connecting the board counts as warming up. The GPS/LoRa
+/// rail is off through sleep and through each wake window, and comes up only
+/// once a central connects, so the WIO has to boot and the GPS has to make a
+/// cold fix before there is anything to report.
+const BOARD_WARMUP: Duration = Duration::from_secs(45);
+
 /// A board seen by the current scan. The address is the map key and the
 /// advertised name is the same on every board, so the sighting itself carries
 /// only what changes: how strong it was, and when.
@@ -1660,6 +1666,127 @@ impl MyApp {
         match kind {
             MarkerKind::Remote(addr) => self.config.lora.label_of(addr),
             other => other.label(),
+        }
+    }
+
+    /// Every recorded point the Points page should list, newest first: the
+    /// three sources interleaved, narrowed by the page's source filter and its
+    /// search box.
+    ///
+    /// The filtering lives here rather than on the page so the page is a list
+    /// of widgets and this is a query over state. `query` arrives already
+    /// trimmed and lowercased, which is the form [`TrackPoint::matches`] takes.
+    pub(crate) fn visible_points(&self, filter: PointFilter, query: &str) -> Vec<TrackPoint> {
+        let remote_points = self.remotes.values().flat_map(|n| n.track.iter());
+        let mut rows: Vec<TrackPoint> = self
+            .track
+            .iter()
+            .chain(self.beacon_track.iter())
+            .chain(remote_points)
+            .filter(|p| filter.admits(p.source))
+            .filter(|p| query.is_empty() || p.matches(query))
+            .copied()
+            .collect();
+        // Newest first; every track interleaves by record time.
+        rows.sort_by_key(|p| std::cmp::Reverse(p.time));
+        rows
+    }
+
+    /// How many points are recorded across every track: yours, the beacon's
+    /// and the nodes'.
+    pub(crate) fn recorded_points(&self) -> usize {
+        let remote: usize = self.remotes.values().map(|n| n.track.len()).sum();
+        self.track.len() + self.beacon_track.len() + remote
+    }
+
+    /// Drop every recorded track. Not undoable, which is why the button behind
+    /// it lives on the Settings page rather than in the map bar.
+    pub(crate) fn discard_tracks(&mut self) {
+        self.track.clear();
+        self.beacon_track.clear();
+        for node in self.remotes.values_mut() {
+            node.track.clear();
+        }
+    }
+
+    /// Every remote node worth listing on the Status page: those with a
+    /// position or a time last heard, each with how it is doing and the signal
+    /// it came in at.
+    ///
+    /// A node with no position is listed too, with why it has none: a node
+    /// searching for the sky is a node that is up, and leaving it out makes it
+    /// indistinguishable from one that is out of range or dead.
+    pub(crate) fn remote_states(&self) -> Vec<(u8, String, i16)> {
+        self.remotes
+            .iter()
+            .filter(|(_, n)| n.pos.is_some() || n.heard.is_some())
+            .map(|(&addr, n)| (addr, n.state_text(), n.rssi))
+            .collect()
+    }
+
+    /// Whether the board is still within its post-connect warm-up. The
+    /// GPS/LoRa rail is off through sleep and through each wake window and
+    /// comes up only once a central connects, so the WIO has to boot and the
+    /// GPS has to make a cold fix before there is anything to report - an
+    /// empty read-out just after connecting is that, not a fault.
+    pub(crate) fn board_warming(&self) -> bool {
+        self.connected_at
+            .is_some_and(|t| t.elapsed() < BOARD_WARMUP)
+    }
+
+    /// Whether the board says its GPS/LoRa power rail is switched off, which
+    /// leaves the WIO-E5 and the GPS unpowered and reporting nothing.
+    pub(crate) fn rail_off(&self) -> bool {
+        self.board_settings.is_some_and(|s| !s.pwr_en)
+    }
+
+    /// Parse a whole number out of one of the board-setting text boxes, or
+    /// answer the ack line with what it should have been.
+    ///
+    /// The refusal goes to the same line the board's own answer would, so a
+    /// typo and a rejection read the same way and in the same place.
+    fn parse_setting(text: &str, unit: &str) -> Result<u32, String> {
+        text.trim()
+            .parse::<u32>()
+            .map_err(|_| format!("Enter a whole number of {unit}."))
+    }
+
+    /// Send the typed BLE notify interval to the board.
+    pub(crate) fn apply_notify_interval(&mut self) {
+        match Self::parse_setting(&self.ble_interval_text, "milliseconds") {
+            Ok(ms) => self.send_config(ConfigWrite::Interval(ms)),
+            Err(msg) => self.ble_ack = Some(Err(msg)),
+        }
+    }
+
+    /// Send the typed deep-sleep wake interval to the board. `secs` of 0
+    /// disables sleeping, which is what the Disable button sends.
+    pub(crate) fn apply_sleep_interval(&mut self, secs: Option<u32>) {
+        let secs = match secs {
+            Some(secs) => Ok(secs),
+            None => Self::parse_setting(&self.sleep_interval_text, "seconds"),
+        };
+        match secs {
+            Ok(secs) => self.send_config(ConfigWrite::Seconds {
+                id: ble::CFG_ESP_SLEEP_S,
+                secs,
+            }),
+            Err(msg) => self.ble_ack = Some(Err(msg)),
+        }
+    }
+
+    /// Send the typed advertising window to the board.
+    ///
+    /// No zero here, unlike the wake interval: a zero-length window would
+    /// leave a sleeping board unreachable by anything short of a physical
+    /// reset, so the board clamps 0 up to its floor rather than storing it.
+    pub(crate) fn apply_adv_window(&mut self) {
+        match Self::parse_setting(&self.adv_window_text, "seconds") {
+            Ok(secs) => self.send_config(ConfigWrite::Seconds {
+                id: ble::CFG_ESP_ADV_WINDOW_S,
+                secs,
+            }),
+            Err(msg) => self.ble_ack = Some(Err(msg)),
         }
     }
 

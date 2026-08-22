@@ -31,8 +31,90 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use midair_proto::lora;
 use midair_proto::radiocfg::RadioConfig;
 use toml_edit::{DocumentMut, Item, Table, Value};
+
+/// The 902-928 MHz frequency-hopping rule caps channel dwell at 400 ms per
+/// 20 s, which is the same thing as a 2% duty cycle.
+const DWELL_MS: f32 = 400.0;
+const DUTY_LIMIT: f32 = 0.02;
+
+/// The band the dwell limit applies to, in Hz.
+const US_BAND_HZ: std::ops::RangeInclusive<u32> = 902_000_000..=928_000_000;
+
+/// What one beacon at a given config costs in airtime, and whether that fits
+/// inside the US band's dwell limit.
+///
+/// Worked out from the config rather than measured, so the Radio page can show
+/// it while the settings are still being edited. Everything the page prints is
+/// a field here; the page decides only how to word it.
+pub struct Airtime {
+    /// Time on air for one beacon, in milliseconds.
+    pub toa_ms: f32,
+    /// Length of the frame that time is for, header included.
+    pub payload_len: usize,
+    /// Seconds between beacons, or 0 when the beacon is switched off.
+    pub interval_s: u16,
+    /// Airtime as a percentage of the beacon interval. `None` with the beacon
+    /// off, there being no periodic airtime to be a fraction of.
+    pub duty_pct: Option<f32>,
+    /// The regulatory budget for one transmission, when the configured
+    /// frequency is in the 902-928 MHz band. `None` out of band, where this
+    /// rule says nothing.
+    pub limit: Option<AirtimeLimit>,
+}
+
+/// The dwell budget one transmission has to fit inside, and which of the two
+/// rules is the binding one.
+pub struct AirtimeLimit {
+    /// The budget itself, in milliseconds.
+    pub budget_ms: f32,
+    /// Whether the 400 ms channel dwell ceiling is what sets the budget, as
+    /// opposed to the 2% duty cycle over the beacon interval.
+    pub dwell_bound: bool,
+}
+
+impl AirtimeLimit {
+    /// How far a transmission of `toa_ms` overruns the budget, or `None` when
+    /// it fits.
+    pub fn overrun_ms(&self, toa_ms: f32) -> Option<f32> {
+        (toa_ms > self.budget_ms).then_some(toa_ms - self.budget_ms)
+    }
+}
+
+/// Work out the airtime one beacon costs at `cfg`.
+///
+/// One beacon's budget is 2% of the interval, never above the 400 ms dwell
+/// ceiling: at an interval below 20 s more than one beacon lands in a 20 s
+/// window, so the per-beacon share tightens (200 ms at the 10 s default),
+/// while a single transmission can never top the ceiling either. With the
+/// beacon off there is no interval to take a share of, so only the ceiling is
+/// left to test against.
+pub fn airtime(cfg: &RadioConfig) -> Airtime {
+    let toa_ms = cfg.beacon_airtime_us() as f32 / 1000.0;
+    let interval_s = cfg.beacon_interval_s;
+    let duty_pct =
+        (interval_s > 0).then(|| toa_ms / (interval_s as f32 * 1000.0) * 100.0);
+    let limit = US_BAND_HZ.contains(&cfg.frequency_hz).then(|| {
+        let budget_ms = if interval_s == 0 {
+            DWELL_MS
+        } else {
+            (DUTY_LIMIT * interval_s as f32 * 1000.0).min(DWELL_MS)
+        };
+        AirtimeLimit {
+            budget_ms,
+            dwell_bound: budget_ms >= DWELL_MS,
+        }
+    });
+    Airtime {
+        toa_ms,
+        payload_len: lora::HEADER_LEN + lora::position_msg_len(cfg.beacon_fields),
+        interval_s,
+        duty_pct,
+        limit,
+    }
+}
 
 /// The input a field is rendered with, inferred from its TOML value or forced
 /// by a sibling `<key>_type` string.
@@ -645,5 +727,82 @@ power_mode = \"full\"
         assert_eq!(back.beacon_fields, cfg.beacon_fields);
         assert_eq!(back.gps.power_mode, PowerMode::PsmCyclic);
         assert_eq!(back.gps.dyn_model, DynModel::Automotive);
+    }
+
+    /// The airtime panel's two limits: which one binds, and what the beacon
+    /// interval does to the budget.
+    ///
+    /// At the 10 s default the 2% duty cycle is the tighter of the two (200 ms
+    /// against the 400 ms ceiling), and only past a 20 s interval does the
+    /// ceiling take over. Reading the wrong one out would understate the
+    /// budget by a factor of two at the setting the firmware ships with.
+    #[test]
+    fn the_tighter_of_the_dwell_and_duty_limits_binds() {
+        let mut cfg = RadioConfig::default();
+
+        cfg.beacon_interval_s = 10;
+        let limit = airtime(&cfg).limit.expect("915 MHz is in band");
+        // 2% of 10 s. Compared loosely because 0.02 has no exact `f32`, which
+        // is invisible at the one decimal the panel prints.
+        assert!((limit.budget_ms - 200.0).abs() < 0.01);
+        assert!(!limit.dwell_bound);
+
+        // Past 20 s the 2% share exceeds the ceiling, which then binds.
+        cfg.beacon_interval_s = 60;
+        let limit = airtime(&cfg).limit.expect("915 MHz is in band");
+        assert_eq!(limit.budget_ms, 400.0);
+        assert!(limit.dwell_bound);
+
+        // With the beacon off there is no interval to take a share of, so only
+        // the ceiling is left to test one transmission against.
+        cfg.beacon_interval_s = 0;
+        let est = airtime(&cfg);
+        assert!(est.duty_pct.is_none());
+        assert_eq!(est.limit.expect("still in band").budget_ms, 400.0);
+    }
+
+    /// Out of the 902-928 MHz band the dwell rule says nothing, so the panel
+    /// must not print a verdict it has no basis for.
+    #[test]
+    fn out_of_band_has_no_dwell_limit() {
+        let mut cfg = RadioConfig::default();
+        cfg.frequency_hz = 868_000_000;
+        assert!(airtime(&cfg).limit.is_none());
+        // The band ends are inclusive; a config sitting on one is in band.
+        cfg.frequency_hz = 902_000_000;
+        assert!(airtime(&cfg).limit.is_some());
+        cfg.frequency_hz = 928_000_000;
+        assert!(airtime(&cfg).limit.is_some());
+    }
+
+    /// An overrun is reported as how far over, not as a bare "too long", and a
+    /// transmission that fits reports nothing at all.
+    #[test]
+    fn an_overrun_says_how_far_over() {
+        let limit = AirtimeLimit {
+            budget_ms: 200.0,
+            dwell_bound: false,
+        };
+        assert_eq!(limit.overrun_ms(150.0), None);
+        assert_eq!(limit.overrun_ms(200.0), None);
+        assert_eq!(limit.overrun_ms(260.0), Some(60.0));
+    }
+
+    /// The duty cycle is the airtime as a percentage of the interval, and the
+    /// frame it is measured over carries the LoRa header as well as the
+    /// fields the beacon was configured to send.
+    #[test]
+    fn duty_cycle_and_frame_length_follow_the_config() {
+        let mut cfg = RadioConfig::default();
+        cfg.beacon_interval_s = 10;
+        let est = airtime(&cfg);
+        assert_eq!(est.interval_s, 10);
+        assert_eq!(
+            est.payload_len,
+            lora::HEADER_LEN + lora::position_msg_len(cfg.beacon_fields)
+        );
+        let duty = est.duty_pct.expect("the beacon is on");
+        let expected = est.toa_ms / (10.0 * 1000.0) * 100.0;
+        assert!((duty - expected).abs() < f32::EPSILON);
     }
 }

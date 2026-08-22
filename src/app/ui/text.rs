@@ -1,0 +1,303 @@
+//! The app's prose, one module per page.
+//!
+//! Only the long form lives here: the paragraphs explaining a group of
+//! settings, and the hover texts saying what a control actually does. Short
+//! labels stay next to the widget they name, where reading the page tells you
+//! what the page says.
+//!
+//! The split is by length rather than by principle. A button reading "Save" is
+//! part of the layout; the three lines under it explaining what saving writes
+//! and where are a piece of writing, and having them inline is what turns a
+//! page of controls into a page of string literals with controls between them.
+//!
+//! Copy that takes a value is a function rather than a constant, `format!`
+//! needing a literal pattern.
+
+/// The Points page.
+pub(crate) mod points {
+    pub(crate) const SEARCH_HINT: &str = "search (example 51.47 or central)";
+}
+
+/// The desktop manual-position bar.
+pub(crate) mod manual {
+    pub(crate) const BAD_COORD: &str = "Enter latitude and longitude, example 51.4779, -0.0015";
+}
+
+/// The Status page.
+pub(crate) mod status {
+    pub(crate) const WAITING_FIX: &str = "Waiting for a GPS fix...";
+
+    pub(crate) const RAIL_OFF: &str =
+        "The GPS/LoRa power rail is switched off, so the WIO-E5 and the GPS are unpowered and \
+         report nothing. Turn it on under Beacon.";
+
+    pub(crate) const WARMING: &str =
+        "Warming up: the rail powers on at connect, so the WIO-E5 is still booting and the GPS \
+         is working on a cold fix.";
+
+    pub(crate) const NO_TELEMETRY: &str = "No board telemetry yet.\n\
+         Waiting for the esp32c6-gps board (an esp32c3 beacon does not report it).";
+}
+
+/// The Settings page: the app's own TOML settings.
+pub(crate) mod settings {
+    pub(crate) const INTRO: &str = "What the app draws and records, kept in its own TOML file.";
+
+    pub(crate) const SAVE_HOVER: &str =
+        "Write these settings to the file above, generating it if it is not there";
+    pub(crate) const RESET_HOVER: &str = "Only in the app until you save";
+
+    pub(crate) const TEXT_SCALE: &str =
+        "Scales the text on every page. The gaps and the input widths are measured in text \
+         heights, so they grow with it; the map's icons and overlays keep their own sizes.";
+    pub(crate) const TEXT_SCALE_RESET_HOVER: &str = "Back to the default text size";
+
+    pub(crate) const PAGE_COLORS: &str =
+        "The few places off the map that carry meaning by color; the rest follows the theme.";
+    pub(crate) const THEME_COLORS: &str =
+        "Unticked follows the light/dark theme, which is what keeps these three readable \
+         against each other. Setting one is taking that on yourself.";
+
+    pub(crate) const CENTRAL_PATH_HOVER: &str =
+        "This device's own track. Hiding a path never stops it being recorded";
+    pub(crate) const REMOTE_PATHS_HOVER: &str =
+        "The LoRa nodes relayed by the connected board, one color each";
+    pub(crate) const PATHS_NOTE: &str =
+        "The map's path button hides them all at once without changing these; the line to the \
+         beacon and its distance stay drawn either way.";
+
+    pub(crate) const COMPASS: &str =
+        "Heading-up always runs the compass at full rate. These are for the other modes, where \
+         it only points the arrow on your marker.";
+    pub(crate) const ARROW_HZ_HOVER: &str =
+        "Lower is cheaper: the sensor is fused from the accelerometer, gyroscope and \
+         magnetometer, so it keeps all three awake";
+
+    pub(crate) const DISCARD_HOVER: &str =
+        "Drops every track: yours, the beacon's and the nodes'. Not undoable";
+
+    pub(crate) const DOWNLOAD_HOVER: &str = "Pick a box on the map to cache for offline use";
+    pub(crate) const DOWNLOAD_BUSY: &str = "A download is already in progress.";
+}
+
+/// The Beacon page: the BLE link, and the board's own power settings.
+pub(crate) mod beacon {
+    use crate::app::secs_text;
+
+    pub(crate) const INTRO: &str = "The BLE link to a GPS beacon. One board at a time.";
+
+    // Device picker.
+    pub(crate) const SCAN_START_HOVER: &str =
+        "Look for boards nearby. This drops the current link, since only one board is connected \
+         at a time.";
+    pub(crate) const SCAN_STOP_HOVER: &str = "Stop looking and leave the list as it stands";
+    pub(crate) const NO_BOARDS_SCANNING: &str =
+        "No boards yet. A sleeping board only answers during its advertising window.";
+    pub(crate) const NO_BOARDS_IDLE: &str =
+        "No boards known yet. Scan to find one, then name it so you can tell it apart later.";
+    pub(crate) const ANY_BOARD_HOVER: &str =
+        "Connect to the first board that answers, whichever it is";
+    pub(crate) const NAMES_NOTE: &str =
+        "Names are the app's own and are saved with the rest of its settings. Clearing a name \
+         forgets the board.";
+
+    // Link controls.
+    pub(crate) const RECONNECT_HOVER: &str =
+        "Drop this link and start over from a scan, on the selected board";
+    pub(crate) const CONNECT_HOVER: &str =
+        "Go straight to the selected board, or scan when it is set to any";
+    pub(crate) const CONNECT_SLEEPING_HOVER: &str =
+        "Scan without stopping. A sleeping board advertises for only a window per wake, a plain \
+         connect can miss.";
+    pub(crate) const DISCONNECT_HOVER: &str =
+        "Drop the link now, forget what the board reported, and stop trying so it can sleep";
+    pub(crate) const SLEEP_DISABLED: &str =
+        "Sleep is disabled on the board, so it stays awake after you disconnect too.";
+    pub(crate) const ONLY_ON_WINDOW: &str =
+        "During sleep intervals the board is only reachable on its advertising window.";
+
+    /// What disconnecting will start, for a board with sleep switched on.
+    pub(crate) fn will_sleep(interval_s: u32, window_s: u32) -> String {
+        format!(
+            "On disconnect it will sleep, waking every {} to advertise for {}.",
+            secs_text(interval_s),
+            secs_text(window_s)
+        )
+    }
+
+    // Connection settings.
+    pub(crate) const AUTO_CONNECT_HOVER: &str =
+        "Only read when the app launches; use the buttons above now";
+    pub(crate) const SAVE_HOVER: &str =
+        "Write the board names and these settings to the app's config file, set on the Settings \
+         page";
+    pub(crate) const AWAITING_ACK: &str = "waiting for device ack...";
+
+    // Board power and sleep.
+    pub(crate) const BOARD_INTRO: &str =
+        "ESP32-C6 settings. The board keeps these in flash, so they outlast a power cycle.";
+    pub(crate) const BOARD_NEED_LINK: &str = "Connect to the board to see and change these.";
+    pub(crate) const BOARD_TOO_NEW: &str = "This board's firmware is newer than the app.";
+    pub(crate) const BOARD_TOO_NEW_MORE: &str =
+        "Its settings use a layout this build cannot decode. Update the app to change them.";
+    pub(crate) const BOARD_READING: &str = "Reading the board's settings...";
+
+    pub(crate) const PWR_EN_HOVER: &str = "The LDO feeding both the WIO-E5 and the GPS";
+    pub(crate) const WIO_SLEEP_HOVER: &str =
+        "Soft sleep over the UART link, radio and GPS logging stop";
+    pub(crate) const GPS_SLEEP_HOVER: &str = "The next fix after waking is a cold one";
+    pub(crate) const SLEEP_DISABLE_HOVER: &str = "Stop the board sleeping at all";
+
+    /// What the wake check does, and the range the board will clamp it to.
+    pub(crate) fn wake_check(min_s: u32, max_s: u32) -> String {
+        format!(
+            "When set, board deep-sleeps when nothing is connected. Wakes every interval to \
+             advertise for window. The GPS/LoRa stay off. the interval survives a connect. \
+             Clamped to {} - {}.",
+            secs_text(min_s),
+            secs_text(max_s)
+        )
+    }
+
+    /// What the advertising window does, and the range it is clamped to.
+    pub(crate) fn adv_window(min_s: u32, max_s: u32) -> String {
+        format!(
+            "How long each wake advertises before going back to sleep. Clamped to {} - {}.",
+            secs_text(min_s),
+            secs_text(max_s)
+        )
+    }
+
+    /// Two firmware behaviors that otherwise read as the board ignoring the
+    /// window, and the shorter the window the more they stand out: the budget
+    /// for a wake is taken when that wake starts, and a disconnect replaces
+    /// what is left of it with a fixed linger so the app can come straight
+    /// back.
+    pub(crate) fn adv_window_note(linger_s: u32) -> String {
+        format!(
+            "A new window takes effect at the next wake, not the current one, and the stretch \
+             right after you disconnect is always {} however short the window is.",
+            secs_text(linger_s)
+        )
+    }
+}
+
+/// The Radio page: the WIO-E5's own RADIO.TOML.
+pub(crate) mod radio {
+    pub(crate) const INTRO: &str = "WIO-E5 RADIO.TOML for the esp32c6-gps board.";
+
+    pub(crate) const SEND_HOVER: &str =
+        "Send this config to the connected board. The WIO-E5 applies it immediately and stores \
+         it on the SD card and in flash.";
+    pub(crate) const SEND_NEEDS_CONFIG: &str = "Load or generate a config first";
+    pub(crate) const SEND_NEEDS_LINK: &str = "Connect to the board first (Beacon page)";
+    pub(crate) const SEND_WAITING: &str = "Waiting for the board to answer";
+
+    pub(crate) const FETCH_HOVER: &str =
+        "Fill the editor with the settings the connected board is currently running, ready to \
+         edit, save or send back.";
+    pub(crate) const FETCH_TOO_NEW: &str =
+        "The board's config format is newer than this app can read";
+    pub(crate) const FETCH_NEEDS_LINK: &str =
+        "Connect on the Beacon page; the board's settings load once it reports them (the \
+         GPS/LoRa rail must be on)";
+
+    pub(crate) const EMPTY: &str =
+        "Load a RADIO.TOML to view and edit the radio, mesh, beacon and GPS settings.";
+    pub(crate) const GENERATE_HOVER: &str =
+        "Fill the editor with the firmware defaults, ready to edit and save to the file above";
+
+    pub(crate) const PUSH_CONFIRM: &str = "Send this config to the board?";
+    pub(crate) const PUSH_CONFIRM_MORE: &str =
+        "It replaces the board's whole config, takes effect immediately and is stored on the \
+         board.";
+
+    pub(crate) const NO_BACKUPS: &str = "No backups yet. Saving keeps the previous version here.";
+
+    /// The beacon is off, so there is no periodic airtime to report.
+    pub(crate) const BEACON_OFF: &str = "Beacon disabled (interval 0): no periodic airtime.";
+}
+
+/// The Logging page: the CSV recorder and its graph.
+pub(crate) mod logging {
+    pub(crate) const INTRO: &str =
+        "Every report from every source, written to a CSV as it arrives: where each one was, \
+         how strongly it was heard, and how far off it is. One row per report, so a node's \
+         distance and its signal are always the same instant.";
+
+    pub(crate) const START_HOVER: &str = "Append to this file, creating it if it is not there";
+    pub(crate) const STOP_HOVER: &str = "Close the file; what is recorded stays on the graph";
+    pub(crate) const APPEND_NOTE: &str =
+        "Starting appends to the file, so stopping and starting again continues the same log \
+         rather than replacing it.";
+    pub(crate) const SAVE_HOVER: &str =
+        "Write the log file, reference and auto-start to the app config";
+
+    pub(crate) const EXPORT_HOVER_PHONE: &str = "Copy the CSV into the phone's Downloads folder";
+    pub(crate) const EXPORT_HOVER_DESKTOP: &str =
+        "Write a timestamped copy of the CSV beside the log file";
+    pub(crate) const CLEAR_HOVER: &str = "Empty the graph; the file on disk is untouched";
+
+    pub(crate) const REFERENCE: &str =
+        "A fixed coordinate every logged position is also measured against, so a run can be \
+         read against a surveyed point rather than against a control device that is moving \
+         too. Leave it empty to log only the distance to yourself.";
+    pub(crate) const BAD_COORD: &str = "Enter a coordinate as \"lat, lon\".";
+
+    pub(crate) const LEGEND_HOVER: &str = "Show or hide this source";
+    pub(crate) const PLOT_EMPTY: &str = "Nothing recorded yet.";
+    pub(crate) const PLOT_NO_PAIRS: &str = "No rows carry both of these.";
+
+    /// Rows that have scrolled off the graph but are still in the file.
+    pub(crate) fn dropped(rows: usize) -> String {
+        format!("The oldest {rows} rows have scrolled off the graph; they are still in the file.")
+    }
+
+    /// Where the recorder is up to: running and for how long, paused after a
+    /// run, or never started.
+    ///
+    /// "Stopped" and "Not recording" are deliberately different: a file that
+    /// has rows in it is one a later Start appends to, and saying so is the
+    /// only warning before it does.
+    pub(crate) fn state(
+        recording: bool,
+        started: Option<std::time::SystemTime>,
+        written: usize,
+    ) -> String {
+        if !recording {
+            return match written {
+                0 => "Not recording".to_string(),
+                n => format!("Stopped after {n} rows"),
+            };
+        }
+        match started {
+            Some(t) => format!(
+                "Recording for {} - {written} rows written",
+                crate::points::age_text(std::time::SystemTime::now(), t)
+            ),
+            None => format!("Recording - {written} rows written"),
+        }
+    }
+}
+
+/// The map page: the controls bar, the marker popups, and the offline
+/// region download.
+pub(crate) mod map {
+    pub(crate) const CENTER_HOVER: &str = "Center on position (hold for markers)";
+    pub(crate) const NORTH_UP: &str = "North up";
+    pub(crate) const HEADING_UP: &str = "Heading up";
+    pub(crate) const TOPO_MAP: &str = "Topographic map";
+    pub(crate) const STANDARD_MAP: &str = "Standard map";
+    pub(crate) const ZOOM_IN: &str = "Zoom in";
+    pub(crate) const ZOOM_OUT: &str = "Zoom out";
+    pub(crate) const HIDE_PATHS: &str = "Hide paths";
+    pub(crate) const SHOW_PATHS: &str = "Show paths";
+    pub(crate) const MENU_OPEN: &str = "Pages";
+    pub(crate) const MENU_CLOSE: &str = "Close menu";
+
+    pub(crate) const SELECT_HINT: &str = "Drag a box over the region to download";
+    pub(crate) const DOWNLOAD_TITLE: &str = "Download region for offline use";
+    pub(crate) const TOO_MANY_TILES: &str =
+        "Too many tiles: shrink the box or lower the max zoom.";
+    pub(crate) const NO_UPDATE: &str = "No update yet";
+}

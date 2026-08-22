@@ -8,27 +8,76 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
 
 - `src/app.rs` - owns **state** and the per-frame update loop. `MyApp` holds
   every field the UI reads or writes; `eframe::App::ui` drains the input
-  channels and then dispatches to one page renderer based on `self.page`.
+  channels and then dispatches to one page renderer based on `self.page`. It
+  also holds the queries and actions the pages call (`visible_points`,
+  `recorded_points`, `discard_tracks`, `apply_sleep_interval`, ...), so a page
+  asks a question or names an action rather than computing one inline.
 - `src/app/ui/` - owns **rendering**. It is a submodule of `app`, so its
-  `impl MyApp` blocks can reach `MyApp`'s private fields directly.
-  - `mod.rs` - shared scaffolding (the helpers every page builds on), the
-    layout constants, the menu page, and the floating corner toggle.
-  - `map.rs` - the interactive map page: the map itself, the controls bar,
-    marker info popups, and the offline region-download selection/progress.
-  - `pages.rs` - the non-map pages: Points, Status, Beacon, Settings,
-    Radio, and the desktop manual-position bar.
-  - `logging.rs` - the Logging page: the CSV recorder's controls, the
-    hand-painted graph, and the export. Its own file because the plot is a
-    self-contained piece of drawing rather than another form.
+  `impl MyApp` blocks can reach `MyApp`'s private fields directly. It is split
+  by *kind of thing*, so a change has one obvious home:
+  - `pages/` - one file per page (`map`, `points`, `status`, `beacon`,
+    `settings`, `radio`, `logging`, `manual`). Each is a list of declarations:
+    this section, that control, bound to this field.
+  - `widgets.rs` - the vocabulary those declarations are written in: the
+    `content_page`/`floating` scaffolding, the small shared rows, and the
+    macros (below).
+  - `theme.rs` - every size and spacing in the app, as a named measure, plus
+    the functions that turn one into points for the current screen.
+  - `text.rs` - the long-form prose and the hover texts, one module per page.
+  - `icons.rs` - the icon set, one function per glyph.
+  - `menu.rs` - the menu page and the corner toggle that opens it.
+  - `mapdraw.rs`, `plot.rs` - the two hand-painted pictures, kept out of the
+    pages that frame them. `plot.rs` reaches nothing in `MyApp`: the page hands
+    it rows and it hands back a picture.
 
 The page renderers read state that lives outside the UI too: `src/config.rs`
 holds the app's own TOML settings, `src/radio.rs` holds the WIO-E5 RADIO.TOML
-model the Radio page edits, and `src/logging.rs` holds the CSV recorder behind
-the Logging page (all three below).
+model the Radio page edits (and the airtime estimate the Radio page prints),
+and `src/logging.rs` holds the CSV recorder behind the Logging page (all three
+below).
 
 The split is deliberate: `app.rs` reads as state + logic, the `ui` modules read
 as "how each page is drawn". Add new state to `MyApp`; add new drawing to a
 `ui` module.
+
+```mermaid
+graph TD
+    subgraph state["app.rs - state and logic"]
+        MyApp["MyApp<br/>fields, queries, actions"]
+        Loop["eframe::App::ui<br/>drain then dispatch"]
+    end
+    subgraph view["app/ui/ - rendering"]
+        Pages["pages/*.rs<br/>one file per page"]
+        Widgets["widgets.rs<br/>vocabulary + macros"]
+        Theme["theme.rs<br/>measures"]
+        Text["text.rs<br/>prose"]
+        Icons["icons.rs<br/>glyphs"]
+        Menu["menu.rs"]
+        Draw["mapdraw.rs / plot.rs<br/>hand-painted"]
+    end
+    subgraph model["models"]
+        Config["config.rs"]
+        Radio["radio.rs"]
+        Logging["logging.rs"]
+        Points["points.rs"]
+    end
+
+    Loop --> Pages
+    Loop --> Menu
+    Pages --> Widgets
+    Pages --> Theme
+    Pages --> Text
+    Pages --> Icons
+    Pages --> Draw
+    Menu --> Widgets
+    Widgets --> Theme
+    Draw --> Theme
+    Pages -->|read and write| MyApp
+    MyApp --> Config
+    MyApp --> Radio
+    MyApp --> Logging
+    MyApp --> Points
+```
 
 ## The frame loop
 
@@ -63,36 +112,88 @@ Pointer priority follows the same order: a higher layer under the pointer wins
 the click. This is why the controls sit in `Foreground` over an interactive
 (`Background`) map.
 
-## Shared scaffolding (`mod.rs`)
+## The widget vocabulary (`widgets.rs`)
 
-Every page is built from a few helpers so each renderer reads as its own
-content rather than boilerplate:
+A page file should read as *what is on the page*. Everything repeated between
+pages is named once here, so the declarations are what is left.
+
+The scaffolding, as functions:
 
 - `content_page(ctx, id, screen, top, add)` - a full-screen `Background` area
   filled with the panel color, a `page_margin` margin, with the top safe-area
   inset already skipped. The closure supplies the heading and body. Used by
   Points, Status, Beacon, Settings, Radio, Logging.
 
-It **pins the body's width** (`set_width`), and that is load-bearing rather
-than cosmetic. An `Area` sizes itself to whatever it held last frame, so its
-`Ui` has no width to wrap text against: a long label lays out as one endless
-line and widens the page instead of wrapping, and it never shrinks back. Pinning
-the width to the screen less the two margins is what makes the paragraphs on
-Status, Beacon and Settings wrap - and it also makes the frame exactly
-screen-wide. Rows that pair a long label with an input use `horizontal_wrapped`
-for the same reason: a plain `horizontal` never wraps, so on a phone the input
-is pushed off the edge.
+  It **pins the body's width** (`set_width`), and that is load-bearing rather
+  than cosmetic. An `Area` sizes itself to whatever it held last frame, so its
+  `Ui` has no width to wrap text against: a long label lays out as one endless
+  line and widens the page instead of wrapping, and it never shrinks back.
+  Pinning the width to the screen less the two margins is what makes the
+  paragraphs on Status, Beacon and Settings wrap - and it also makes the frame
+  exactly screen-wide.
 - `floating(ctx, id, order, pos, pivot, constrain, add)` - a popup `Frame` in
   its own area, for the transient overlays (selection hint, download confirm
   and progress, marker info bubble, manual position bar).
+  `confirm_popup(ctx, id, screen, add)` is the centered case of it.
+- `row(ui, label, add)` - a wrapping row of controls behind a leading label.
+  Wrapping rather than plain horizontal because these labels are sentences more
+  often than words: a plain `horizontal` never wraps, so on a phone the last
+  control is pushed off the edge instead of dropping to the next line.
+- `text_field(ui, buf, hint, width)` and `submitted(ui, &resp)` - a single-line
+  input, and whether Enter has just committed it, so a field and the button
+  beside it act alike.
+- `drag(ui, &mut value, speed, range)` - a number the user drags, over the
+  range the loader will accept.
 - `feedback_label` / `status_bool` - the small repeated result and status rows,
-  each taking the `[ui]` colors to draw with. (`theme_color`, the checkbox-plus-
-  picker row for a color that may be left to the theme, lives in `pages.rs`
-  beside its only user.)
+  each taking the `[ui]` colors to draw with. (`theme_color`, the
+  checkbox-plus-picker row for a color that may be left to the theme, lives in
+  `pages/settings.rs` beside its only user.)
 - `icon_button` / `icon_button_pulse` - a square icon button. Icons are white
   SVGs tinted to the current text color, so they follow the light/dark theme.
-  `icon_button_pulse` oscillates the background red to flag an action with no
+  `icon_button_pulse` oscillates the background to flag an action with no
   target (the center button when there is no marker).
+
+And the macros, for the declarations a function cannot express - the ones with
+optional pieces, and the variadic one:
+
+| Macro | Writes |
+| --- | --- |
+| `hint!(ui, TEXT)` | dimmed prose under a heading or a control. A string literal is treated as a `format!` pattern, so `hint!(ui, "{n} points")` fills in; `hint!(ui, small ..)` is the smaller version. |
+| `heading!(ui, "Title"[, INTRO])` | the page title, and optionally a line saying what the page is for. No trailing gap - what follows decides its own leading space. |
+| `section!(ui[, sep] "Title"[, HINT])` | the space that sets a group apart, its title, and optionally a line explaining it. `sep` rules a line above the title as well. |
+| `button!(ui, "Label", enabled: c, hover: h, disabled: d)` | a text button; every piece after the label is optional but ordered. Evaluates to the `Response`, so a press is still `.clicked()`. |
+| `check!(ui, place, "Label", hover: h)` | a checkbox bound straight to the field it sets. |
+| `grid!(ui, "id", \|ui\| { "label" => control, .. })` | a two-column grid of label-and-control pairs, for the settings that really are a table. |
+
+`hint!` is the reason a literal is always a pattern: the alternative silently
+prints `{n}` when someone writes an inline capture. `button!` folds its optional
+`enabled:` away as `true && cond`, so the arm costs nothing when it is absent.
+
+The colors that carry meaning are not in `theme.rs`: `feedback_label`,
+`status_bool` and `icon_button_pulse` take a `config::UiSettings` from the
+`[ui]` table, so a theme reaches the pages and not just the map.
+
+## Prose (`text.rs`)
+
+Only the long form lives there: the paragraphs explaining a group of settings,
+and the hover texts saying what a control actually does. Short labels ("Save",
+"track", "Units:") stay next to the widget they name, where reading the page
+tells you what the page says.
+
+The split is by length rather than by principle. A button reading "Save" is
+part of the layout; the three lines under it explaining what saving writes and
+where are a piece of writing, and having them inline is what turns a page of
+controls into a page of string literals with controls between them. Copy that
+takes a value (`text::beacon::wake_check(min, max)`) is a function, `format!`
+needing a literal pattern.
+
+## Measures (`theme.rs`)
+
+`ICON_SIZE_*`, `BUTTON_PAD_*_FRAC`, `TOGGLE_PAD_FRAC`, `CORNER_MARGIN_FRAC`,
+`PAGE_MARGIN_FRAC`, `GAP_*` and `FIELD_*_EM` live there with the functions that
+apply them, so a size is decided in one place and a page reads
+`gap(ui, GAP_SECTION)` rather than a point count:
+
 - `icon_size_for(screen)` - icon side length as a fraction of the smaller
   screen dimension, clamped, so the toolbar stays proportional on phone and
   desktop.
@@ -101,13 +202,8 @@ is pushed off the edge.
   share of the width, counting its padding and the gaps between buttons. The
   controls bar counts its buttons before laying any out and sizes itself with
   this, so adding one shrinks the row instead of pushing it off the edge.
-
-Constants at the top of `mod.rs` (`ICON_SIZE_*`, `BUTTON_PAD_*_FRAC`,
-`TOGGLE_PAD_FRAC`, `CORNER_MARGIN_FRAC`, `PAGE_MARGIN_FRAC`, `GAP_*`,
-`FIELD_*_EM`) are the tuning knobs for sizing. The colors that carry meaning are
-not among them: `feedback_label`, `status_bool` and `icon_button_pulse` take a
-`config::UiSettings` from the `[ui]` table, so a theme reaches the pages and not
-just the map.
+- `em`, `gap`, `page_margin`, `corner_margin`, `field_width` - the rest of the
+  page measures.
 
 ## Sizing: nothing is a fixed pixel count
 
@@ -141,7 +237,7 @@ sizes are `[sizes]` and are set separately.
 
 ## Pages and navigation
 
-`Page` (in `app.rs`) is the enum of screens. `page_items()` in `mod.rs` lists
+`Page` (in `app.rs`) is the enum of screens. `page_items()` in `menu.rs` lists
 every page with its label and icon, in menu order, and drives the menu page.
 `Page::Menu` is *not* in that list - it is the page doing the listing - and it
 is reached only from the menu button. `MyApp::menu_from` remembers the page it
@@ -150,7 +246,8 @@ without picking one goes.
 
 - `menu_page` - the menu as a page of its own: one large button per entry,
   centered on an empty screen, measured in fractions of the icon size
-  (`MENU_*_FRAC`) because the buttons are touch targets first. The column is
+  (the `ROW_*_FRAC` set in `menu.rs`) because the buttons are touch targets
+  first. The column is
   centered vertically by hand - the page is an `Area`, which has no height to
   align against, so the free space is worked out from the screen instead.
 - `page_menu` - the button that opens the menu page and closes it again. On the
@@ -163,8 +260,9 @@ without picking one goes.
   spacing between buttons and sits on the bar's own fill, while here it would
   draw a slab three times the glyph over the page text.
 
-To add a page: add a `Page` variant, a `match` arm in `MyApp::ui`, a renderer
-`impl MyApp` method, and an entry in `page_items()`.
+To add a page: add a `Page` variant, a `match` arm in `MyApp::ui`, a file under
+`app/ui/pages/` with its renderer `impl MyApp` method (and a `mod` line in
+`pages/mod.rs`), and an entry in `page_items()`.
 
 ## Safe-area insets
 
@@ -173,7 +271,7 @@ On Android the status bar and gesture bar overlap the window. `top_inset` and
 points; renderers add that space so content clears the system bars. Both return
 `0.0` on desktop, where there are no bars.
 
-## The map page (`map.rs`)
+## The map page (`pages/map.rs` + `mapdraw.rs`)
 
 The map is a full-bleed `Background` area so it can overscan past the screen
 edges. The key wrinkles:
@@ -292,7 +390,7 @@ Confirm`.
 The actual tiling/fetching lives in `src/offline.rs`; the UI only drives the
 selection and shows progress.
 
-## The Settings page (`pages.rs` + `config.rs`)
+## The Settings page (`pages/settings.rs` + `config.rs`)
 
 The app's own TOML settings are edited here, not just loaded. Every widget binds
 straight to the live `AppConfig` on `MyApp`, so a change shows on the map at
@@ -378,7 +476,7 @@ sending you back here for it, writing the same file and sharing the same
   connected board (`forget_board_state`) drops the live remote positions but
   keeps their tracks, the same bargain the connected board's own path strikes.
 
-## The Beacon page (`pages.rs` + `ble/`)
+## The Beacon page (`pages/beacon.rs` + `ble/`)
 
 Everything about the beacon that is not drawing: which board to talk to
 (`device_picker_ui`), the link to it (`ble_link_ui`), the connection settings,
@@ -540,7 +638,7 @@ holds these in flash and is the authority on them.
   always listening. The shortcut stays for the normal case, where a continuous
   low-latency scan would cost battery for nothing.
 
-## The Radio config page (`pages.rs` + `radio.rs`)
+## The Radio config page (`pages/radio.rs` + `radio.rs`)
 
 The Radio page loads the WIO-E5 `RADIO.TOML` (the firmware's own config, not the
 app's) and edits it in place. The model lives in `src/radio.rs`; the page in
@@ -576,7 +674,7 @@ app's) and edits it in place. The model lives in `src/radio.rs`; the page in
   into the editor (unsaved until the next Save). The document tracks a `dirty`
   flag, surfaced as `Save *`.
 
-## The Logging page (`app/ui/logging.rs` + `logging.rs` + `export.rs`)
+## The Logging page (`pages/logging.rs` + `plot.rs` + `logging.rs` + `export.rs`)
 
 A CSV of everything that arrives, a graph over it, and a way to get the file
 off the device. The model is `src/logging.rs`; the page is `logging_page`.

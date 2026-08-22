@@ -70,7 +70,32 @@ pub fn age_text(now: SystemTime, then: SystemTime) -> String {
     }
 }
 
+/// Parse "lat, lon" or "lat lon" into decimal degrees. `None` unless it is
+/// exactly two finite numbers within the valid latitude/longitude range.
+///
+/// The one place a coordinate is typed rather than measured: the desktop
+/// manual position bar and the logging reference point both take it, and both
+/// have to refuse the same things - half a coordinate, a third number, or a
+/// value off the globe.
+pub fn parse_lat_lon(s: &str) -> Option<(f64, f64)> {
+    let mut parts = s
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty());
+    let lat: f64 = parts.next()?.parse().ok()?;
+    let lon: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None; // trailing junk
+    }
+    // A NaN fails every range test, so this rejects the non-finite spellings
+    // `f64` parses ("nan", "inf") as well as the out-of-range numbers.
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    Some((lat, lon))
+}
+
 #[cfg(test)]
+
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -120,5 +145,49 @@ mod tests {
         assert_eq!(age_text(at(200_000), base), "2 d");
         // Clock skew must not panic.
         assert_eq!(age_text(base, at(5)), "0 s");
+    }
+
+    /// Typed coordinates, on the desktop manual position bar and the logging
+    /// reference point.
+    #[test]
+    fn coordinates_parse_with_either_separator() {
+        assert_eq!(parse_lat_lon("51.4779, -0.0015"), Some((51.4779, -0.0015)));
+        assert_eq!(parse_lat_lon("51.4779 -0.0015"), Some((51.4779, -0.0015)));
+        assert_eq!(
+            parse_lat_lon("  51.4779 ,  -0.0015  "),
+            Some((51.4779, -0.0015))
+        );
+        assert_eq!(parse_lat_lon("0 0"), Some((0.0, 0.0)));
+        // The poles and the antimeridian are places, so the ends are inclusive.
+        assert_eq!(parse_lat_lon("90, 180"), Some((90.0, 180.0)));
+        assert_eq!(parse_lat_lon("-90, -180"), Some((-90.0, -180.0)));
+    }
+
+    /// Half a coordinate, or one with something after it, is a coordinate
+    /// still being typed rather than one to move the marker to.
+    #[test]
+    fn incomplete_and_trailing_input_is_refused() {
+        assert_eq!(parse_lat_lon(""), None);
+        assert_eq!(parse_lat_lon("   "), None);
+        assert_eq!(parse_lat_lon("51.4779"), None);
+        assert_eq!(parse_lat_lon("51.4779,"), None);
+        assert_eq!(parse_lat_lon("51.4779, -0.0015, 12"), None);
+        assert_eq!(parse_lat_lon("51.4779, -0.0015 m"), None);
+        assert_eq!(parse_lat_lon("north, west"), None);
+    }
+
+    /// Out of range is a typo, not a place - and the non-finite spellings
+    /// `f64` accepts have to be caught here, since a NaN would move the marker
+    /// somewhere no comparison could get it back from.
+    #[test]
+    fn out_of_range_and_non_finite_coordinates_are_refused() {
+        assert_eq!(parse_lat_lon("90.001, 0"), None);
+        assert_eq!(parse_lat_lon("-90.001, 0"), None);
+        assert_eq!(parse_lat_lon("0, 180.001"), None);
+        assert_eq!(parse_lat_lon("0, -180.001"), None);
+        assert_eq!(parse_lat_lon("nan, 0"), None);
+        assert_eq!(parse_lat_lon("0, nan"), None);
+        assert_eq!(parse_lat_lon("inf, 0"), None);
+        assert_eq!(parse_lat_lon("0, -inf"), None);
     }
 }

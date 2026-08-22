@@ -1,0 +1,56 @@
+//! The desktop manual-position bar: entering a position by hand where no live
+//! GPS source is wired up.
+
+use crate::app::ui::text::manual as text;
+use crate::app::ui::theme::{corner_margin, field_width};
+use crate::app::ui::widgets::{floating, submitted, text_field};
+use crate::app::MyApp;
+use crate::gps::GpsFix;
+use crate::points::parse_lat_lon;
+
+/// The entry field is half the bar, leaving its label and the Set button
+/// beside it.
+const FIELD_FRAC: f32 = 0.5;
+
+impl MyApp {
+    /// Bottom-anchored bar for entering a position by hand when no live GPS
+    /// source is wired up (desktop). Accepts "lat, lon" or "lat lon"; a valid
+    /// entry feeds the same pipeline a real fix would and recenters the map.
+    pub(crate) fn manual_gps_bar(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+        let bottom = self.bottom_inset(ctx);
+        let margin = corner_margin(screen);
+        floating(
+            ctx,
+            "manual_gps",
+            egui::Order::Foreground,
+            egui::Pos2::new(screen.center().x, screen.bottom() - bottom - margin),
+            egui::Align2::CENTER_BOTTOM,
+            false,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Position:");
+                    let width = field_width(ui, screen, FIELD_FRAC);
+                    let resp = text_field(ui, &mut self.manual_gps_text, "lat, lon", width);
+                    let entered = submitted(ui, &resp);
+                    if ui.button("Set").clicked() || entered {
+                        match parse_lat_lon(&self.manual_gps_text) {
+                            Some((lat, lon)) => {
+                                self.manual_gps_bad = false;
+                                self.apply_gps_fix(GpsFix {
+                                    lat,
+                                    lon,
+                                    bearing: None,
+                                });
+                                self.map_memory.follow_my_position();
+                            }
+                            None => self.manual_gps_bad = true,
+                        }
+                    }
+                });
+                if self.manual_gps_bad {
+                    ui.colored_label(self.config.ui.error, text::BAD_COORD);
+                }
+            },
+        );
+    }
+}
