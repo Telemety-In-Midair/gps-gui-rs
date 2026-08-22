@@ -168,6 +168,23 @@ pub(crate) mod beacon {
         )
     }
 
+    pub(crate) const SLEEP_NOW_HOVER: &str =
+        "Send the board to sleep right now. It disconnects and is unreachable until it wakes";
+    pub(crate) const SLEEP_NOW_BLANK_HOVER: &str =
+        "Leave blank to use the wake-check interval above";
+
+    /// What "Sleep now" does, said in terms of what it is *not*: it is the
+    /// control most likely to be read as a settings change, because every
+    /// other control on this page is one.
+    pub(crate) fn sleep_now(min_s: u32, max_s: u32) -> String {
+        format!(
+            "A one-off, not a setting. Nothing is stored and the wake check above is not \
+             touched - the board comes back to exactly what it is doing now. Clamped to {} - {}.",
+            secs_text(min_s),
+            secs_text(max_s)
+        )
+    }
+
     /// Two firmware behaviors that otherwise read as the board ignoring the
     /// window, and the shorter the window the more they stand out: the budget
     /// for a wake is taken when that wake starts, and a disconnect replaces

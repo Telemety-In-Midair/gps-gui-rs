@@ -359,5 +359,31 @@ impl MyApp {
             "Board: advertising {} per wake.",
             secs_text(s.adv_window_s)
         ));
+
+        // Separated from the settings above because it is not one. Every
+        // other control on this page changes what the board will do; this
+        // one makes it do something, once, and then the link goes away.
+        gap(ui, GAP_BLOCK);
+        ui.strong("Sleep now");
+        hint!(
+            ui,
+            text::sleep_now(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
+        );
+        row(ui, "For (s):", |ui| {
+            text_field(ui, &mut self.sleep_now_text, "", width)
+                .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
+            if button!(ui, "Sleep now", enabled: !busy, hover: text::SLEEP_NOW_HOVER).clicked() {
+                self.apply_sleep_now();
+            }
+        });
+        // What a blank box will actually do, worked out with the firmware's
+        // own resolver rather than restated here - the board is the
+        // authority on this number as much as on the settings above.
+        if self.sleep_now_text.trim().is_empty() {
+            ui.label(format!(
+                "Blank: sleeps for {}.",
+                secs_text(ble::resolve_sleep_now(0, s.sleep_interval_s))
+            ));
+        }
     }
 }

@@ -41,6 +41,7 @@ fn setting_name(id: u8) -> &'static str {
         ble::CFG_GPS_SLEEP => "GPS backup mode",
         ble::CFG_ESP_SLEEP_S => "wake-check interval",
         ble::CFG_ESP_ADV_WINDOW_S => "advertising window",
+        ble::CFG_SLEEP_NOW => "sleep now",
         _ => "setting",
     }
 }
@@ -69,6 +70,17 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             ble::CFG_ESP_ADV_WINDOW_S => {
                 format!(
                     "Board applied: advertising {} per wake",
+                    secs_text(applied)
+                )
+            }
+            // The one ack that describes what is about to happen rather
+            // than what was stored - and the one where the disconnect that
+            // follows is the command working. Saying so here is what keeps
+            // the app from reporting its own success as a fault a moment
+            // later.
+            ble::CFG_SLEEP_NOW => {
+                format!(
+                    "Board sleeping for {} - it will disconnect now",
                     secs_text(applied)
                 )
             }
@@ -621,6 +633,14 @@ pub struct MyApp {
     sleep_interval_text: String,
     /// Advertising-window input (seconds) on the Beacon page.
     adv_window_text: String,
+    /// "Sleep now" duration input (seconds) on the Beacon page. Blank means
+    /// "use the board's wake-check interval", which is what the firmware
+    /// reads a zero as.
+    sleep_now_text: String,
+    /// Set when a sleep was commanded, so the disconnect that follows can be
+    /// reported as the command working rather than as a link that dropped.
+    /// Cleared on the next connect.
+    sleep_commanded: Option<u32>,
     /// Which screen is currently shown.
     page: Page,
     /// The page the menu was opened from, so closing it without picking
@@ -790,6 +810,11 @@ impl MyApp {
             // hard to catch), so a stray press should ask for what an
             // unconfigured board already does.
             adv_window_text: ble::ESP_ADV_DEFAULT_S.to_string(),
+            // Blank rather than a number: the common press is "sleep for
+            // the cadence I already configured", and a prefilled box would
+            // make the uncommon one look like the default.
+            sleep_now_text: String::new(),
+            sleep_commanded: None,
             page: Page::Map,
             menu_from: Page::Map,
             config: AppConfig::default(),
@@ -1790,6 +1815,33 @@ impl MyApp {
         }
     }
 
+    /// Tell the board to deep sleep now.
+    ///
+    /// A blank box is a zero, which the firmware reads as "for the
+    /// configured wake-check interval" and resolves itself. The predicted
+    /// duration is recorded here through the same `resolve_sleep_now` the
+    /// firmware uses, so the message shown while the ack is still in flight
+    /// cannot disagree with the one shown after it lands.
+    pub(crate) fn apply_sleep_now(&mut self) {
+        let typed = self.sleep_now_text.trim();
+        let secs = if typed.is_empty() {
+            Ok(0)
+        } else {
+            Self::parse_setting(typed, "seconds")
+        };
+        match secs {
+            Ok(secs) => {
+                let cadence = self.board_settings.map_or(0, |s| s.sleep_interval_s);
+                self.sleep_commanded = Some(ble::resolve_sleep_now(secs, cadence));
+                self.send_config(ConfigWrite::Seconds {
+                    id: ble::CFG_SLEEP_NOW,
+                    secs,
+                });
+            }
+            Err(msg) => self.ble_ack = Some(Err(msg)),
+        }
+    }
+
     /// While tracking a beacon, recenter the map between the user and that
     /// beacon and pick a zoom that keeps both on screen with a margin. Returns
     /// the bearing (degrees) the map should be turned to so the beacon rides
@@ -1935,6 +1987,20 @@ impl MyApp {
                     self.ble_connected = c;
                     self.connected_at = c.then(Instant::now);
                     self.board_heard = c.then(Instant::now);
+                    // A commanded sleep is answered by the link going away,
+                    // so the disconnect is the confirmation rather than a
+                    // fault. Replacing the ack here matters because the ack
+                    // line is the only thing on the page still describing
+                    // the press, and "Board sleeping, it will disconnect
+                    // now" left standing next to a dropped link reads as the
+                    // sleep having failed to happen.
+                    if let Some(secs) = self.sleep_commanded.take().filter(|_| !c) {
+                        self.ble_ack = Some(Ok(format!(
+                            "Board asleep for {} - it is unreachable until it wakes",
+                            secs_text(secs)
+                        )));
+                        self.ble_ack_pending = false;
+                    }
                     if c {
                         // A fresh link re-reads everything below; nothing from
                         // the last session still describes the board.
@@ -1945,6 +2011,7 @@ impl MyApp {
                         self.board_settings = None;
                         self.settings_unsupported = false;
                         self.telemetry = None;
+                        self.sleep_commanded = None;
                     }
                 }
                 BleEvent::Fix(p) => {
@@ -2379,6 +2446,71 @@ mod tests {
         assert_eq!(secs_text(43200), "12 h");
         // Not a whole number of hours, so it keeps a decimal.
         assert_eq!(secs_text(45000), "12.5 h");
+    }
+
+    /// The disconnect after a commanded sleep is the command working. The app
+    /// has to say so, because the ack line is the only thing on the page
+    /// still describing the press and "it will disconnect now" left standing
+    /// beside a dead link reads as the sleep having failed.
+    #[test]
+    fn a_commanded_sleep_makes_the_disconnect_the_answer() {
+        let (mut app, _cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(
+            &events,
+            &app,
+            BleEvent::Settings(Settings {
+                sleep_interval_s: 120,
+                ..Settings::default()
+            }),
+        );
+        app.drain_sources();
+
+        // Blank box: the duration comes from the board's own cadence.
+        app.sleep_now_text.clear();
+        app.apply_sleep_now();
+        assert_eq!(app.sleep_commanded, Some(120));
+        assert!(app.ble_ack_pending);
+
+        report(&events, &app, BleEvent::Connected(false));
+        app.drain_sources();
+        let msg = app.ble_ack.clone().expect("a sleep is answered").unwrap();
+        assert!(msg.contains("2 min"), "{msg}");
+        assert!(!app.ble_ack_pending, "the press is finished, not pending");
+        assert_eq!(app.sleep_commanded, None, "and does not answer twice");
+    }
+
+    /// A link that drops on its own is still a fault. Only a sleep this app
+    /// asked for gets to reinterpret a disconnect.
+    #[test]
+    fn an_uncommanded_disconnect_is_not_reported_as_a_sleep() {
+        let (mut app, _cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        app.drain_sources();
+        report(&events, &app, BleEvent::Connected(false));
+        app.drain_sources();
+        assert!(app.ble_ack.is_none());
+    }
+
+    /// The duration the app shows before the ack and the one the board
+    /// applies are the same function, so a typed value and a blank box both
+    /// predict what actually happens.
+    #[test]
+    fn the_sleep_duration_shown_is_the_one_the_board_will_use() {
+        let (mut app, _cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Settings(Settings::default()));
+        app.drain_sources();
+
+        // Sleep mode off and a blank box: the shared fallback, not zero.
+        app.sleep_now_text.clear();
+        app.apply_sleep_now();
+        assert_eq!(app.sleep_commanded, Some(ble::SLEEP_NOW_DEFAULT_S));
+
+        // A typed value below the floor comes up to it, as the board does.
+        app.sleep_now_text = "1".to_string();
+        app.apply_sleep_now();
+        assert_eq!(app.sleep_commanded, Some(ble::ESP_SLEEP_MIN_S));
     }
 
     /// The WIO statuses are a link failure between the ESP and the WIO-E5, not
