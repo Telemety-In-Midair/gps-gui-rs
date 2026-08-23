@@ -20,9 +20,9 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
 
 impl MyApp {
     pub(crate) fn status_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
+        let safe = self.safe_area(ctx);
         let colors = self.config.ui;
-        content_page(ctx, "status", screen, top, |ui| {
+        content_page(ctx, "status", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Status");
 

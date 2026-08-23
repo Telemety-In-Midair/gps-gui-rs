@@ -297,6 +297,15 @@ fn far_enough(last: Option<&Position>, pos: Position, min_distance_m: f64) -> bo
     }
 }
 
+/// How much of the screen the system bars cover, in egui points: the status
+/// bar at the top and the gesture bar at the bottom on Android, nothing on
+/// desktop. A page lays its content out inside what is left.
+#[derive(Clone, Copy, Default)]
+pub struct SafeArea {
+    pub top: f32,
+    pub bottom: f32,
+}
+
 /// Which screen is shown. The menu page switches between them.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Page {
@@ -1031,6 +1040,9 @@ impl MyApp {
                 .into_iter()
                 .map(|(name, font)| (name, egui::FontId::new(font.size * scale, font.family)))
                 .collect();
+            // The controls are measured off the text, so they are rewritten
+            // here with it rather than being left on egui's absolute defaults.
+            ui::apply_spacing(style);
         });
 
         let mut visuals = theme.default_visuals();
@@ -1494,6 +1506,16 @@ impl MyApp {
     }
 
     /// Safe-area inset at the top (status bar) in egui points.
+    /// The safe-area insets a page has to keep clear of, in one value: pages
+    /// need both ends of it, and asking for them separately is how the bottom
+    /// one came to be forgotten by every page that scrolls.
+    pub(crate) fn safe_area(&self, ctx: &egui::Context) -> SafeArea {
+        SafeArea {
+            top: self.top_inset(ctx),
+            bottom: self.bottom_inset(ctx),
+        }
+    }
+
     fn top_inset(&self, ctx: &egui::Context) -> f32 {
         match &self.insets {
             Some(f) => f()[0] / ctx.pixels_per_point(),

@@ -93,15 +93,14 @@ impl MyApp {
     /// opened from is marked, and the corner toggle floating over it (an X by
     /// now) is what returns there.
     pub(crate) fn menu_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        let bottom = self.bottom_inset(ctx);
+        let safe = self.safe_area(ctx);
         let margin = page_margin(screen);
         let icon = icon_size_for(screen);
         let row = egui::vec2(icon * ROW_W_FRAC, icon * ROW_H_FRAC);
         let row_gap = icon * ROW_GAP_FRAC;
         let text_size = icon * TEXT_FRAC;
         let items = page_items();
-        content_page(ctx, "menu", screen, top, |ui| {
+        content_page(ctx, "menu", screen, safe, |ui| {
             // Center the column vertically by hand: the page lives in an `Area`
             // and so has no height of its own to align against. What is left to
             // share out is the screen less the frame's two margins, the
@@ -109,7 +108,7 @@ impl MyApp {
             // down under the top one.
             let count = items.len() as f32;
             let content = count * row.y + (count - 1.0) * row_gap;
-            let used = 2.0 * margin + top + bottom + em(ui) * GAP_ITEM;
+            let used = 2.0 * margin + safe.top + safe.bottom + em(ui) * GAP_ITEM;
             ui.add_space(((screen.height() - used - content) / 2.0).max(0.0));
 
             // The button font, which the glyph beside it is sized to as well,

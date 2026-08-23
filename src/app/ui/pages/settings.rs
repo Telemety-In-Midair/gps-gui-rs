@@ -68,8 +68,8 @@ fn theme_color(
 
 impl MyApp {
     pub(crate) fn settings_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        content_page(ctx, "settings", screen, top, |ui| {
+        let safe = self.safe_area(ctx);
+        content_page(ctx, "settings", screen, safe, |ui| {
             let path_width = field_width(ui, screen, PATH_FRAC);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "App settings", text::INTRO);

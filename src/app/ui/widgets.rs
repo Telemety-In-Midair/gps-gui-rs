@@ -13,9 +13,10 @@
 
 use std::ops::RangeInclusive;
 
+use crate::app::SafeArea;
 use crate::config::UiSettings;
 
-use super::theme::{gap, page_margin, GAP_ITEM};
+use super::theme::{control_height, em, gap, page_margin, GAP_ITEM};
 
 /// A square icon button. The icons are white SVGs tinted to the current text
 /// color so they follow the theme.
@@ -55,19 +56,27 @@ pub(super) fn icon_button_pulse(
 }
 
 /// A full-screen page: a Background `Area` filled with the panel color, a
-/// [`page_margin`] margin, sized to the screen, with the top safe-area inset
-/// already skipped. The closure supplies the page's heading and body (and its
-/// own `ScrollArea` where one is used).
+/// [`page_margin`] margin, sized to the screen, with both safe-area insets
+/// already kept clear. The closure supplies the page's heading and body (and
+/// its own `ScrollArea` where one is used).
 pub(super) fn content_page(
     ctx: &egui::Context,
     id: &str,
     screen: egui::Rect,
-    top: f32,
+    safe: SafeArea,
     add: impl FnOnce(&mut egui::Ui),
 ) {
-    // `Margin` counts in whole points, so the fraction is rounded once here and
-    // the layout inside uses that same rounded value.
+    // `Margin` counts in whole points, so the fractions are rounded once here
+    // and the layout inside uses those same rounded values.
     let margin = page_margin(screen) as i8;
+    // The bottom inset is part of the frame's margin rather than space added
+    // after the content, and that is the whole point of it: a `ScrollArea`
+    // sizes its viewport to the height it is given, so the inset has to come
+    // off that height to keep the last row of a scrolled page above the
+    // gesture bar. Trailing space inside the scroll would just scroll away
+    // with everything else. The fill still spans the whole screen, so the
+    // reserved strip is page-colored rather than a gap.
+    let foot = margin.saturating_add(safe.bottom as i8);
     egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Background)
         .fixed_pos(egui::Pos2::ZERO)
@@ -76,7 +85,12 @@ pub(super) fn content_page(
         .show(ctx, |ui| {
             egui::Frame::NONE
                 .fill(ui.visuals().panel_fill)
-                .inner_margin(egui::Margin::same(margin))
+                .inner_margin(egui::Margin {
+                    left: margin,
+                    right: margin,
+                    top: margin,
+                    bottom: foot,
+                })
                 .show(ui, |ui| {
                     // An Area sizes itself to whatever it held last frame, so
                     // its Ui has no width to wrap against until something pins
@@ -86,8 +100,11 @@ pub(super) fn content_page(
                     // (content plus its two margins) exactly screen-wide.
                     let margin = f32::from(margin);
                     ui.set_width(screen.width() - 2.0 * margin);
-                    ui.set_min_height(screen.height() - 2.0 * margin);
-                    ui.add_space(top);
+                    // Content plus the frame's two margins is then exactly
+                    // screen-tall, which is what leaves the Area measuring a
+                    // full screen for the next frame to lay out against.
+                    ui.set_min_height(screen.height() - margin - f32::from(foot));
+                    ui.add_space(safe.top);
                     gap(ui, GAP_ITEM);
                     add(ui);
                 });
@@ -192,19 +209,34 @@ pub(super) fn drag<N: egui::emath::Numeric>(
     ui.add(egui::DragValue::new(value).speed(speed).range(range))
 }
 
+/// Side padding inside a text input, in body-text heights. The vertical
+/// padding is not a constant: it is whatever brings the field up to the height
+/// of the button beside it (see below).
+const FIELD_PAD_X_EM: f32 = 0.3;
+
 /// A single-line text input `width` points wide, with `hint` shown while it is
 /// empty. Pair with [`submitted`] where Enter should act as the button beside
 /// it.
+///
+/// A `TextEdit` is the one control egui sizes to its *text* rather than to
+/// `interact_size`, so left alone it comes out around half the height of the
+/// button next to it - which looks broken and is half as easy to hit. The
+/// vertical margin here is the difference, so a field and its button are one
+/// row of one height.
 pub(super) fn text_field(
     ui: &mut egui::Ui,
     text: &mut String,
     hint: &str,
     width: f32,
 ) -> egui::Response {
+    let row = em(ui);
+    let pad_y = ((control_height(ui) - row) / 2.0).max(0.0) as i8;
+    let pad_x = (row * FIELD_PAD_X_EM) as i8;
     ui.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
-            .desired_width(width),
+            .desired_width(width)
+            .margin(egui::Margin::symmetric(pad_x, pad_y)),
     )
 }
 

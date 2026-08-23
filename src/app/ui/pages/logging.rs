@@ -27,8 +27,8 @@ const REFERENCE_FRAC: f32 = 0.45;
 
 impl MyApp {
     pub(crate) fn logging_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        content_page(ctx, "logging", screen, top, |ui| {
+        let safe = self.safe_area(ctx);
+        content_page(ctx, "logging", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Logging", text::INTRO);
                 gap(ui, GAP_BLOCK);
@@ -266,9 +266,11 @@ impl MyApp {
                 } else {
                     source.color(self.config.colors)
                 };
-                let entry = egui::Button::new(egui::RichText::new(text).color(color))
-                    .selected(!hidden)
-                    .small();
+                // Not `.small()`: that is the one thing that opts a button
+                // out of the touch-target floor, and a legend entry is a
+                // filter switch, not a caption.
+                let entry =
+                    egui::Button::new(egui::RichText::new(text).color(color)).selected(!hidden);
                 if ui.add(entry).on_hover_text(text::LEGEND_HOVER).clicked() {
                     if hidden {
                         self.log_hidden.remove(&source);

@@ -5,7 +5,9 @@ use std::time::SystemTime;
 use walkers::Position;
 
 use crate::app::ui::text::points as text;
-use crate::app::ui::theme::{em, field_width, gap, page_margin, GAP_BLOCK, GAP_HAIR, GAP_ITEM};
+use crate::app::ui::theme::{
+    control_height, em, field_width, gap, page_margin, GAP_BLOCK, GAP_HAIR, GAP_ITEM,
+};
 use crate::app::ui::widgets::{content_page, heading, text_field};
 use crate::app::{MyApp, Page, PointFilter};
 use crate::points::{age_text, PointSource};
@@ -19,9 +21,8 @@ const LIST_MIN_EM: f32 = 4.0;
 
 impl MyApp {
     pub(crate) fn points_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        let bottom = self.bottom_inset(ctx);
-        content_page(ctx, "points", screen, top, |ui| {
+        let safe = self.safe_area(ctx);
+        content_page(ctx, "points", screen, safe, |ui| {
             heading!(ui, "GPS points");
             gap(ui, GAP_BLOCK);
 
@@ -58,11 +59,17 @@ impl MyApp {
             gap(ui, GAP_HAIR);
 
             let now = SystemTime::now();
-            let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+            // A row is a `selectable_label`, which egui floors at the control
+            // height, so that is what `show_rows` has to be told: it places
+            // rows by arithmetic, and a height that disagrees with the one
+            // actually drawn scrolls the list out of step with itself.
+            let row_height = ui
+                .text_style_height(&egui::TextStyle::Monospace)
+                .max(control_height(ui));
             // Everything left below the filters, less the page's own bottom
             // margin, and never so short that no row fits.
-            let list_height = (screen.bottom() - bottom - ui.cursor().min.y - page_margin(screen))
-                .max(em(ui) * LIST_MIN_EM);
+            let floor = screen.bottom() - safe.bottom - page_margin(screen);
+            let list_height = (floor - ui.cursor().min.y).max(em(ui) * LIST_MIN_EM);
             let mut goto: Option<Position> = None;
             egui::ScrollArea::vertical()
                 .max_height(list_height)

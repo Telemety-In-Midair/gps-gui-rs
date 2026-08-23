@@ -5,7 +5,9 @@
 
 use crate::app::ui::icons;
 use crate::app::ui::text::radio as text;
-use crate::app::ui::theme::{em, field_width, gap, GAP_BLOCK, GAP_ITEM, GAP_TIGHT};
+use crate::app::ui::theme::{
+    control_height, em, field_width, gap, GAP_BLOCK, GAP_ITEM, GAP_TIGHT,
+};
 use crate::app::ui::widgets::{
     button, confirm_popup, content_page, feedback_label, heading, hint, icon_button, submitted,
     text_field,
@@ -17,9 +19,13 @@ use crate::radio::{self, EditVal, FieldType};
 /// row carries beside it.
 const PATH_FRAC: f32 = 0.5;
 
-/// The field-row action buttons (the pencil, the check, the x), in text
-/// heights: they sit in a line of monospace, so they follow it.
-const ACTION_EM: f32 = 1.2;
+/// The glyph in a field-row action button (the pencil, the check, the x), as a
+/// fraction of the height the button is laid out at.
+///
+/// Written against the button rather than the text so the two agree: the
+/// button's height is the touch-target floor, and a glyph sized off the text
+/// alone left a tall thin key with a small mark adrift in it.
+const ACTION_GLYPH_FRAC: f32 = 0.55;
 
 /// Width of a free-text field in a radio row, in text heights, so it scales
 /// with the font rather than being a raw pixel count.
@@ -62,8 +68,8 @@ fn radio_input(ui: &mut egui::Ui, key: &str, ty: &FieldType, val: &mut EditVal) 
 
 impl MyApp {
     pub(crate) fn radio_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        content_page(ctx, "radio", screen, top, |ui| {
+        let safe = self.safe_area(ctx);
+        content_page(ctx, "radio", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Radio config", text::INTRO);
                 gap(ui, GAP_BLOCK);
@@ -289,8 +295,9 @@ impl MyApp {
             RadioEdit::Active { section: s, key: k, .. }
                 if s.as_str() == section && k.as_str() == key
         );
-        // Action buttons sized to the text, so nothing is a raw pixel constant.
-        let bsz = em(ui) * ACTION_EM;
+        // Sized off the button, which is sized off the text: nothing here is a
+        // raw pixel constant.
+        let bsz = control_height(ui) * ACTION_GLYPH_FRAC;
         // Wrapped so a long key or value drops its input to the next line
         // rather than pushing the edit buttons past the screen edge.
         ui.horizontal_wrapped(|ui| {

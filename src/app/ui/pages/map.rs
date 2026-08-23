@@ -15,7 +15,7 @@ use crate::app::ui::mapdraw::{default_position, rotate_pos};
 use crate::app::ui::text::map as text;
 use crate::app::ui::theme::{
     corner_margin, gap, icon_size_for, icon_size_for_row, BUTTON_PAD_X_FRAC, BUTTON_PAD_Y_FRAC,
-    GAP_ITEM,
+    CONTROLS_GAP_FRAC, GAP_ITEM,
 };
 use crate::app::ui::widgets::{button, floating, icon_button, icon_button_pulse};
 use crate::app::{ease_heading, ping_reason, MarkerKind, MyApp, RegionSelect, ROTATE_TAU};
@@ -196,7 +196,12 @@ impl MyApp {
     /// *to*, which is what a toolbar icon without a label has to do to be
     /// readable.
     fn controls(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
-        let spacing = ui.spacing().item_spacing.x;
+        // Taken off the icon rather than left on the style's text-derived
+        // spacing, so enlarging the page text does not shrink the toolbar.
+        // Derived from the *uncapped* icon size, which is the ceiling
+        // `icon_size_for_row` starts from, so the two are not circular.
+        let spacing = icon_size_for(screen) * CONTROLS_GAP_FRAC;
+        ui.spacing_mut().item_spacing.x = spacing;
         // Which of the optional buttons are in the row this frame. Decided up
         // front, before anything is laid out, because the button count is what
         // sizes the row - and reused where the buttons are drawn, so the count

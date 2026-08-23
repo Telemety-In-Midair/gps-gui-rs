@@ -33,8 +33,8 @@ const NUMBER_EM: f32 = 5.0;
 
 impl MyApp {
     pub(crate) fn beacon_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        content_page(ctx, "beacon", screen, top, |ui| {
+        let safe = self.safe_area(ctx);
+        content_page(ctx, "beacon", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Beacon", text::INTRO);
 

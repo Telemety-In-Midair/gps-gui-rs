@@ -119,10 +119,18 @@ pages is named once here, so the declarations are what is left.
 
 The scaffolding, as functions:
 
-- `content_page(ctx, id, screen, top, add)` - a full-screen `Background` area
-  filled with the panel color, a `page_margin` margin, with the top safe-area
-  inset already skipped. The closure supplies the heading and body. Used by
+- `content_page(ctx, id, screen, safe, add)` - a full-screen `Background` area
+  filled with the panel color, a `page_margin` margin, with both safe-area
+  insets already kept clear. The closure supplies the heading and body. Used by
   Points, Status, Beacon, Settings, Radio, Logging.
+
+  The bottom inset is part of the frame's **inner margin**, not space added
+  after the content, and that is the point of it: a `ScrollArea` sizes its
+  viewport to the height it is given, so the inset has to come off that height
+  to keep the last row of a scrolled page above the Android gesture bar.
+  Trailing space inside the scroll would just scroll away with everything else.
+  The fill still spans the whole screen, so the reserved strip is page-colored
+  rather than a gap.
 
   It **pins the body's width** (`set_width`), and that is load-bearing rather
   than cosmetic. An `Area` sizes itself to whatever it held last frame, so its
@@ -202,8 +210,10 @@ apply them, so a size is decided in one place and a page reads
   share of the width, counting its padding and the gaps between buttons. The
   controls bar counts its buttons before laying any out and sizes itself with
   this, so adding one shrinks the row instead of pushing it off the edge.
-- `em`, `gap`, `page_margin`, `corner_margin`, `field_width` - the rest of the
-  page measures.
+- `em`, `gap`, `page_margin`, `corner_margin`, `field_width`,
+  `control_height` - the rest of the page measures.
+- `apply_spacing(style)` - the insides of every control, off the body font with
+  a touch-target floor (below).
 
 ## Sizing: nothing is a fixed pixel count
 
@@ -223,14 +233,48 @@ page holds its proportions on a phone and on a desktop:
   between `FIELD_MIN_EM` and `FIELD_MAX_EM`). Spacing written this way follows
   the font rather than fighting it.
 
-The one deliberate exception is `ICON_SIZE_MIN` / `ICON_SIZE_MAX`, which clamp
-the icon in absolute points: it is a touch target, and a fingertip is the same
-size whatever the screen is.
+The one deliberate exception is `TOUCH_MIN` (and `ICON_SIZE_MAX`), which clamps
+in absolute points: it is a touch target, and a fingertip is the same size
+whatever the screen is. It is one number for the whole app - the floor under an
+icon's side and under the height of every button, field, checkbox and dropdown.
+
+### The insides of a control (`apply_spacing`)
+
+Everything above is the space *between* controls. The space *inside* one is
+egui's `Style::spacing`, and its stock values are absolute point counts:
+`interact_size.y = 18`, `button_padding = (4, 1)`, `icon_width = 14`. Left
+alone that gives two problems:
+
+- A button is 18 points tall before padding - under half a fingertip, on an app
+  whose every page is a page of buttons.
+- `text_scale` scales the *font*. Padding, the checkbox glyph and the minimum
+  control height are not fonts, so they stayed put: doubling the text size gave
+  big letters in the same cramped rows, beside a checkbox that had not moved.
+
+`theme::apply_spacing` rewrites that set off the body font size with `TOUCH_MIN`
+as the floor, and `MyApp::apply_ui_style` calls it alongside the text styles it
+is derived from - so it is re-applied exactly when `text_scale` changes. Being
+on the style rather than per page, it reaches the dropdown popups, the color
+pickers and the map's popups too.
+
+Two things follow from it that are easy to miss when adding a page:
+
+- A `TextEdit` is the one control egui sizes to its *text* rather than to
+  `interact_size`, so `widgets::text_field` sets a vertical margin to bring it
+  up to the height of the button beside it.
+- `ui.selectable_label` is a `Button`, so it takes the same floor. The Points
+  list must therefore tell `show_rows` that height (`control_height(ui)`) and
+  not the text height, or the virtual scrolling places rows where they are not.
+
+The controls bar opts out of the text-derived part on purpose: it sets its own
+`button_padding` and `item_spacing.x` from the icon size. A toolbar spaced by
+the page text would *shrink* when the text was enlarged, `icon_size_for_row`
+dividing up what is left after the gaps.
 
 Because the pages are measured in text units, one setting resizes them:
 `[ui] text_scale` multiplies every entry of `Style::text_styles`, so `em(ui)`
-grows and the gaps and input widths grow with it - larger text is not larger
-glyphs in the same cramped rows. What it does not touch is anything measured off
+grows and the gaps, the input widths and now the controls grow with it - larger
+text is not larger glyphs in the same cramped rows. What it does not touch is anything measured off
 the screen or the icon: the toolbar, the menu page's buttons (sized to the icon,
 text included, so a scaled label would not fit them) and the map overlays, whose
 sizes are `[sizes]` and are set separately.
@@ -268,8 +312,17 @@ To add a page: add a `Page` variant, a `match` arm in `MyApp::ui`, a file under
 
 On Android the status bar and gesture bar overlap the window. `top_inset` and
 `bottom_inset` (in `app.rs`) convert the platform-reported insets to egui
-points; renderers add that space so content clears the system bars. Both return
+points, and `MyApp::safe_area` returns both together as a `SafeArea`. Both are
 `0.0` on desktop, where there are no bars.
+
+Pages take the `SafeArea` whole rather than the two ends separately, which is
+how the bottom one came to be forgotten by every page that scrolls: the top
+inset is visibly wrong the moment you look at the screen, and the bottom one
+only hides the last row of a page you have to scroll to the end of.
+`content_page` now keeps both clear, so a page gets it by being a page. The
+overlays that sit at one edge still ask for the end they need - the manual
+position bar and the download readout for the bottom, the corner page toggle
+for the top.
 
 ## The map page (`pages/map.rs` + `mapdraw.rs`)
 

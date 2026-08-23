@@ -24,3 +24,8 @@ mod plot;
 mod text;
 mod theme;
 mod widgets;
+
+/// Size every control off the body text, with a touch-target floor under the
+/// lot. Applied to the style by [`crate::app::MyApp::apply_ui_style`], beside
+/// the text sizes it is derived from.
+pub(super) use theme::apply_spacing;
