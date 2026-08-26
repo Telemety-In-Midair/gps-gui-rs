@@ -227,9 +227,9 @@ impl ConfigWrite {
     }
 }
 
-/// How long a push waits for a bulk ack before giving up. Each op is one UART
-/// round-trip inside the board (at most a 2 s WIO timeout), so a link this
-/// quiet is dead, not slow.
+/// How long a push waits for a bulk ack before giving up. Every op is answered
+/// on the board itself - no second chip to wait on - so a link this quiet is
+/// dead, not slow.
 const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often a step that would otherwise block comes up for air to service
@@ -455,11 +455,10 @@ impl Inbox<'_> {
 
 /// One radio-config push through the board's bulk characteristic, advanced one
 /// ack at a time: OP_BEGIN opens the transfer, each OP_DATA carries one chunk,
-/// and OP_END has the WIO verify and apply the file. The board forwards every
-/// op to the WIO over their UART link before acking it (id
-/// [`ble::ACK_ID_BULK`] on the ack characteristic), so the next op is only
-/// sent once the previous ack
-/// is in - pacing by ack is what keeps this from overrunning that link.
+/// and OP_END has the board check the CRC, parse the file and apply it. Every
+/// op is acked (id [`ble::ACK_ID_BULK`] on the ack characteristic) and the
+/// next is only sent once that ack is in, which is what keeps a write burst
+/// from outrunning the transfer buffer on the far side.
 ///
 /// Visible to the crate only because [`Inbox`] holds one; nothing outside
 /// this module builds or steps a push.

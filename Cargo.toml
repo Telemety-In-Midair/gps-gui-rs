@@ -23,7 +23,7 @@ log = "0.4"
 # they cross-compile to Android unchanged.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-# Editing the WIO-E5 RADIO.TOML in place: a load/edit/save round-trip that keeps
+# Editing the board's RADIO.TOML in place: a load/edit/save round-trip that keeps
 # the file's comments and `<key>_description` help strings. Already in the tree
 # via `toml`, and pure Rust so it cross-compiles to Android unchanged.
 toml_edit = "0.22"
@@ -32,9 +32,10 @@ egui_extras = { version = "0.35", features = ["svg"] }
 # Shared BLE protocol with the esp32c3-gps firmware (lives in the same parent
 # directory).
 gps-proto = { path = "../gps-proto" }
-# Board-specific BLE extensions and the ESP<->WIO telemetry format served by
-# the esp32c6-gps board (no_std, cross-compiles unchanged), used by the Status
-# page to decode the telemetry and log characteristics.
+# Board-specific BLE extensions and the telemetry format served by the Wio-S3
+# board (no_std, cross-compiles unchanged), used by the Status page to decode
+# the telemetry and log characteristics. The checkout is still named for the
+# ESP32-C6 the firmware started on.
 midair-proto = { path = "../esp32c6-gps/proto" }
 # Offline region downloads reuse the exact HTTP-cache stack walkers uses (same
 # crate versions, same cache format), so pre-fetched tiles land in the cache
@@ -54,8 +55,8 @@ cacache = { version = "13", default-features = false }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.35"
 env_logger = "0.11"
-# BLE central for the ESP32-C3 GPS beacon on desktop (Linux/bluez). Android
-# uses a JNI bridge instead (src/ble/android.rs).
+# BLE central for the GPS boards on desktop (Linux/bluez). Android uses a JNI
+# bridge instead (src/ble/android.rs).
 btleplug = "0.12"
 uuid = "1"
 

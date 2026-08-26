@@ -605,7 +605,7 @@ pub struct MyApp {
     /// The board's settings layout is newer than this build can decode, so
     /// its settings are unknown rather than defaulted.
     settings_unsupported: bool,
-    /// The WIO radio config the connected board last reported, if any. Lets
+    /// The radio config the connected board last reported, if any. Lets
     /// the Radio page fill the editor from the board itself; `None` until the
     /// board reports one (or if the board predates the read-back).
     board_radio_config: Option<RadioConfig>,
@@ -1478,8 +1478,8 @@ impl MyApp {
     }
 
     /// Send the editor's current config (unsaved edits included) to the
-    /// connected board over BLE. The WIO applies it live and stores it on the
-    /// SD card and in its flash backup; the outcome lands in
+    /// connected board over BLE. The board applies it live and writes it to
+    /// its SD card, the only place it survives a reboot; the outcome lands in
     /// `radio_feedback` when the board's final ack arrives.
     fn push_radio(&mut self) {
         let Some(doc) = self.radio.as_ref() else {
@@ -2277,7 +2277,7 @@ mod tests {
         report(&events, &app, BleEvent::Connected(true));
         report(&events, &app, BleEvent::Fix(fix()));
         report(&events, &app, BleEvent::Settings(Settings::default()));
-        report(&events, &app, BleEvent::Log("wio: ok".to_string()));
+        report(&events, &app, BleEvent::Log("radio: ok".to_string()));
         app.drain_sources();
         assert_eq!(board_state(&app), (true, true, true, true));
 

@@ -10,7 +10,7 @@ use walkers::Position;
 pub enum PointSource {
     /// The phone's own GNSS (a simulated loop on desktop).
     Phone,
-    /// The connected board's own GPS (esp32c6-gps / esp32c3 beacon).
+    /// The connected board's own GPS (Wio-S3 / esp32c3 beacon).
     Esp,
     /// A remote node heard over LoRa and relayed by the connected board,
     /// keyed by its LoRa address (1-255). Each address is its own track.

@@ -31,7 +31,7 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
     it rows and it hands back a picture.
 
 The page renderers read state that lives outside the UI too: `src/config.rs`
-holds the app's own TOML settings, `src/radio.rs` holds the WIO-E5 RADIO.TOML
+holds the app's own TOML settings, `src/radio.rs` holds the board's RADIO.TOML
 model the Radio page edits (and the airtime estimate the Radio page prints),
 and `src/logging.rs` holds the CSV recorder behind the Logging page (all three
 below).
@@ -570,9 +570,16 @@ shape.
 
 ### Board power and sleep (`board_power_ui`)
 
-The bottom section of the Beacon page drives the ESP32-C6's own power rail and
-deep sleep. Unlike everything above it, **none of it is app state**: the board
-holds these in flash and is the authority on them.
+The bottom section of the Beacon page drives the Wio-S3's own sleep switches
+and deep sleep. Unlike everything above it, **none of it is app state**: the
+board holds these in flash and is the authority on them.
+
+There is no GPS/LoRa power rail here, and the app deliberately offers no
+control for one. The protocol still carries `CFG_PWR_EN` and the board still
+stores the flag, but the wio-s3-max-gps board has no switch behind it - the
+GPS and the SD sit directly on +3V3 - so a checkbox would move, ack, and
+change nothing. A respin that brings the switch back brings the control back
+with it.
 
 - **The board tells us, we do not tell the board.** The worker reads
   `ble::SETTINGS_UUID` on connect and subscribes to it; each blob decodes into
@@ -693,7 +700,7 @@ holds these in flash and is the authority on them.
 
 ## The Radio config page (`pages/radio.rs` + `radio.rs`)
 
-The Radio page loads the WIO-E5 `RADIO.TOML` (the firmware's own config, not the
+The Radio page loads the board's `RADIO.TOML` (the firmware's own config, not the
 app's) and edits it in place. The model lives in `src/radio.rs`; the page in
 `radio_page`.
 

@@ -166,9 +166,9 @@ pub struct RadioDoc {
     pub dirty: bool,
 }
 
-/// Largest config the firmware accepts, enforced on the board in the ESP's
-/// OP_BEGIN check, the WIO's transfer buffer and the buffer RADIO.CFG is read
-/// into at boot. A push over that size is refused before any byte moves.
+/// Largest config the firmware accepts, enforced on the board in the OP_BEGIN
+/// check, the transfer buffer behind it, and the buffer RADIO.CFG is read into
+/// at boot. A push over that size is refused before any byte moves.
 pub const CONFIG_MAX: usize = 1024;
 
 /// A complete RADIO.TOML at the firmware defaults, comments and help strings
