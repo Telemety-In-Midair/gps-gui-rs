@@ -34,14 +34,14 @@ const SERVICE_UUID: Uuid = Uuid::from_u128(packet::SERVICE_UUID_U128);
 const POSITION_UUID: Uuid = Uuid::from_u128(packet::POSITION_UUID_U128);
 const CONFIG_UUID: Uuid = Uuid::from_u128(packet::CONFIG_UUID_U128);
 const ACK_UUID: Uuid = Uuid::from_u128(packet::ACK_UUID_U128);
-// Board-status characteristics served by the esp32c6-gps board on top of the
+// Board-status characteristics served by the Wio-S3 board on top of the
 // shared gps-proto service. Absent on the older esp32c3 beacon, so treated as
 // optional (see `connected`).
 const TELEMETRY_UUID: Uuid = Uuid::from_u128(ble::TELEMETRY_UUID_U128);
 const LOG_UUID: Uuid = Uuid::from_u128(ble::LOG_UUID_U128);
 const SETTINGS_UUID: Uuid = Uuid::from_u128(ble::SETTINGS_UUID_U128);
-// The WIO's current radio config, read on connect and notified on change.
-// esp32c6-gps only, so optional like the other board-status characteristics.
+// The board's current radio config, read on connect and notified on change.
+// Wio-S3 only, so optional like the other board-status characteristics.
 const RADIO_CONFIG_UUID: Uuid = Uuid::from_u128(ble::RADIO_CONFIG_UUID_U128);
 // Remote-position characteristic: the connected board relays a LoRa node's
 // position here, tagged with the node's address. Absent on the esp32c3 beacon,
@@ -50,7 +50,7 @@ const REMOTE_UUID: Uuid = Uuid::from_u128(ble::REMOTE_UUID_U128);
 // The same for a node that is up but has no fix to report. Newer than the
 // remote-position characteristic, so a board may serve one without the other.
 const NODE_PING_UUID: Uuid = Uuid::from_u128(ble::NODE_PING_UUID_U128);
-// Bulk-transfer characteristic (radio TOML config), esp32c6-gps only.
+// Bulk-transfer characteristic (radio TOML config), Wio-S3 only.
 const BULK_UUID: Uuid = Uuid::from_u128(ble::BULK_UUID_U128);
 
 pub fn spawn(ctx: egui::Context) -> BleHandle {
@@ -308,7 +308,7 @@ async fn connected(
         .find(|c| c.uuid == CONFIG_UUID)
         .cloned()
         .ok_or("config characteristic missing")?;
-    // Optional board-status characteristics (esp32c6-gps only).
+    // Optional board-status characteristics (Wio-S3 only).
     let telemetry = chars
         .iter()
         .find(|c| c.uuid == TELEMETRY_UUID && c.properties.contains(CharPropFlags::NOTIFY))
@@ -548,10 +548,17 @@ async fn connected(
 }
 
 /// Whether this advertisement is one of our boards: it offers the GPS service,
-/// or it goes by the firmware's name.
+/// or it goes by one of the firmwares' names.
+///
+/// The name is the fallback, not the test: it is scan-response data, and the
+/// two firmwares do not share one. The service UUID is in the advertisement
+/// itself and is the same on both, which is why renaming a board cannot lose
+/// it.
 fn is_beacon(props: &PeripheralProperties) -> bool {
+    let name = props.local_name.as_deref();
     props.services.contains(&SERVICE_UUID)
-        || props.local_name.as_deref() == Some(packet::DEVICE_NAME)
+        || name == Some(packet::DEVICE_NAME)
+        || name == Some(ble::DEVICE_NAME)
 }
 
 /// Find a discovered peripheral matching the pinned MAC (case-insensitive) or,

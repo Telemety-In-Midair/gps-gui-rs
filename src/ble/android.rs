@@ -435,7 +435,7 @@ fn connected(
             return Err("subscribe timed out".into());
         }
     }
-    // Optional board-status subscriptions (esp32c6-gps; absent on the c3
+    // Optional board-status subscriptions (Wio-S3; absent on the c3
     // beacon, so a missing characteristic is not an error). Settings is
     // subscribed before it is read below, so a change the board makes between
     // the two (a clamped interval, say) still reaches us.

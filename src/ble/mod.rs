@@ -1,4 +1,5 @@
-//! BLE central for the ESP32-C3 GPS beacon (esp32c3-gps firmware).
+//! BLE central for the GPS boards: the Wio-S3 (esp32c6-gps firmware) and the
+//! older ESP32-C3 beacon it grew out of.
 //!
 //! Mirrors the gps source design: a background worker owns the platform BLE
 //! stack and talks to the UI over channels. Events flow UI-ward (fixes, acks,
@@ -100,9 +101,9 @@ pub enum BleEvent {
     NodePing(NodePing),
     /// A config ack: the device confirmed (or rejected) a setting.
     Ack(Ack),
-    /// Board telemetry (LoRa link, GPS, SD) from the esp32c6-gps board.
+    /// Board telemetry (LoRa link, GPS, SD) from the Wio-S3 board.
     Telemetry(Telemetry),
-    /// The latest WIO status/log line (ASCII) relayed by the board.
+    /// The latest status/log line (ASCII) the board sent.
     Log(String),
     /// The board's own view of its power and sleep settings, read on connect
     /// and notified on every change - including changes the board makes by
@@ -112,8 +113,8 @@ pub enum BleEvent {
     /// The settings blob did not decode: the board's layout version is newer
     /// than this build knows. Its settings are unreadable, not defaulted.
     SettingsUnsupported,
-    /// The WIO's current radio configuration, read on connect and notified on
-    /// every change. Lets the Radio page open on what the board is running
+    /// The board's current radio configuration, read on connect and notified
+    /// on every change. Lets the Radio page open on what the board is running
     /// rather than a local file the user has to hope matches.
     RadioConfig(RadioConfig),
     /// The radio-config blob did not decode: the board's layout is newer than
@@ -177,9 +178,8 @@ pub enum BleCommand {
     Config(ConfigWrite),
     /// Push a whole radio TOML config (already stripped of comments and
     /// metadata, at most [`crate::radio::CONFIG_MAX`] bytes) through the bulk
-    /// characteristic. The board forwards it to the WIO-E5, which applies it
-    /// live and stores it. The outcome comes back as
-    /// [`BleEvent::ConfigPushed`].
+    /// characteristic. The board applies it live and writes it to its SD
+    /// card. The outcome comes back as [`BleEvent::ConfigPushed`].
     PushConfig(Vec<u8>),
     /// Drop the connection and stay idle until the next `Connect`.
     ///
@@ -190,13 +190,13 @@ pub enum BleCommand {
 }
 
 /// One config-characteristic write, `[id, len, value...]`. The gps-proto
-/// notify interval and the esp32c6-gps board ids share the characteristic and
+/// notify interval and the board's own ids share the characteristic and
 /// differ only in the id and the width of the value.
 #[derive(Clone, Copy, Debug)]
 pub enum ConfigWrite {
     /// Position notify interval in ms (gps-proto `CFG_UPDATE_INTERVAL_MS`).
     Interval(u32),
-    /// A board on/off setting: the power rail, WIO sleep or GPS backup mode.
+    /// A board on/off setting: radio standby or GPS backup mode.
     Flag { id: u8, on: bool },
     /// A board interval in seconds: the wake-check cadence.
     Seconds { id: u8, secs: u32 },
@@ -533,17 +533,20 @@ impl ConfigPush {
 }
 
 /// Why a bulk op was refused, in words the Radio page can show. `at_end` marks
-/// the OP_END ack: the WIO only parses the file there, so a WIO rejection at
-/// that point is usually the file's content rather than the link.
+/// the OP_END ack: the board only parses the file there, so a refusal at that
+/// point is the file's content or bytes that did not survive the trip, while
+/// the same status earlier is the op itself.
 fn push_error(status: u8, at_end: bool) -> String {
     match status {
-        ble::ACK_WIO_ERROR if at_end => "the WIO-E5 rejected the config: check for a value \
-                                         out of range or a string that is not one of the choices"
+        packet::ACK_BAD_VALUE if at_end => "the board rejected the config: check for a value \
+                                            out of range, a string that is not one of the \
+                                            choices, or a transfer that did not arrive intact"
             .to_string(),
         packet::ACK_BAD_VALUE => "the board rejected it (bad value or size)".to_string(),
+        // Either the USB console owns a transfer, or this op found none to
+        // act on. Nothing here reads as "rejected": a config the board
+        // refused keeps answering ACK_BAD_VALUE however often it is retried.
         ble::ACK_BAD_STATE => "another transfer is already running".to_string(),
-        ble::ACK_WIO_ERROR => "the board could not reach the WIO-E5 (link error)".to_string(),
-        ble::ACK_WIO_TIMEOUT => "the board could not reach the WIO-E5 (no reply)".to_string(),
         s => format!("the board refused (status {s:#04x})"),
     }
 }
@@ -560,10 +563,9 @@ fn settings_event(bytes: &[u8]) -> BleEvent {
 
 /// Decode a radio-config blob into the event it describes, or `None` when the
 /// board has not reported one yet. The board seeds the characteristic with
-/// zeros (layout version 0) until the WIO sends a snapshot - which, if the
-/// GPS/LoRa rail is off, may not happen until a connect powers it - so an
-/// all-zero blob is "unknown", not a version we cannot read. A non-zero blob
-/// that still fails to decode is a genuine version mismatch.
+/// zeros (layout version 0) until its radio has come up, so an all-zero blob
+/// is "unknown", not a version we cannot read. A non-zero blob that still
+/// fails to decode is a genuine version mismatch.
 fn radio_config_event(bytes: &[u8]) -> Option<BleEvent> {
     if bytes.first().copied().unwrap_or(0) == 0 {
         return None;
@@ -1126,21 +1128,30 @@ mod tests {
         assert!(matches!(push.on_ack(&ok), PushStep::Done));
     }
 
-    /// A NAK at any point fails the push, and a WIO NAK on the final op is
-    /// blamed on the file's content rather than the link.
+    /// A NAK at any point fails the push, and the same status on the final
+    /// op is blamed on the file's content - that is where the board parses
+    /// it, so that is the only place its values can be refused.
     #[test]
     fn config_push_fails_on_nak() {
-        let nak = Ack {
+        let nak = |status| Ack {
             id: ble::ACK_ID_BULK,
-            status: ble::ACK_WIO_ERROR,
+            status,
             value_u32: None,
         };
 
         let mut push = ConfigPush::new(vec![1, 2, 3]);
         push.start().unwrap();
         assert!(matches!(
-            push.on_ack(&nak),
-            PushStep::Fail(m) if m.contains("link error")
+            push.on_ack(&nak(packet::ACK_BAD_VALUE)),
+            PushStep::Fail(m) if m.contains("bad value or size")
+        ));
+
+        // A transfer the board would not even open: the console has one.
+        let mut push = ConfigPush::new(vec![1, 2, 3]);
+        push.start().unwrap();
+        assert!(matches!(
+            push.on_ack(&nak(ble::ACK_BAD_STATE)),
+            PushStep::Fail(m) if m.contains("another transfer")
         ));
 
         let mut push = ConfigPush::new(vec![1, 2, 3]);
@@ -1153,7 +1164,7 @@ mod tests {
         push.on_ack(&ok); // data chunk
         push.on_ack(&ok); // OP_END
         assert!(matches!(
-            push.on_ack(&nak),
+            push.on_ack(&nak(packet::ACK_BAD_VALUE)),
             PushStep::Fail(m) if m.contains("rejected the config")
         ));
     }
