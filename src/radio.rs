@@ -1,4 +1,4 @@
-//! Loadable, editable RADIO.TOML for the WIO-E5 board.
+//! Loadable, editable RADIO.TOML for the GPS board.
 //!
 //! Unlike [`crate::config`] (the app's own settings), this file belongs to the
 //! firmware: the Radio page reads it, offers a per-field editor, and writes it
@@ -516,6 +516,12 @@ fn config_value(cfg: &RadioConfig, key: &str) -> Option<EditVal> {
         "power_dbm" => EditVal::Int(cfg.power_dbm as i64),
         "rx_boost" => EditVal::Bool(cfg.rx_boost),
         "dcdc_enabled" => EditVal::Bool(cfg.dcdc_enabled),
+        // The two RF-path keys. Both describe how the module's antenna
+        // switch is wired rather than anything tunable, and the reference
+        // file therefore ships them commented out - but a file that does
+        // carry them has to show the board's answer, not a stale one from
+        // whichever board the file was written for.
+        "dio2_rf_switch" => EditVal::Bool(cfg.dio2_rf_switch),
         "tcxo_volts" => EditVal::Str(cfg.tcxo_volts.as_str().to_string()),
         "tcxo_startup_ms" => EditVal::Int(cfg.tcxo_startup_ms as i64),
         "address" => EditVal::Int(cfg.address as i64),
@@ -727,6 +733,35 @@ power_mode = \"full\"
         assert_eq!(back.beacon_fields, cfg.beacon_fields);
         assert_eq!(back.gps.power_mode, PowerMode::PsmCyclic);
         assert_eq!(back.gps.dyn_model, DynModel::Automotive);
+    }
+
+    /// A file carrying the RF-path keys gets the board's answer for them.
+    ///
+    /// They are commented out in the reference file, so nothing in the
+    /// default document exercises this - but a file that predates the move
+    /// to the Wio-S3 carries the Wio-E5's 1.8 V, and reading a board back
+    /// has to correct it rather than leave the editor showing a value that
+    /// would leave the antenna switch below its specified minimum.
+    #[test]
+    fn a_board_read_back_corrects_the_rf_path_keys() {
+        use midair_proto::radiocfg::{parse, TcxoVolts};
+
+        let text = "[radio]\ndio2_rf_switch = false\ntcxo_volts = \"1.8\"\n";
+        let mut d = RadioDoc {
+            doc: text.parse().unwrap(),
+            fields: collect_fields(&text.parse().unwrap()),
+            path: PathBuf::from("RADIO.toml"),
+            dirty: false,
+        };
+        d.apply_config(&RadioConfig::default());
+
+        assert_eq!(d.display_at("radio", "dio2_rf_switch"), "true");
+        assert_eq!(d.display_at("radio", "tcxo_volts"), "3.3");
+
+        // And a push of what is now on screen says the same thing.
+        let back = parse(&String::from_utf8(d.wire_bytes()).unwrap()).unwrap();
+        assert!(back.dio2_rf_switch);
+        assert_eq!(back.tcxo_volts, TcxoVolts::V3_3);
     }
 
     /// The airtime panel's two limits: which one binds, and what the beacon

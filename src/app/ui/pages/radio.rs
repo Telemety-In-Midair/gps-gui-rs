@@ -1,4 +1,4 @@
-//! The Radio page: load the WIO-E5's RADIO.TOML, edit each setting with a
+//! The Radio page: load the board's RADIO.TOML, edit each setting with a
 //! type-specific input behind a per-field edit lock, and save it back -
 //! keeping the file's comments and a timestamped backup of the previous
 //! version.
