@@ -36,8 +36,7 @@ mod ui;
 fn setting_name(id: u8) -> &'static str {
     match id {
         packet::CFG_UPDATE_INTERVAL_MS => "notify interval",
-        ble::CFG_PWR_EN => "GPS/LoRa power",
-        ble::CFG_WIO_SLEEP => "WIO-E5 sleep",
+        ble::CFG_WIO_SLEEP => "radio standby",
         ble::CFG_GPS_SLEEP => "GPS backup mode",
         ble::CFG_ESP_SLEEP_S => "wake-check interval",
         ble::CFG_ESP_ADV_WINDOW_S => "advertising window",
@@ -90,14 +89,10 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             "Board rejected: it does not know the {name} setting"
         )),
         packet::ACK_BAD_VALUE => Err(format!("Board rejected: bad value for {name}")),
-        // Not a rejected value: the ESP could not reach the WIO-E5 over the
-        // UART link between them, so the setting never got there.
-        ble::ACK_WIO_ERROR => Err(format!(
-            "The board could not reach the WIO-E5 to set {name} (link error)."
-        )),
-        ble::ACK_WIO_TIMEOUT => Err(format!(
-            "The board could not reach the WIO-E5 to set {name} (no reply)."
-        )),
+        // The two-MCU board had two more statuses here, for a setting the BLE
+        // half could not get across the UART link to the radio half. One MCU
+        // applies a setting where it decided it, so the only answers left are
+        // the ones above and this one.
         ble::ACK_BAD_STATE => Err(format!(
             "Board rejected {name}: not valid in its current state"
         )),
@@ -136,10 +131,10 @@ const SEEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// scales with that (see [`MyApp::board_silence`]).
 const LINK_SILENT: Duration = Duration::from_secs(10);
 
-/// How long after connecting the board counts as warming up. The GPS/LoRa
-/// rail is off through sleep and through each wake window, and comes up only
-/// once a central connects, so the WIO has to boot and the GPS has to make a
-/// cold fix before there is anything to report.
+/// How long after connecting the board counts as warming up. Its GPS runs
+/// whenever the board has power, so this is only really the cold-boot case:
+/// telemetry arrives at once, but the first fix behind it does not, and an
+/// empty read-out just after connecting is that rather than a fault.
 const BOARD_WARMUP: Duration = Duration::from_secs(45);
 
 /// A board seen by the current scan. The address is the map key and the
@@ -318,14 +313,14 @@ pub enum Page {
     /// Searchable list of all recorded GPS points.
     Points,
     /// The current position and beacon distance, plus board health for the
-    /// esp32c6-gps board (ESP/WIO/GPS/LoRa).
+    /// Wio-S3 board (BLE/GPS/LoRa).
     Status,
     /// The BLE beacon: the link, and the board's own power and sleep settings.
     Beacon,
     /// The app's own settings, from the TOML config file (marker colors,
     /// overlay sizes, distance read-out, track recording, offline maps).
     Settings,
-    /// Viewing and editing the WIO-E5 RADIO.TOML (radio, mesh, beacon, GPS).
+    /// Viewing and editing the board's RADIO.TOML (radio, mesh, beacon, GPS).
     Radio,
     /// CSV recording of every report, its graph, and the export off the device.
     Logging,
@@ -539,7 +534,7 @@ pub struct MyApp {
     /// Device-facing compass, when the platform has one (Android only). The
     /// sensor behind it is powered only while heading-up needs it.
     compass: Option<CompassHandle>,
-    /// The BLE worker streaming the ESP32-C3 beacon's GPS data.
+    /// The BLE worker streaming the connected board's GPS data.
     ble: BleHandle,
     /// Returns the current safe-area insets `[top, right, bottom, left]` in
     /// physical pixels. `None` on desktop (no system bars to avoid).
@@ -599,9 +594,9 @@ pub struct MyApp {
     ble_ack: Option<Result<String, String>>,
     /// A config write is in flight and the ack has not arrived yet.
     ble_ack_pending: bool,
-    /// Latest board telemetry (esp32c6-gps), for the Status page.
+    /// Latest board telemetry (Wio-S3), for the Status page.
     telemetry: Option<Telemetry>,
-    /// Latest WIO status/log line relayed by the board.
+    /// Latest status/log line the board sent.
     board_log: Option<String>,
     /// The board's own power and sleep settings, as it last reported them.
     /// The controls read this rather than any local copy: the board is the
@@ -672,7 +667,7 @@ pub struct MyApp {
     /// apart from `config.ble.names` so a half-typed name (or one being cleared)
     /// is not immediately written back over the config.
     name_edits: BTreeMap<String, String>,
-    /// The WIO-E5 RADIO.TOML being edited on the Radio page, once loaded.
+    /// The board's RADIO.TOML being edited on the Radio page, once loaded.
     radio: Option<RadioDoc>,
     /// The RADIO.TOML path typed on the Radio page.
     radio_path: String,
@@ -743,7 +738,7 @@ impl MyApp {
     /// passes a local `.cache`; Android passes its writable data directory.
     /// `compass` is the device-facing heading source (`None` on desktop).
     /// `insets` reports the safe-area insets in physical pixels (`None` on desktop).
-    /// `ble` is the worker connected to the ESP32-C3 GPS beacon.
+    /// `ble` is the worker connected to the GPS board.
     /// `export` puts a file where the user can reach it (`None` on desktop,
     /// where the log is written to a reachable path to begin with).
     pub fn new(
@@ -1771,20 +1766,13 @@ impl MyApp {
             .collect()
     }
 
-    /// Whether the board is still within its post-connect warm-up. The
-    /// GPS/LoRa rail is off through sleep and through each wake window and
-    /// comes up only once a central connects, so the WIO has to boot and the
-    /// GPS has to make a cold fix before there is anything to report - an
-    /// empty read-out just after connecting is that, not a fault.
+    /// Whether the board is still within its post-connect warm-up. A board
+    /// that was cold-booted has telemetry to report before it has a fix to
+    /// report, so an empty read-out just after connecting is that, not a
+    /// fault.
     pub(crate) fn board_warming(&self) -> bool {
         self.connected_at
             .is_some_and(|t| t.elapsed() < BOARD_WARMUP)
-    }
-
-    /// Whether the board says its GPS/LoRa power rail is switched off, which
-    /// leaves the WIO-E5 and the GPS unpowered and reporting nothing.
-    pub(crate) fn rail_off(&self) -> bool {
-        self.board_settings.is_some_and(|s| !s.pwr_en)
     }
 
     /// Parse a whole number out of one of the board-setting text boxes, or
@@ -2535,10 +2523,10 @@ mod tests {
         assert_eq!(app.sleep_commanded, Some(ble::ESP_SLEEP_MIN_S));
     }
 
-    /// The WIO statuses are a link failure between the ESP and the WIO-E5, not
-    /// a rejected value, and have to read as something the user can act on.
+    /// A refusal has to name the setting it refused, and read as something
+    /// the user can act on rather than a status code.
     #[test]
-    fn ack_message_separates_wio_faults_from_rejections() {
+    fn ack_message_separates_refusals_from_rejections() {
         let ack = |id, status| Ack {
             id,
             status,
@@ -2552,10 +2540,10 @@ mod tests {
         .unwrap()
         .contains("5 min"));
 
-        let wio = ack_message(&ack(ble::CFG_WIO_SLEEP, ble::ACK_WIO_TIMEOUT)).unwrap_err();
-        assert!(wio.contains("WIO-E5"), "{wio}");
-        let bad = ack_message(&ack(ble::CFG_PWR_EN, packet::ACK_BAD_VALUE)).unwrap_err();
-        assert!(bad.contains("GPS/LoRa power"), "{bad}");
+        let state = ack_message(&ack(ble::CFG_WIO_SLEEP, ble::ACK_BAD_STATE)).unwrap_err();
+        assert!(state.contains("radio standby"), "{state}");
+        let bad = ack_message(&ack(ble::CFG_GPS_SLEEP, packet::ACK_BAD_VALUE)).unwrap_err();
+        assert!(bad.contains("GPS backup mode"), "{bad}");
         // An interval of 0 turns sleep off, and must not read as "every off".
         assert_eq!(
             ack_message(&Ack {

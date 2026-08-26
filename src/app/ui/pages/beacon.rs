@@ -260,7 +260,7 @@ impl MyApp {
         }
     }
 
-    /// The board's power rail, sleep switches and the wake-check interval.
+    /// The board's sleep switches and the wake-check interval.
     ///
     /// Every control reads the board's own settings blob rather than a local
     /// copy: the board is the authority, and it changes these by itself
@@ -287,16 +287,10 @@ impl MyApp {
         ui.add_enabled_ui(!busy, |ui| {
             for (mut on, id, label, hover) in [
                 (
-                    s.pwr_en,
-                    ble::CFG_PWR_EN,
-                    "GPS/LoRa power rail",
-                    text::PWR_EN_HOVER,
-                ),
-                (
                     s.wio_sleep,
                     ble::CFG_WIO_SLEEP,
-                    "WIO-E5 asleep",
-                    text::WIO_SLEEP_HOVER,
+                    "LoRa radio in standby",
+                    text::RADIO_STANDBY_HOVER,
                 ),
                 (
                     s.gps_sleep,

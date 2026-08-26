@@ -27,16 +27,12 @@ pub(crate) mod manual {
 pub(crate) mod status {
     pub(crate) const WAITING_FIX: &str = "Waiting for a GPS fix...";
 
-    pub(crate) const RAIL_OFF: &str =
-        "The GPS/LoRa power rail is switched off, so the WIO-E5 and the GPS are unpowered and \
-         report nothing. Turn it on under Beacon.";
-
     pub(crate) const WARMING: &str =
-        "Warming up: the rail powers on at connect, so the WIO-E5 is still booting and the GPS \
-         is working on a cold fix.";
+        "Warming up: the board has only just connected, and a GPS that was cold when the board \
+         booted is still working on its first fix.";
 
     pub(crate) const NO_TELEMETRY: &str = "No board telemetry yet.\n\
-         Waiting for the esp32c6-gps board (an esp32c3 beacon does not report it).";
+         Waiting for the Wio-S3 board (an esp32c3 beacon does not report it).";
 }
 
 /// The Settings page: the app's own TOML settings.
@@ -135,16 +131,15 @@ pub(crate) mod beacon {
 
     // Board power and sleep.
     pub(crate) const BOARD_INTRO: &str =
-        "ESP32-C6 settings. The board keeps these in flash, so they outlast a power cycle.";
+        "Wio-S3 settings. The board keeps these in flash, so they outlast a power cycle.";
     pub(crate) const BOARD_NEED_LINK: &str = "Connect to the board to see and change these.";
     pub(crate) const BOARD_TOO_NEW: &str = "This board's firmware is newer than the app.";
     pub(crate) const BOARD_TOO_NEW_MORE: &str =
         "Its settings use a layout this build cannot decode. Update the app to change them.";
     pub(crate) const BOARD_READING: &str = "Reading the board's settings...";
 
-    pub(crate) const PWR_EN_HOVER: &str = "The LDO feeding both the WIO-E5 and the GPS";
-    pub(crate) const WIO_SLEEP_HOVER: &str =
-        "Soft sleep over the UART link, radio and GPS logging stop";
+    pub(crate) const RADIO_STANDBY_HOVER: &str =
+        "Parks the LoRa radio: it stops listening, so nothing is heard or relayed";
     pub(crate) const GPS_SLEEP_HOVER: &str = "The next fix after waking is a cold one";
     pub(crate) const SLEEP_DISABLE_HOVER: &str = "Stop the board sleeping at all";
 
@@ -152,7 +147,7 @@ pub(crate) mod beacon {
     pub(crate) fn wake_check(min_s: u32, max_s: u32) -> String {
         format!(
             "When set, board deep-sleeps when nothing is connected. Wakes every interval to \
-             advertise for window. The GPS/LoRa stay off. the interval survives a connect. \
+             advertise for window. The radio stays off. the interval survives a connect. \
              Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
@@ -199,13 +194,13 @@ pub(crate) mod beacon {
     }
 }
 
-/// The Radio page: the WIO-E5's own RADIO.TOML.
+/// The Radio page: the board's own RADIO.TOML.
 pub(crate) mod radio {
-    pub(crate) const INTRO: &str = "WIO-E5 RADIO.TOML for the esp32c6-gps board.";
+    pub(crate) const INTRO: &str = "RADIO.TOML for the Wio-S3 board.";
 
     pub(crate) const SEND_HOVER: &str =
-        "Send this config to the connected board. The WIO-E5 applies it immediately and stores \
-         it on the SD card and in flash.";
+        "Send this config to the connected board. It applies immediately and is written to the \
+         SD card, which is the only place it survives a reboot.";
     pub(crate) const SEND_NEEDS_CONFIG: &str = "Load or generate a config first";
     pub(crate) const SEND_NEEDS_LINK: &str = "Connect to the board first (Beacon page)";
     pub(crate) const SEND_WAITING: &str = "Waiting for the board to answer";
@@ -216,8 +211,7 @@ pub(crate) mod radio {
     pub(crate) const FETCH_TOO_NEW: &str =
         "The board's config format is newer than this app can read";
     pub(crate) const FETCH_NEEDS_LINK: &str =
-        "Connect on the Beacon page; the board's settings load once it reports them (the \
-         GPS/LoRa rail must be on)";
+        "Connect on the Beacon page; the board's settings load once its radio has come up";
 
     pub(crate) const EMPTY: &str =
         "Load a RADIO.TOML to view and edit the radio, mesh, beacon and GPS settings.";
@@ -226,8 +220,8 @@ pub(crate) mod radio {
 
     pub(crate) const PUSH_CONFIRM: &str = "Send this config to the board?";
     pub(crate) const PUSH_CONFIRM_MORE: &str =
-        "It replaces the board's whole config, takes effect immediately and is stored on the \
-         board.";
+        "It replaces the board's whole config, takes effect immediately and is written to the \
+         board's SD card. Without a card it is lost on the next reboot.";
 
     pub(crate) const NO_BACKUPS: &str = "No backups yet. Saving keeps the previous version here.";
 

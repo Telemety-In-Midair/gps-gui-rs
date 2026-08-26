@@ -1,7 +1,7 @@
 //! The Status page: where we are, and how the board is doing.
 //!
 //! The position read-out is the app's own; the BLE link state comes from the
-//! connection itself; the WIO/GPS/LoRa figures come from the board's telemetry
+//! connection itself; the GPS/LoRa figures come from the board's telemetry
 //! characteristic, and the last line from its log characteristic.
 
 use std::time::Duration;
@@ -30,21 +30,17 @@ impl MyApp {
                 self.remote_nodes_ui(ui);
                 self.ble_status_ui(ui);
 
-                // The rail powering the WIO-E5 and the GPS comes up only once a
-                // central connects, so an empty read-out just after connecting
-                // is the board waking, not a fault.
+                // A board that has just connected may still be on its first
+                // fix, so an empty read-out at that point is the GPS working,
+                // not a fault.
                 let warming = self.board_warming();
-                let rail_off = self.rail_off();
-                if rail_off {
-                    gap(ui, GAP_ITEM);
-                    ui.label(text::RAIL_OFF);
-                } else if warming {
+                if warming {
                     gap(ui, GAP_ITEM);
                     ui.label(text::WARMING);
                 }
 
                 let Some(t) = self.telemetry else {
-                    if !warming && !rail_off {
+                    if !warming {
                         gap(ui, GAP_SECTION);
                         ui.label(text::NO_TELEMETRY);
                     }
@@ -52,12 +48,12 @@ impl MyApp {
                     return;
                 };
 
-                // GPS (via the WIO's MAX-M10).
+                // GPS (the board's own MAX-M10).
                 section!(ui, "GPS");
                 status_bool(ui, colors, "Fix", t.flags & TELEM_FLAG_GPS_FIX != 0);
                 ui.label(format!("Satellites: {}", t.sats));
 
-                // LoRa mesh link (WIO-E5 radio).
+                // LoRa mesh link (the board's SX1262).
                 section!(ui, "LoRa");
                 let last_rx = match t.secs_since_rx {
                     0xFFFF => "never".to_string(),
@@ -73,8 +69,8 @@ impl MyApp {
                 }
                 ui.label(format!("RX: {}   TX: {}", t.rx_count, t.tx_count));
 
-                // WIO-E5 housekeeping.
-                section!(ui, "WIO-E5");
+                // Board housekeeping.
+                section!(ui, "Board");
                 status_bool(ui, colors, "SD logging", t.flags & TELEM_FLAG_SD_OK != 0);
                 status_bool(ui, colors, "Radio config", t.flags & TELEM_FLAG_CFG_LOADED != 0);
 
@@ -141,7 +137,7 @@ impl MyApp {
     /// The BLE link to the board: whether it is up, what was asked for, and
     /// what the worker is saying about it.
     fn ble_status_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "ESP32-C6 (BLE)");
+        section!(ui, "Wio-S3 (BLE)");
         status_bool(ui, self.config.ui, "Link", self.ble_connected);
         ui.label(self.ble_intent_text());
         hint!(ui, "BLE: {}", self.ble_status);
