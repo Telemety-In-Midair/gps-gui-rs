@@ -163,6 +163,24 @@ pub(crate) mod beacon {
         )
     }
 
+    pub(crate) const BLE_OFF_DISABLE_HOVER: &str =
+        "Keep BLE up continuously, so the board is always reachable";
+
+    /// What the BLE off period does, and the range it is clamped to.
+    ///
+    /// Said in terms of what keeps running, because the name reads like the
+    /// board going away: only the BLE controller stops. This is the largest
+    /// power saving the board has - roughly 70 mA of the 126 it draws - and
+    /// it is the one setting where the cost is purely reachability rather
+    /// than any loss of function.
+    pub(crate) fn ble_off(min_s: u32, max_s: u32) -> String {
+        format!(
+            "How long BLE is powered down between advertising windows. Saves about 70 mA of              the board's 126 while down. It keeps beaconing, tracking and logging throughout -              it just cannot be connected to until the next window. Clamped to {} - {}.",
+            secs_text(min_s),
+            secs_text(max_s)
+        )
+    }
+
     pub(crate) const SLEEP_NOW_HOVER: &str =
         "Send the board to sleep right now. It disconnects and is unreachable until it wakes";
     pub(crate) const SLEEP_NOW_BLANK_HOVER: &str =

@@ -354,6 +354,36 @@ impl MyApp {
             secs_text(s.adv_window_s)
         ));
 
+        gap(ui, GAP_BLOCK);
+        ui.strong("BLE off period");
+        hint!(ui, text::ble_off(ble::BLE_OFF_MIN_S, ble::BLE_OFF_MAX_S));
+        row(ui, "Down for (s):", |ui| {
+            text_field(ui, &mut self.ble_off_text, "", width);
+            if button!(ui, "Apply", enabled: !busy).clicked() {
+                self.apply_ble_off(None);
+            }
+            // A Disable here, unlike the advertising window: zero is the
+            // firmware default and the safe direction - it makes the board
+            // continuously reachable rather than unreachable.
+            let can_disable = !busy && s.ble_off_s > 0;
+            let disable = button!(
+                ui,
+                "Disable",
+                enabled: can_disable,
+                hover: text::BLE_OFF_DISABLE_HOVER,
+            );
+            if disable.clicked() {
+                self.apply_ble_off(Some(0));
+            }
+        });
+        ui.label(match s.ble_off_s {
+            0 => "Board: BLE always up.".to_string(),
+            secs => format!(
+                "Board: BLE down {} between windows, still beaconing.",
+                secs_text(secs)
+            ),
+        });
+
         // Separated from the settings above because it is not one. Every
         // other control on this page changes what the board will do; this
         // one makes it do something, once, and then the link goes away.

@@ -40,6 +40,7 @@ fn setting_name(id: u8) -> &'static str {
         ble::CFG_GPS_SLEEP => "GPS backup mode",
         ble::CFG_ESP_SLEEP_S => "wake-check interval",
         ble::CFG_ESP_ADV_WINDOW_S => "advertising window",
+        ble::CFG_BLE_OFF_S => "BLE off period",
         ble::CFG_SLEEP_NOW => "sleep now",
         _ => "setting",
     }
@@ -69,6 +70,19 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             ble::CFG_ESP_ADV_WINDOW_S => {
                 format!(
                     "Board applied: advertising {} per wake",
+                    secs_text(applied)
+                )
+            }
+            // Worth spelling out what keeps running, because "BLE off"
+            // reads like the board going away and it is not: only the
+            // controller stops. The beacon, the GPS and the SD log carry
+            // on, so the board is still tracking - just not reachable.
+            ble::CFG_BLE_OFF_S if applied == 0 => {
+                "Board applied: BLE stays up between windows".to_string()
+            }
+            ble::CFG_BLE_OFF_S => {
+                format!(
+                    "Board applied: BLE down {} between windows (still beaconing)",
                     secs_text(applied)
                 )
             }
@@ -637,6 +651,13 @@ pub struct MyApp {
     sleep_interval_text: String,
     /// Advertising-window input (seconds) on the Beacon page.
     adv_window_text: String,
+    /// BLE off-period input (seconds) on the Beacon page.
+    ///
+    /// The board's largest power lever: its BLE controller draws about 71 mA
+    /// of the 126 it draws in total, and nothing reduces that while the
+    /// controller exists - so the firmware destroys it between advertising
+    /// windows and the board sits near 60 mA in the gap.
+    ble_off_text: String,
     /// "Sleep now" duration input (seconds) on the Beacon page. Blank means
     /// "use the board's wake-check interval", which is what the firmware
     /// reads a zero as.
@@ -814,6 +835,10 @@ impl MyApp {
             // hard to catch), so a stray press should ask for what an
             // unconfigured board already does.
             adv_window_text: ble::ESP_ADV_DEFAULT_S.to_string(),
+            // The low end, like the wake check: this box arms a period
+            // the board is unreachable for, so a stray press should ask
+            // for the shortest one.
+            ble_off_text: ble::BLE_OFF_MIN_S.to_string(),
             // Blank rather than a number: the common press is "sleep for
             // the cadence I already configured", and a prefilled box would
             // make the uncommon one look like the default.
@@ -1825,6 +1850,27 @@ impl MyApp {
         }
     }
 
+    /// Send the typed BLE off period to the board. `secs` of 0 stops the
+    /// board taking its controller down at all, which is what the Disable
+    /// button sends.
+    ///
+    /// Unlike the advertising window a zero is safe here, and is the
+    /// firmware default: it means BLE is never taken down, so the board is
+    /// continuously reachable.
+    pub(crate) fn apply_ble_off(&mut self, secs: Option<u32>) {
+        let secs = match secs {
+            Some(secs) => Ok(secs),
+            None => Self::parse_setting(&self.ble_off_text, "seconds"),
+        };
+        match secs {
+            Ok(secs) => self.send_config(ConfigWrite::Seconds {
+                id: ble::CFG_BLE_OFF_S,
+                secs,
+            }),
+            Err(msg) => self.ble_ack = Some(Err(msg)),
+        }
+    }
+
     /// Tell the board to deep sleep now.
     ///
     /// A blank box is a zero, which the firmware reads as "for the
@@ -2129,6 +2175,14 @@ impl MyApp {
                         // value; keep the default rather than show it.
                         if s.adv_window_s > 0 {
                             self.adv_window_text = s.adv_window_s.to_string();
+                        }
+                        // A zero here is a real setting - "never take
+                        // BLE down" - and not an unresolved default, so it
+                        // is deliberately not seeded: leaving the box on
+                        // the floor keeps Apply meaningful on a board that
+                        // has the duty cycle off.
+                        if s.ble_off_s > 0 {
+                            self.ble_off_text = s.ble_off_s.to_string();
                         }
                     }
                     self.board_settings = Some(s);
@@ -2585,6 +2639,68 @@ mod tests {
         })
         .unwrap_err()
         .contains("advertising window"));
+    }
+
+    /// The off period is the board's largest power lever, so an ack that
+    /// read as the generic "Board applied: setting" would hide a clamp on
+    /// the one setting where the number matters most.
+    ///
+    /// Zero is the case worth pinning: it is the firmware default and it
+    /// means "never take BLE down", so it must not read as the board having
+    /// been put down for no time at all.
+    #[test]
+    fn ack_message_says_what_the_off_period_became() {
+        let acked = |secs| {
+            ack_message(&Ack {
+                id: ble::CFG_BLE_OFF_S,
+                status: packet::ACK_OK,
+                value_u32: Some(secs),
+            })
+        };
+        assert_eq!(
+            acked(0),
+            Ok("Board applied: BLE stays up between windows".to_string())
+        );
+        let thirty = acked(30).unwrap();
+        assert!(thirty.contains("30 s"), "{thirty}");
+        // What keeps running has to be in the line: "BLE down" alone reads
+        // as the board going away, and it does not.
+        assert!(thirty.contains("beaconing"), "{thirty}");
+        assert!(ack_message(&Ack {
+            id: ble::CFG_BLE_OFF_S,
+            status: packet::ACK_BAD_VALUE,
+            value_u32: None,
+        })
+        .unwrap_err()
+        .contains("BLE off period"));
+    }
+
+    /// Both buttons under the off period send the same id, and the Disable
+    /// one has to send a real zero rather than whatever is in the box - it
+    /// is the only way back to a continuously reachable board.
+    #[test]
+    fn the_off_period_disable_button_sends_zero() {
+        let (mut app, cmds, _events) = test_app();
+        // Drained rather than read once: startup queues its own requests,
+        // and a plain try_recv would return one of those instead.
+        let sent = |cmds: &Receiver<BleRequest>| {
+            let mut found = None;
+            while let Ok(req) = cmds.try_recv() {
+                if let BleCommand::Config(ConfigWrite::Seconds { id, secs }) = req.command {
+                    found = Some((id, secs));
+                }
+            }
+            found
+        };
+
+        app.ble_off_text = "45".to_string();
+        app.apply_ble_off(None);
+        assert_eq!(sent(&cmds), Some((ble::CFG_BLE_OFF_S, 45)));
+
+        // The box is left holding 45, and Disable still has to send 0.
+        app.apply_ble_off(Some(0));
+        assert_eq!(sent(&cmds), Some((ble::CFG_BLE_OFF_S, 0)));
+        assert_eq!(app.ble_off_text, "45", "the box is not rewritten");
     }
 
     /// The distance every range reading in the log and every label on the map

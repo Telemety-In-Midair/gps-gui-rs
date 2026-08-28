@@ -614,6 +614,25 @@ with it.
   sit together because they are the same decision - the interval and the window
   are the duty cycle, and so the battery life - but only one of them can be
   turned off.
+- **The BLE off period has a Disable, and for the opposite reason the window
+  does not.** `CFG_BLE_OFF_S` sets how long the board powers its BLE
+  controller down between advertising windows, clamped to
+  `ble::BLE_OFF_MIN_S` - `BLE_OFF_MAX_S` (5 s - 5 min). Here 0 is the
+  firmware default and the safe direction - it means the controller is never
+  taken down, so the board is continuously reachable - which is exactly why
+  this control gets the button the window is denied.
+
+  It sits on this page rather than a power one because it is the third leg of
+  the same duty cycle, and it is by far the largest: the controller is about
+  71 mA of the board's 126, and nothing reduces that while it exists, so the
+  firmware destroys and rebuilds it. Both the hint and the "Board:" line say
+  what keeps running, because "BLE off" reads like the board going away and
+  it is not - the beacon, the GPS and the SD log all carry on through the
+  gap. The one thing lost is reachability.
+
+  The board's own value is not seeded into the box when it reads 0, unlike
+  the wake-check interval: a 0 there is an unresolved default, while a 0 here
+  is a real setting, and seeding it would leave Apply asking for nothing.
 - **Every acked number is quoted back.** `ack_message` names the setting and
   the value the board stored, because the clamping is otherwise invisible: ask
   for a window under the floor and the only sign it was changed is the ack. The
