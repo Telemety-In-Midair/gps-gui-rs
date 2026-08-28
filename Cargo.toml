@@ -36,7 +36,7 @@ gps-proto = { path = "../gps-proto" }
 # board (no_std, cross-compiles unchanged), used by the Status page to decode
 # the telemetry and log characteristics. The checkout is still named for the
 # ESP32-C6 the firmware started on.
-midair-proto = { path = "../esp32c6-gps/proto" }
+midair-proto = { path = "../telemetry-in-midair-rs/proto" }
 # Offline region downloads reuse the exact HTTP-cache stack walkers uses (same
 # crate versions, same cache format), so pre-fetched tiles land in the cache
 # the map already reads from. All already in the dependency tree via walkers.

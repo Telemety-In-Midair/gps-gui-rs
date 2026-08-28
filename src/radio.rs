@@ -176,7 +176,7 @@ pub const CONFIG_MAX: usize = 1024;
 /// time so the app can lay down a config with no file to start from and no
 /// second copy of the schema to keep in step. The board is a sibling checkout
 /// this crate already builds against.
-const DEFAULT_TOML: &str = include_str!("../../esp32c6-gps/RADIO.example.toml");
+const DEFAULT_TOML: &str = include_str!("../../telemetry-in-midair-rs/RADIO.example.toml");
 
 /// Whether `key` is one of the metadata keys (`<name>_description` /
 /// `<name>_type`) rather than an editable setting.

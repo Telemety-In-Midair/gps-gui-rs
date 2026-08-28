@@ -744,7 +744,7 @@ app's) and edits it in place. The model lives in `src/radio.rs`; the page in
 - **Generating a default.** With nothing loaded, "Generate default config"
   (`MyApp::default_radio` -> `RadioDoc::default_at`) fills the editor from the
   firmware's own `RADIO.example.toml`, `include_str!`d from the sibling
-  esp32c6-gps checkout this crate already builds against - so there is no second
+  telemetry-in-midair-rs checkout this crate already builds against - so there is no second
   copy of the schema to keep in step. It starts dirty and writes nothing until
   Save, which backs up any existing file first.
 - **Backups.** `Save` copies the previous on-disk file into a `radio-backups`

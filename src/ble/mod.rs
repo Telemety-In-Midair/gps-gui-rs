@@ -1,4 +1,4 @@
-//! BLE central for the GPS boards: the Wio-S3 (esp32c6-gps firmware) and the
+//! BLE central for the GPS boards: the Wio-S3 (telemetry-in-midair-rs firmware) and the
 //! older ESP32-C3 beacon it grew out of.
 //!
 //! Mirrors the gps source design: a background worker owns the platform BLE
