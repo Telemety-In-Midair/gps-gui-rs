@@ -16,7 +16,7 @@ use std::time::Duration;
 use gps_proto::packet::{self, Ack};
 use midair_proto::{ble, link, lora};
 pub use gps_proto::packet::PositionPacket;
-pub use midair_proto::ble::Settings;
+pub use midair_proto::ble::{Mode, Settings};
 pub use midair_proto::link::Telemetry;
 pub use midair_proto::radiocfg::RadioConfig;
 
@@ -200,6 +200,13 @@ pub enum ConfigWrite {
     Flag { id: u8, on: bool },
     /// A board interval in seconds: the wake-check cadence.
     Seconds { id: u8, secs: u32 },
+    /// The board's mode.
+    ///
+    /// Not a [`ConfigWrite::Flag`] even though it is one byte: a flag is a
+    /// subsystem switched on or off, and a mode is a whole posture - which
+    /// of the settings above the board even reads, and what it comes back
+    /// as after a flat cell.
+    Mode(ble::Mode),
 }
 
 impl ConfigWrite {
@@ -222,6 +229,13 @@ impl ConfigWrite {
                 b[1] = 4;
                 b[2..6].copy_from_slice(&secs.to_le_bytes());
                 (b, 6)
+            }
+            ConfigWrite::Mode(mode) => {
+                let mut b = [0u8; 6];
+                b[0] = ble::CFG_MODE;
+                b[1] = 1;
+                b[2] = mode.as_wire();
+                (b, 3)
             }
         }
     }

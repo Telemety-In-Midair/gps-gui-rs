@@ -84,7 +84,11 @@ Add name to status page.
 
 List of BLE addresses/names in toml
 
-Mode for BLE sleep while transmitting
+~~Mode for BLE sleep while transmitting~~
+The board has three modes now (stored / idle / tracking) and the Beacon page
+picks between them. The BLE off period is tracking's knob specifically, so
+"BLE asleep while it keeps beaconing" is what tracking plus a non-zero off
+period already is.
 
 Scanning for multiple, should be able to do this while connected?
 

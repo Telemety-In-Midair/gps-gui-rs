@@ -42,6 +42,8 @@ fn setting_name(id: u8) -> &'static str {
         ble::CFG_ESP_ADV_WINDOW_S => "advertising window",
         ble::CFG_BLE_OFF_S => "BLE off period",
         ble::CFG_SLEEP_NOW => "sleep now",
+        ble::CFG_MODE => "mode",
+        ble::CFG_IDLE_TIMEOUT_S => "idle timeout",
         _ => "setting",
     }
 }
@@ -94,6 +96,31 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             ble::CFG_SLEEP_NOW => {
                 format!(
                     "Board sleeping for {} - it will disconnect now",
+                    secs_text(applied)
+                )
+            }
+            // The mode acks with the byte it stored, so this reports what
+            // the board is now rather than what it was asked to be. Stored
+            // is the one that ends the link, and it says so for the same
+            // reason `CFG_SLEEP_NOW` does: the disconnect that follows is
+            // the command working.
+            ble::CFG_MODE => match ble::Mode::from_wire(applied as u8) {
+                Some(ble::Mode::Stored) => {
+                    "Board storing itself - it will disconnect now".to_string()
+                }
+                Some(ble::Mode::Idle) => {
+                    "Board idle: reachable, GPS in backup, radio down".to_string()
+                }
+                Some(ble::Mode::Tracking) => {
+                    "Board tracking: GPS, beacon and logging up".to_string()
+                }
+                // A mode this build does not know, which is a board newer
+                // than the app rather than a failure.
+                None => format!("Board applied: mode {applied}"),
+            },
+            ble::CFG_IDLE_TIMEOUT_S => {
+                format!(
+                    "Board applied: idle for {} before it stores itself",
                     secs_text(applied)
                 )
             }
@@ -658,6 +685,13 @@ pub struct MyApp {
     /// controller exists - so the firmware destroys it between advertising
     /// windows and the board sits near 60 mA in the gap.
     ble_off_text: String,
+    /// Idle-timeout input (seconds) on the Beacon page: how long the board
+    /// stays reachable-but-not-tracking before it stores itself.
+    ///
+    /// The setting that makes idle affordable. It is the expensive state -
+    /// BLE dominates it, and the firmware cannot reduce that while the
+    /// controller exists - so it is meant to be minutes, not days.
+    idle_timeout_text: String,
     /// "Sleep now" duration input (seconds) on the Beacon page. Blank means
     /// "use the board's wake-check interval", which is what the firmware
     /// reads a zero as.
@@ -842,6 +876,7 @@ impl MyApp {
             // Blank rather than a number: the common press is "sleep for
             // the cadence I already configured", and a prefilled box would
             // make the uncommon one look like the default.
+            idle_timeout_text: ble::IDLE_TIMEOUT_DEFAULT_S.to_string(),
             sleep_now_text: String::new(),
             sleep_commanded: None,
             page: Page::Map,
@@ -1871,6 +1906,41 @@ impl MyApp {
         }
     }
 
+    /// Put the board into a mode.
+    ///
+    /// [`ble::Mode::Stored`] is the one that ends the link: the board acks
+    /// and then deep-sleeps, so the disconnect that follows is the command
+    /// working. It gets the same handling "Sleep now" does, recorded as a
+    /// commanded sleep with the duration worked out through the firmware's
+    /// own resolver, so the message shown while the ack is still in flight
+    /// cannot disagree with what the board does.
+    ///
+    /// A board with no wake cadence set still sleeps here, on the ceiling:
+    /// being told to store yourself is not ambiguous the way a timeout
+    /// running out on a board nobody configured is.
+    pub(crate) fn apply_mode(&mut self, mode: ble::Mode) {
+        if mode == ble::Mode::Stored {
+            let cadence = self.board_settings.map_or(0, |s| s.sleep_interval_s);
+            self.sleep_commanded = Some(ble::resolve_sleep_now(0, cadence));
+        }
+        self.send_config(ConfigWrite::Mode(mode));
+    }
+
+    /// Send the typed idle timeout to the board.
+    ///
+    /// No zero and no Disable, unlike the wake check: a board leaves idle by
+    /// deep-sleeping, so "never leave idle" is a wake-check interval of 0
+    /// rather than a timeout of 0. The board clamps a zero up to its floor.
+    pub(crate) fn apply_idle_timeout(&mut self) {
+        match Self::parse_setting(&self.idle_timeout_text, "seconds") {
+            Ok(secs) => self.send_config(ConfigWrite::Seconds {
+                id: ble::CFG_IDLE_TIMEOUT_S,
+                secs,
+            }),
+            Err(msg) => self.ble_ack = Some(Err(msg)),
+        }
+    }
+
     /// Tell the board to deep sleep now.
     ///
     /// A blank box is a zero, which the firmware reads as "for the
@@ -2183,6 +2253,13 @@ impl MyApp {
                         // has the duty cycle off.
                         if s.ble_off_s > 0 {
                             self.ble_off_text = s.ble_off_s.to_string();
+                        }
+                        // Always seeded, unlike the off period: the board
+                        // reports the timeout it resolved, so there is no
+                        // "unset" value to preserve here - a 0 would be a
+                        // board that does not know its own effective value.
+                        if s.idle_timeout_s > 0 {
+                            self.idle_timeout_text = s.idle_timeout_s.to_string();
                         }
                     }
                     self.board_settings = Some(s);
@@ -2701,6 +2778,128 @@ mod tests {
         app.apply_ble_off(Some(0));
         assert_eq!(sent(&cmds), Some((ble::CFG_BLE_OFF_S, 0)));
         assert_eq!(app.ble_off_text, "45", "the box is not rewritten");
+    }
+
+    /// The mode is one byte on the config characteristic, and which byte
+    /// matters more than most: an app and a board disagreeing about which
+    /// value means "tracking" is a board that stores itself when it was told
+    /// to track.
+    #[test]
+    fn a_mode_write_carries_the_wire_byte() {
+        for (mode, wire) in [
+            (ble::Mode::Stored, 0u8),
+            (ble::Mode::Idle, 1),
+            (ble::Mode::Tracking, 2),
+        ] {
+            let (bytes, len) = ConfigWrite::Mode(mode).encode();
+            assert_eq!(&bytes[..len], &[ble::CFG_MODE, 1, wire]);
+        }
+    }
+
+    /// Storing the board ends the link, so it has to be recorded as a
+    /// commanded sleep the way "Sleep now" is - otherwise the disconnect
+    /// that follows is reported as a fault, right next to an ack line still
+    /// saying the write succeeded.
+    #[test]
+    fn storing_the_board_expects_the_disconnect() {
+        let (mut app, _cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Settings(Settings::default()));
+        app.drain_sources();
+
+        app.apply_mode(ble::Mode::Tracking);
+        assert_eq!(app.sleep_commanded, None, "tracking keeps the link");
+        app.apply_mode(ble::Mode::Idle);
+        assert_eq!(app.sleep_commanded, None, "so does idle");
+
+        // With no cadence set the board sleeps on the ceiling rather than
+        // refusing, and the app has to predict the same number - it is the
+        // one shown while the ack is still in flight.
+        app.apply_mode(ble::Mode::Stored);
+        assert_eq!(app.sleep_commanded, Some(ble::SLEEP_NOW_DEFAULT_S));
+
+        report(&events, &app, BleEvent::Connected(false));
+        app.drain_sources();
+        let line = app.ble_ack.clone().expect("the disconnect is explained");
+        assert!(line.unwrap().contains("asleep"), "reads as the command working");
+    }
+
+    /// A mode write acks with the byte the board stored, so the line reports
+    /// what the board *is* rather than what it was asked to be.
+    #[test]
+    fn ack_message_names_the_mode_the_board_took() {
+        let acked = |mode: ble::Mode| {
+            ack_message(&Ack {
+                id: ble::CFG_MODE,
+                status: packet::ACK_OK,
+                value_u32: Some(u32::from(mode.as_wire())),
+            })
+            .expect("an OK ack")
+        };
+        assert!(acked(ble::Mode::Tracking).contains("tracking"));
+        assert!(acked(ble::Mode::Idle).contains("idle"));
+        // The one that has to warn, for the same reason `CFG_SLEEP_NOW`
+        // does: the link is about to go.
+        assert!(acked(ble::Mode::Stored).contains("disconnect"));
+
+        // A board newer than this app is a board with a mode it has never
+        // heard of, which must not read as a failure.
+        assert!(ack_message(&Ack {
+            id: ble::CFG_MODE,
+            status: packet::ACK_OK,
+            value_u32: Some(7),
+        })
+        .is_ok());
+
+        let bad = ack_message(&Ack {
+            id: ble::CFG_IDLE_TIMEOUT_S,
+            status: packet::ACK_BAD_VALUE,
+            value_u32: None,
+        })
+        .unwrap_err();
+        assert!(bad.contains("idle timeout"), "{bad}");
+    }
+
+    /// The idle timeout has no Disable, unlike the wake check: a board
+    /// leaves idle by deep-sleeping, so "stay idle" is a wake-check interval
+    /// of 0 and not a timeout of 0. The write is the typed value either way.
+    #[test]
+    fn the_idle_timeout_sends_what_was_typed() {
+        let (mut app, cmds, events) = test_app();
+        let sent = |cmds: &Receiver<BleRequest>| {
+            let mut found = None;
+            while let Ok(req) = cmds.try_recv() {
+                if let BleCommand::Config(ConfigWrite::Seconds { id, secs }) = req.command {
+                    found = Some((id, secs));
+                }
+            }
+            found
+        };
+
+        app.idle_timeout_text = "900".to_string();
+        app.apply_idle_timeout();
+        assert_eq!(sent(&cmds), Some((ble::CFG_IDLE_TIMEOUT_S, 900)));
+
+        // A typo answers on the ack line rather than sending anything.
+        app.idle_timeout_text = "ten minutes".to_string();
+        app.apply_idle_timeout();
+        assert_eq!(sent(&cmds), None);
+        assert!(app.ble_ack.as_ref().is_some_and(|r| r.is_err()));
+
+        // The board's own value seeds the box the first time it reports.
+        let (mut app, _cmds, events2) = test_app();
+        let _ = events;
+        report(&events2, &app, BleEvent::Connected(true));
+        report(
+            &events2,
+            &app,
+            BleEvent::Settings(Settings {
+                idle_timeout_s: 1_200,
+                ..Settings::default()
+            }),
+        );
+        app.drain_sources();
+        assert_eq!(app.idle_timeout_text, "1200");
     }
 
     /// The distance every range reading in the log and every label on the map

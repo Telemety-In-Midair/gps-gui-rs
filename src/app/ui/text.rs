@@ -138,17 +138,67 @@ pub(crate) mod beacon {
         "Its settings use a layout this build cannot decode. Update the app to change them.";
     pub(crate) const BOARD_READING: &str = "Reading the board's settings...";
 
+    pub(crate) const MODE_INTRO: &str =
+        "What the board is for right now. Each setting below belongs to one mode, and only \
+         that mode reads it.";
+    pub(crate) const MODE_STORED_HOVER: &str =
+        "Everything down. The board acks, then deep-sleeps on its wake cadence and \
+         disconnects - connect during one of its wake checks to bring it back";
+    pub(crate) const MODE_IDLE_HOVER: &str =
+        "Reachable but not tracking: the GPS stays in backup and the radio stays down, so \
+         reading the board's settings costs no acquisition. Ends by itself";
+    pub(crate) const MODE_TRACKING_HOVER: &str =
+        "GPS acquiring, beacons going out, card logging. The only mode that survives a \
+         power cycle, so a board put down tracking comes back tracking";
+
+    /// What each mode is doing, for the line under the buttons. This is the
+    /// board's own reported mode, not the button that was last pressed.
+    pub(crate) fn mode_state(mode: midair_proto::ble::Mode) -> &'static str {
+        match mode {
+            midair_proto::ble::Mode::Stored => {
+                "Board: stored. Awake for this wake check only - it goes back down when the \
+                 window ends."
+            }
+            midair_proto::ble::Mode::Idle => {
+                "Board: idle. Reachable, GPS in backup, radio asleep."
+            }
+            midair_proto::ble::Mode::Tracking => {
+                "Board: tracking. GPS, beacon and logging up."
+            }
+        }
+    }
+
+    /// What the idle timeout does, and the range it is clamped to.
+    ///
+    /// Said in terms of why it exists rather than what it sets: idle is the
+    /// expensive state, and this is the only thing that bounds it.
+    pub(crate) fn idle_timeout(min_s: u32, max_s: u32) -> String {
+        format!(
+            "How long the board stays idle before it stores itself. Idle costs nearly as much \
+             as tracking - it is BLE that dominates, not the GPS - so this is meant to be \
+             minutes. Every cold boot lands in idle, so it is also the window you get to catch \
+             a board that has just come back from a flat cell. Clamped to {} - {}.",
+            secs_text(min_s),
+            secs_text(max_s)
+        )
+    }
+
     pub(crate) const RADIO_STANDBY_HOVER: &str =
         "Parks the LoRa radio: it stops listening, so nothing is heard or relayed";
     pub(crate) const GPS_SLEEP_HOVER: &str = "The next fix after waking is a cold one";
     pub(crate) const SLEEP_DISABLE_HOVER: &str = "Stop the board sleeping at all";
 
     /// What the wake check does, and the range the board will clamp it to.
+    ///
+    /// Which modes read it is half the meaning now: a tracker that
+    /// deep-sleeps is not tracking, so this is the stored board's cadence
+    /// and the sleep an idle board takes when its timeout runs out.
     pub(crate) fn wake_check(min_s: u32, max_s: u32) -> String {
         format!(
-            "When set, board deep-sleeps when nothing is connected. Wakes every interval to \
-             advertise for window. The radio stays off. the interval survives a connect. \
-             Clamped to {} - {}.",
+            "How often a stored board wakes to ask whether anyone wants it, and the sleep an \
+             idle board takes when its timeout runs out. A tracking board ignores it. 0 means \
+             the board never stores itself on its own - though being told to store itself \
+             still works. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -157,7 +207,9 @@ pub(crate) mod beacon {
     /// What the advertising window does, and the range it is clamped to.
     pub(crate) fn adv_window(min_s: u32, max_s: u32) -> String {
         format!(
-            "How long each wake advertises before going back to sleep. Clamped to {} - {}.",
+            "How long each wake check advertises before going back to sleep - the whole of \
+             the time a stored board is reachable. While tracking it is the on-half of the \
+             BLE off period instead. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -175,7 +227,11 @@ pub(crate) mod beacon {
     /// than any loss of function.
     pub(crate) fn ble_off(min_s: u32, max_s: u32) -> String {
         format!(
-            "How long BLE is powered down between advertising windows. Saves about 70 mA of              the board's 126 while down. It keeps beaconing, tracking and logging throughout -              it just cannot be connected to until the next window. Clamped to {} - {}.",
+            "How long BLE is powered down between advertising windows while tracking. Saves \
+             about 70 mA of the board's 126 while down. It keeps beaconing, tracking and \
+             logging throughout - it just cannot be connected to until the next window. Only \
+             tracking reads this: idle exists to be reachable, and a stored board has no \
+             controller to take down. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -183,6 +239,8 @@ pub(crate) mod beacon {
 
     pub(crate) const SLEEP_NOW_HOVER: &str =
         "Send the board to sleep right now. It disconnects and is unreachable until it wakes";
+    pub(crate) const SLEEP_NOW_MODE_NOTE: &str =
+        "Unlike Stored above, this is a nap: the board comes back to the mode it is in now.";
     pub(crate) const SLEEP_NOW_BLANK_HOVER: &str =
         "Leave blank to use the wake-check interval above";
 

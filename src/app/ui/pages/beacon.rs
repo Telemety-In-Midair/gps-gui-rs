@@ -284,6 +284,38 @@ impl MyApp {
         // One write at a time: while an ack is outstanding the board has not
         // yet said what it applied, and these controls show only what it has.
         let busy = self.ble_ack_pending;
+
+        // The mode comes first because it decides which of the settings
+        // below the board even reads. Selection is drawn from the board's
+        // reported mode rather than from the last button pressed, like
+        // every other control here - so a press that the board refuses, or
+        // that has not landed yet, leaves the highlight where it was.
+        ui.strong("Mode");
+        hint!(ui, text::MODE_INTRO);
+        let mut pick = None;
+        ui.horizontal_wrapped(|ui| {
+            for (mode, label, hover) in [
+                (ble::Mode::Stored, "Stored", text::MODE_STORED_HOVER),
+                (ble::Mode::Idle, "Idle", text::MODE_IDLE_HOVER),
+                (ble::Mode::Tracking, "Tracking", text::MODE_TRACKING_HOVER),
+            ] {
+                let resp = ui
+                    .add_enabled_ui(!busy, |ui| ui.selectable_label(s.mode == mode, label))
+                    .inner
+                    .on_hover_text(hover);
+                if resp.clicked() {
+                    pick = Some(mode);
+                }
+            }
+        });
+        // Applied outside the closure: `apply_mode` takes `&mut self` and
+        // the row above already borrows it through `s`.
+        if let Some(mode) = pick {
+            self.apply_mode(mode);
+        }
+        ui.label(text::mode_state(s.mode));
+
+        gap(ui, GAP_BLOCK);
         ui.add_enabled_ui(!busy, |ui| {
             for (mut on, id, label, hover) in [
                 (
@@ -384,6 +416,34 @@ impl MyApp {
             ),
         });
 
+        gap(ui, GAP_BLOCK);
+        ui.strong("Idle timeout");
+        hint!(
+            ui,
+            text::idle_timeout(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S)
+        );
+        row(ui, "Idle for (s):", |ui| {
+            text_field(ui, &mut self.idle_timeout_text, "", width);
+            if button!(ui, "Apply", enabled: !busy).clicked() {
+                self.apply_idle_timeout();
+            }
+        });
+        // No Disable, unlike the wake check and the off period: a board
+        // leaves idle by deep-sleeping, so "stay idle forever" is a
+        // wake-check interval of 0 rather than a timeout of 0. The board
+        // clamps a zero up to its floor for the same reason the advertising
+        // window does.
+        ui.label(match s.sleep_interval_s {
+            0 => format!(
+                "Board: idle for {}, but with no wake check set it stays reachable instead.",
+                secs_text(s.idle_timeout_s)
+            ),
+            _ => format!(
+                "Board: idle {} before it stores itself.",
+                secs_text(s.idle_timeout_s)
+            ),
+        });
+
         // Separated from the settings above because it is not one. Every
         // other control on this page changes what the board will do; this
         // one makes it do something, once, and then the link goes away.
@@ -393,6 +453,7 @@ impl MyApp {
             ui,
             text::sleep_now(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
         );
+        hint!(ui, small text::SLEEP_NOW_MODE_NOTE);
         row(ui, "For (s):", |ui| {
             text_field(ui, &mut self.sleep_now_text, "", width)
                 .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
