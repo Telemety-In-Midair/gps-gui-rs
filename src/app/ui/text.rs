@@ -95,7 +95,8 @@ pub(crate) mod beacon {
         "Connect to the first board that answers, whichever it is";
     pub(crate) const NAMES_NOTE: &str =
         "Names are the app's own and are saved with the rest of its settings. Clearing a name \
-         forgets the board.";
+         forgets the board. The grey name beside a board is the one it calls itself, which is \
+         set on the board and travels with it.";
 
     // Link controls.
     pub(crate) const RECONNECT_HOVER: &str =

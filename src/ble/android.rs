@@ -23,7 +23,8 @@ use midair_proto::ble;
 use midair_proto::link::Telemetry;
 
 use super::{
-    node_ping_event, radio_config_event, remote_event, settings_event, Aborted, BleEvent,
+    name_event, node_ping_event, radio_config_event, remote_event, settings_event, Aborted,
+    BleEvent,
     BleHandle, BleRequest, DiscoveredDevice, Ended, Inbox, Interrupt, PushStep, Reporter, Target,
     Wanted, CMD_POLL, PUSH_ACK_TIMEOUT,
 };
@@ -444,6 +445,7 @@ fn connected(
         ble::LOG_UUID,
         ble::SETTINGS_UUID,
         ble::RADIO_CONFIG_UUID,
+        ble::NAME_UUID,
         ble::REMOTE_UUID,
         ble::NODE_PING_UUID,
     ] {
@@ -471,6 +473,7 @@ fn connected(
     // decodes it on the same path a change notification takes.
     bridge.read_characteristic(packet::SERVICE_UUID, ble::SETTINGS_UUID);
     bridge.read_characteristic(packet::SERVICE_UUID, ble::RADIO_CONFIG_UUID);
+    bridge.read_characteristic(packet::SERVICE_UUID, ble::NAME_UUID);
 
     // Pump: notifications out, commands in, until disconnect.
     //
@@ -573,6 +576,10 @@ fn connected(
                     report.send(settings_event(&value));
                 } else if uuid.eq_ignore_ascii_case(ble::RADIO_CONFIG_UUID) {
                     if let Some(e) = radio_config_event(&value) {
+                        report.send(e);
+                    }
+                } else if uuid.eq_ignore_ascii_case(ble::NAME_UUID) {
+                    if let Some(e) = name_event(&value) {
                         report.send(e);
                     }
                 }

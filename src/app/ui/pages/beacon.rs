@@ -123,6 +123,13 @@ impl MyApp {
                 if text_field(ui, name, "name this board", name_width).lost_focus() {
                     self.commit_name(&device.mac);
                 }
+                // The board's own name before the address, because it is the
+                // half a person can read. It is not a substitute for the box
+                // to its left: that one is this user's name for the board and
+                // is what every other page labels it by.
+                if let Some(advertised) = &device.advertised {
+                    hint!(ui, advertised.as_str());
+                }
                 hint!(ui, device.mac.as_str());
                 match device.rssi {
                     // Only a running scan measures this, so its absence during

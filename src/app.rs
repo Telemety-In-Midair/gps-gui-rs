@@ -183,6 +183,11 @@ const BOARD_WARMUP: Duration = Duration::from_secs(45);
 /// only what changes: how strong it was, and when.
 struct Seen {
     rssi: Option<i16>,
+    /// The name it advertised under, absent on firmware that predates board
+    /// names. Not aged out with the signal: a name does not go stale the way
+    /// a reading does, and a board that has stopped answering is exactly when
+    /// knowing which one it was matters.
+    name: Option<String>,
     /// When it last advertised, for ageing it out of the picker.
     at: Instant,
 }
@@ -195,6 +200,14 @@ pub(crate) struct DeviceRow {
     /// Signal strength from the running scan, absent for a board that is only
     /// known from the config or has not been heard from recently.
     pub rssi: Option<i16>,
+    /// What the board calls itself, from the last advertisement seen for it.
+    /// Absent for a board known only from the config, and on firmware that
+    /// predates board names.
+    ///
+    /// Shown beside the MAC rather than in place of the app's own nickname:
+    /// the nickname is what this user decided to call the board, and it wins
+    /// wherever one label has to be picked.
+    pub advertised: Option<String>,
     /// This board is the pinned one, so it is what Connect will go to.
     pub selected: bool,
 }
@@ -643,6 +656,10 @@ pub struct MyApp {
     /// The controls read this rather than any local copy: the board is the
     /// authority and changes these by itself (clamping an interval).
     board_settings: Option<Settings>,
+    /// What the connected board says it is called, read on connect and
+    /// notified on a rename. Absent until it answers, and on firmware that
+    /// predates board names.
+    board_name: Option<String>,
     /// The board's settings layout is newer than this build can decode, so
     /// its settings are unknown rather than defaulted.
     settings_unsupported: bool,
@@ -850,6 +867,7 @@ impl MyApp {
             telemetry: None,
             board_log: None,
             board_settings: None,
+            board_name: None,
             settings_unsupported: false,
             board_radio_config: None,
             radio_config_unsupported: false,
@@ -1285,6 +1303,7 @@ impl MyApp {
             node.no_fix = None;
         }
         self.board_settings = None;
+        self.board_name = None;
         self.settings_unsupported = false;
         // The next board may run a different config; drop this one so the
         // Radio page's "load from board" cannot offer a stale board's values.
@@ -1318,6 +1337,10 @@ impl MyApp {
                     .get(&mac)
                     .filter(|seen| seen.at.elapsed() < SEEN_TIMEOUT)
                     .and_then(|seen| seen.rssi),
+                advertised: self
+                    .discovered
+                    .get(&mac)
+                    .and_then(|seen| seen.name.clone()),
                 selected: self.config.ble.is_selected(&mac),
                 mac,
             })
@@ -1389,11 +1412,28 @@ impl MyApp {
 
     /// The board the app is pinned to, named for a heading or a status line.
     /// "Any board" when nothing is pinned, which is what an empty MAC means.
+    ///
+    /// Three sources, in the order they are trusted: the nickname this user
+    /// gave the board, the name the board gives itself, and the MAC. The
+    /// board's own name is worth more than a raw address and less than a
+    /// decision the user made, which is exactly the middle.
     pub(crate) fn selected_device_label(&self) -> String {
-        match &self.config.ble.mac {
-            Some(mac) => self.config.ble.label_of(mac),
-            None => "Any board".to_string(),
+        let Some(mac) = &self.config.ble.mac else {
+            // Pinned to nothing, but connected to something: say which,
+            // since the board is the only one that can answer that here.
+            return match (&self.board_name, self.ble_connected) {
+                (Some(name), true) => name.clone(),
+                _ => "Any board".to_string(),
+            };
+        };
+        if let Some(nickname) = self.config.ble.name_of(mac) {
+            return nickname.to_string();
         }
+        self.discovered
+            .get(&normalize_mac(mac))
+            .and_then(|seen| seen.name.clone())
+            .or_else(|| self.ble_connected.then(|| self.board_name.clone()).flatten())
+            .unwrap_or_else(|| mac.clone())
     }
 
     /// Queue one config write to the board and wait for its ack. The controls
@@ -2093,10 +2133,20 @@ impl MyApp {
             match event {
                 BleEvent::Status(s) => self.ble_status = s,
                 BleEvent::Discovered(device) => {
+                    let key = normalize_mac(&device.address);
+                    // A scan response can arrive without the name (the board
+                    // was scanned passively, or the advertisement came in
+                    // first), so a missing name keeps the one already known
+                    // rather than clearing it.
+                    let name = device
+                        .name
+                        .clone()
+                        .or_else(|| self.discovered.get(&key).and_then(|s| s.name.clone()));
                     self.discovered.insert(
-                        normalize_mac(&device.address),
+                        key,
                         Seen {
                             rssi: device.rssi,
+                            name,
                             at: Instant::now(),
                         },
                     );
@@ -2135,6 +2185,7 @@ impl MyApp {
                         // there is no link, so a board that sleeps again should
                         // still be chased if that is what was asked for.
                         self.board_settings = None;
+                        self.board_name = None;
                         self.settings_unsupported = false;
                         self.telemetry = None;
                         self.sleep_commanded = None;
@@ -2269,6 +2320,7 @@ impl MyApp {
                     self.board_settings = None;
                     self.settings_unsupported = true;
                 }
+                BleEvent::Name(name) => self.board_name = Some(name),
                 BleEvent::RadioConfig(c) => {
                     self.board_radio_config = Some(c);
                     self.radio_config_unsupported = false;
@@ -2533,6 +2585,80 @@ mod tests {
             &sent.last().expect("a switch is sent at once").command,
             BleCommand::Connect { mac, .. } if mac.as_deref() == Some("AA:BB:CC:DD:EE:02")
         ));
+    }
+
+    /// Three sources for a board's label, and each one only steps in where
+    /// the one above it has nothing: the user's nickname, the board's own
+    /// name, then the address.
+    #[test]
+    fn a_board_is_labelled_by_the_best_name_available() {
+        let (mut app, _cmds, events) = test_app();
+        let mac = "AA:BB:CC:DD:EE:01";
+        app.config.ble.mac = Some(mac.to_string());
+        assert_eq!(app.selected_device_label(), mac, "nothing but the address yet");
+
+        report(
+            &events,
+            &app,
+            BleEvent::Discovered(crate::ble::DiscoveredDevice {
+                address: mac.to_string(),
+                name: Some("ws3gps-sky-1".to_string()),
+                rssi: Some(-60),
+            }),
+        );
+        app.drain_sources();
+        assert_eq!(app.selected_device_label(), "ws3gps-sky-1");
+
+        app.config.ble.set_name(mac, "The one on the mast");
+        assert_eq!(
+            app.selected_device_label(),
+            "The one on the mast",
+            "a name the user chose outranks the one the board chose"
+        );
+    }
+
+    /// An advertisement without a name does not erase the name an earlier one
+    /// carried: a passive scan sees the advertisement and not the scan
+    /// response, and the board did not stop being what it is called.
+    #[test]
+    fn a_nameless_advertisement_keeps_the_known_name() {
+        let (mut app, _cmds, events) = test_app();
+        let mac = "AA:BB:CC:DD:EE:01";
+        app.config.ble.mac = Some(mac.to_string());
+        for name in [Some("ws3gps-sky-1".to_string()), None] {
+            report(
+                &events,
+                &app,
+                BleEvent::Discovered(crate::ble::DiscoveredDevice {
+                    address: mac.to_string(),
+                    name,
+                    rssi: Some(-60),
+                }),
+            );
+            app.drain_sources();
+        }
+        assert_eq!(app.selected_device_label(), "ws3gps-sky-1");
+    }
+
+    /// Pinned to nothing, the app still says which board it is talking to -
+    /// the board is the only thing that can answer that.
+    #[test]
+    fn any_board_is_named_by_the_board_once_connected() {
+        let (mut app, _cmds, events) = test_app();
+        assert_eq!(app.selected_device_label(), "Any board");
+
+        report(&events, &app, BleEvent::Name("ws3gps-ground-1".to_string()));
+        app.drain_sources();
+        assert_eq!(
+            app.selected_device_label(),
+            "Any board",
+            "a name from a session that is over says nothing about the next one"
+        );
+
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Name("ws3gps-ground-1".to_string()));
+        app.drain_sources();
+        assert_eq!(app.selected_device_label(), "ws3gps-ground-1");
     }
 
     /// A page waiting on the link is answered by the press that drops it,

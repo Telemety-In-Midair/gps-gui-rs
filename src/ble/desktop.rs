@@ -25,7 +25,8 @@ use midair_proto::link::Telemetry;
 use uuid::Uuid;
 
 use super::{
-    node_ping_event, radio_config_event, remote_event, settings_event, Aborted, BleEvent,
+    name_event, node_ping_event, radio_config_event, remote_event, settings_event, Aborted,
+    BleEvent,
     BleHandle, BleRequest, DiscoveredDevice, Ended, Inbox, Interrupt, PushStep, Reporter, Target,
     Wanted, CMD_POLL, PUSH_ACK_TIMEOUT,
 };
@@ -43,6 +44,7 @@ const SETTINGS_UUID: Uuid = Uuid::from_u128(ble::SETTINGS_UUID_U128);
 // The board's current radio config, read on connect and notified on change.
 // Wio-S3 only, so optional like the other board-status characteristics.
 const RADIO_CONFIG_UUID: Uuid = Uuid::from_u128(ble::RADIO_CONFIG_UUID_U128);
+const NAME_UUID: Uuid = Uuid::from_u128(ble::NAME_UUID_U128);
 // Remote-position characteristic: the connected board relays a LoRa node's
 // position here, tagged with the node's address. Absent on the esp32c3 beacon,
 // so optional like the other board-status characteristics.
@@ -319,6 +321,7 @@ async fn connected(
         .cloned();
     let settings = chars.iter().find(|c| c.uuid == SETTINGS_UUID).cloned();
     let radio_config = chars.iter().find(|c| c.uuid == RADIO_CONFIG_UUID).cloned();
+    let name = chars.iter().find(|c| c.uuid == NAME_UUID).cloned();
     let remote = chars
         .iter()
         .find(|c| c.uuid == REMOTE_UUID && c.properties.contains(CharPropFlags::NOTIFY))
@@ -357,6 +360,9 @@ async fn connected(
     if let Some(c) = &radio_config {
         let _ = peripheral.subscribe(c).await;
     }
+    if let Some(c) = &name {
+        let _ = peripheral.subscribe(c).await;
+    }
 
     let mut notifications = peripheral
         .notifications()
@@ -387,6 +393,16 @@ async fn connected(
     if let Some(c) = &radio_config {
         if let Ok(v) = peripheral.read(c).await {
             if let Some(e) = radio_config_event(&v) {
+                report.send(e);
+            }
+        }
+    }
+    // What this board calls itself. Absent on firmware that predates board
+    // names, which is not an error - the picker then shows what the scan saw,
+    // or the address.
+    if let Some(c) = &name {
+        if let Ok(v) = peripheral.read(c).await {
+            if let Some(e) = name_event(&v) {
                 report.send(e);
             }
         }
@@ -508,6 +524,10 @@ async fn connected(
                     }
                 } else if n.uuid == SETTINGS_UUID {
                     report.send(settings_event(&n.value));
+                } else if n.uuid == NAME_UUID {
+                    if let Some(e) = name_event(&n.value) {
+                        report.send(e);
+                    }
                 } else if n.uuid == RADIO_CONFIG_UUID {
                     if let Some(e) = radio_config_event(&n.value) {
                         report.send(e);
@@ -554,11 +574,16 @@ async fn connected(
 /// two firmwares do not share one. The service UUID is in the advertisement
 /// itself and is the same on both, which is why renaming a board cannot lose
 /// it.
+///
+/// Wio-S3 boards are matched on the prefix rather than the whole name, because
+/// the rest of it is per-board now ("ws3gps-sky-1"). That is also why the
+/// prefix is a firmware constant: a board named freely could not be recognized
+/// here at all.
 fn is_beacon(props: &PeripheralProperties) -> bool {
     let name = props.local_name.as_deref();
     props.services.contains(&SERVICE_UUID)
         || name == Some(packet::DEVICE_NAME)
-        || name == Some(ble::DEVICE_NAME)
+        || name.is_some_and(|n| n.starts_with(ble::NAME_PREFIX))
 }
 
 /// Find a discovered peripheral matching the pinned MAC (case-insensitive) or,

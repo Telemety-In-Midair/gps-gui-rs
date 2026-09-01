@@ -40,7 +40,8 @@
 //! show_path = false   # draw the path of the incoming BLE GPS data
 //! mac = "AA:BB:CC:DD:EE:FF"  # pin a specific device; omit to scan by service
 //!
-//! [ble.names]         # nicknames for known boards, keyed by MAC
+//! [ble.names]         # nicknames for known boards, keyed by MAC (they win
+//!                     # over the name a board advertises for itself)
 //! "AA:BB:CC:DD:EE:FF" = "Truck"
 //!
 //! [lora]
@@ -943,7 +944,7 @@ impl AppConfig {
              show_path = {show_path}    # draw the path of the incoming BLE GPS data\n\
              mac = \"{mac}\"            # pin a specific device; empty scans by service\n\
              \n\
-             [ble.names]          # nicknames for known boards; they all advertise the same name\n\
+             [ble.names]          # your names for known boards, keyed by MAC; they win over the board's own\n\
              {names}\
              \n\
              [lora]               # remote nodes heard over LoRa and relayed by the connected board\n\

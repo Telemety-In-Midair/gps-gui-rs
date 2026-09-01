@@ -28,11 +28,13 @@ mod android;
 
 /// One board seen while scanning, for the Beacon page's device picker.
 ///
-/// Every board runs the same firmware and so advertises the same name, which
-/// makes `name` near-useless for telling two apart - the address is the
-/// identity, and the readable label comes from the nicknames in the app config.
-/// `rssi` is what actually distinguishes them in the field: the board in your
-/// hand is the loud one.
+/// The address is still the identity - a name can be changed and a nickname in
+/// the app config still wins over both - but `name` is no longer the same
+/// string on every board: Wio-S3 firmware advertises `ws3gps-<label>`, and
+/// falls back to the tail of its own address when nobody has named it. So a
+/// board is legible in the picker before it has been nicknamed, and often
+/// before it has been connected to at all. `rssi` is what distinguishes them
+/// in the field: the board in your hand is the loud one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscoveredDevice {
     pub address: String,
@@ -113,6 +115,14 @@ pub enum BleEvent {
     /// The settings blob did not decode: the board's layout version is newer
     /// than this build knows. Its settings are unreadable, not defaulted.
     SettingsUnsupported,
+    /// What the board calls itself, read on connect and notified whenever it
+    /// is renamed. The name it advertises under, prefix included.
+    ///
+    /// Worth reading rather than taking from the scan: a board connected to by
+    /// its pinned address may never have been scanned this session, and one
+    /// renamed during the session keeps advertising the old name until its
+    /// next advertising window.
+    Name(String),
     /// The board's current radio configuration, read on connect and notified
     /// on every change. Lets the Radio page open on what the board is running
     /// rather than a local file the user has to hope matches.
@@ -572,6 +582,18 @@ fn settings_event(bytes: &[u8]) -> BleEvent {
         Some(s) => BleEvent::Settings(s),
         None => BleEvent::SettingsUnsupported,
     }
+}
+
+/// Decode a name characteristic value, or `None` for one that is not a name:
+/// empty, or not the ASCII the firmware builds it from. Firmware that predates
+/// board names has no such characteristic at all, which is the same "nothing to
+/// show" as a value that fails here.
+fn name_event(bytes: &[u8]) -> Option<BleEvent> {
+    let name = core::str::from_utf8(bytes).ok()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(BleEvent::Name(name.to_string()))
 }
 
 /// Decode a radio-config blob into the event it describes, or `None` when the
@@ -1180,6 +1202,23 @@ mod tests {
             push.on_ack(&nak(packet::ACK_BAD_VALUE)),
             PushStep::Fail(m) if m.contains("rejected the config")
         ));
+    }
+
+    /// A board that has never been named still sends a name - its
+    /// address-derived one - so the only values that decode to nothing here
+    /// are a board that sent nothing and a value that is not text.
+    #[test]
+    fn name_event_takes_a_name_and_nothing_else() {
+        assert!(matches!(
+            name_event(b"ws3gps-sky-1"),
+            Some(BleEvent::Name(n)) if n == "ws3gps-sky-1"
+        ));
+        assert!(matches!(
+            name_event(b"ws3gps-5047"),
+            Some(BleEvent::Name(n)) if n == "ws3gps-5047"
+        ));
+        assert!(name_event(b"").is_none());
+        assert!(name_event(&[0xFF, 0xFE]).is_none());
     }
 
     #[test]
