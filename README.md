@@ -40,11 +40,24 @@ x run --release --device adb:<serial> # build APK, install, launch
 
 # or with cargo-apk, which is the only route to an armeabi-v7a APK
 cargo install cargo-apk
-cargo apk run --release
+cargo apk run --lib                                 # both ABIs in build_targets
+cargo apk run --lib --target armv7-linux-androideabi # just the 32-bit one
 ```
 
 xbuild's `--arch` takes only `arm64` or `x64`, so 32-bit ARM has to go through
-cargo-apk; `build_targets` in Cargo.toml lists both ABIs for it.
+cargo-apk; `build_targets` in Cargo.toml lists both ABIs for it, and `--target`
+overrides that list when you want one.
+
+`--lib` is not optional: `cargo apk run` builds exactly one artifact, and this
+crate has both a lib and a bin, which it reports as `Error: Invalid args.` The
+cdylib is the Android artifact; the `[[bin]]` is desktop-only.
+
+`--release` additionally needs a signing key, or the build fails after
+compiling with `Configure a release keystore via
+[package.metadata.android.signing.release]`. Either add that section, or point
+`CARGO_APK_RELEASE_KEYSTORE` and `CARGO_APK_RELEASE_KEYSTORE_PASSWORD` at one.
+Debug builds fall back to the usual `~/.android/debug.keystore`, generated on
+first use.
 
 Point `ANDROID_HOME` / `ANDROID_NDK_HOME` at your installs (or let `x doctor`
 locate them). Permissions (INTERNET for tiles, LOCATION for GPS) live in two
