@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, Receiver};
 #[cfg(target_os = "android")]
 use std::thread;
 #[cfg(target_os = "android")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A single GPS fix in decimal degrees.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,12 +73,34 @@ fn android_location_loop(
 
     // Ensure the fine-location permission is granted (poll after prompting;
     // the native activity has no easy onRequestPermissionsResult callback).
-    const PERMISSION: &str = "android.permission.ACCESS_FINE_LOCATION";
-    if !check_permission(&mut env, &activity, PERMISSION)? {
-        request_permission(&mut env, &activity, PERMISSION)?;
-        while !check_permission(&mut env, &activity, PERMISSION)? {
-            thread::sleep(Duration::from_millis(500));
+    //
+    // Both permissions go in the one request: since Android 12 a request for
+    // ACCESS_FINE_LOCATION that omits ACCESS_COARSE_LOCATION is ignored
+    // outright - no dialog, no denial, only a logcat line - and the poll below
+    // would then wait forever for an answer that was never asked for.
+    const FINE: &str = "android.permission.ACCESS_FINE_LOCATION";
+    const COARSE: &str = "android.permission.ACCESS_COARSE_LOCATION";
+    let mut last_request: Option<Instant> = None;
+    let mut warned_coarse = false;
+    while !check_permission(&mut env, &activity, FINE)? {
+        // "Approximate" on the Android 12+ dialog grants coarse and denies
+        // fine. That is a deliberate answer, so stop asking and wait for a
+        // change from Settings instead of putting the dialog up on a timer.
+        if check_permission(&mut env, &activity, COARSE)? {
+            if !warned_coarse {
+                warned_coarse = true;
+                log::warn!(
+                    "only approximate location granted; the map needs precise \
+                     location, grant it in Settings"
+                );
+            }
+        } else if last_request.map_or(true, |t| t.elapsed() > Duration::from_secs(20)) {
+            // Re-request rather than ask once: the BLE worker may be putting
+            // its own dialog up at startup, which drops ours.
+            last_request = Some(Instant::now());
+            request_permissions(&mut env, &activity, &[FINE, COARSE])?;
         }
+        thread::sleep(Duration::from_millis(500));
     }
 
     // LocationManager lm = activity.getSystemService("location");
@@ -327,27 +349,41 @@ pub(crate) fn check_permission(
     })
 }
 
-/// `Activity.requestPermissions({ name }, requestCode)`.
+/// `Activity.requestPermissions(names, requestCode)`.
+///
+/// Takes the whole set at once because Android requires related permissions to
+/// be asked for together (fine and coarse location since Android 12), and
+/// because one dialog for the set beats one per permission.
 ///
 /// Best-effort: if the call throws (e.g. some devices insist it run on the UI
 /// thread), the pending exception is cleared and logged rather than left to
 /// crash the process. The caller polls `checkSelfPermission` regardless, so the
 /// user can also grant the permission from Settings or via `adb`.
 #[cfg(target_os = "android")]
-fn request_permission(
+fn request_permissions(
     env: &mut jni::JNIEnv,
     activity: &jni::objects::JObject,
-    permission: &str,
+    perms: &[&str],
 ) -> Result<(), jni::errors::Error> {
-    use jni::objects::JValue;
-    let name = env.new_string(permission)?;
-    let array = env.new_object_array(1, "java/lang/String", &name)?;
-
-    let result = env.call_method(
-        activity,
-        "requestPermissions",
-        "([Ljava/lang/String;I)V",
-        &[JValue::Object(&array), JValue::Int(1)],
+    use jni::objects::{JObject, JValue};
+    // Scoped frame: this can run every 20s, so per-call refs must not leak.
+    let result = env.with_local_frame(
+        8 + perms.len() as i32,
+        |env| -> Result<(), jni::errors::Error> {
+            let array =
+                env.new_object_array(perms.len() as i32, "java/lang/String", JObject::null())?;
+            for (i, p) in perms.iter().enumerate() {
+                let name = env.new_string(p)?;
+                env.set_object_array_element(&array, i as i32, &name)?;
+            }
+            env.call_method(
+                activity,
+                "requestPermissions",
+                "([Ljava/lang/String;I)V",
+                &[JValue::Object(&array), JValue::Int(1)],
+            )?;
+            Ok(())
+        },
     );
 
     if env.exception_check()? {
@@ -355,7 +391,7 @@ fn request_permission(
         env.exception_clear()?;
     }
     if let Err(err) = result {
-        log::warn!("requestPermissions failed ({err}); grant ACCESS_FINE_LOCATION manually");
+        log::warn!("requestPermissions failed ({err}); grant location manually in Settings");
     }
 
     Ok(())
