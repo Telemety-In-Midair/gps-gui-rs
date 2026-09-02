@@ -77,11 +77,14 @@ jni = "0.21"
 # Compass heading from the native rotation-vector sensor (no JNI/Java needed).
 ndk-sys = "0.6"
 
-# Read by cargo-apk / cargo-ndk tooling. INTERNET is needed for online tiles;
-# the BLUETOOTH/LOCATION permissions are here for the BLE source added later.
+# Read by cargo-apk / cargo-ndk tooling; xbuild ignores this block and reads
+# manifest.yaml instead, so the permission list below must stay in step with
+# that file or an APK built the other way silently loses permissions.
+# armeabi-v7a is here because xbuild cannot emit it (its --arch takes only
+# arm64 or x64), so 32-bit ARM devices have to go through cargo-apk.
 [package.metadata.android]
 package = "rs.gps.gui"
-build_targets = ["aarch64-linux-android"]
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
 
 [package.metadata.android.sdk]
 min_sdk_version = 23
@@ -92,9 +95,16 @@ name = "android.permission.INTERNET"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.ACCESS_FINE_LOCATION"
 [[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_COARSE_LOCATION"
+[[package.metadata.android.uses_permission]]
 name = "android.permission.BLUETOOTH_SCAN"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.BLUETOOTH_CONNECT"
+# Legacy pair for pre-Android-12, which is most of what is still armeabi-v7a.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.BLUETOOTH"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.BLUETOOTH_ADMIN"
 
 [profile.dev]
 opt-level = 1

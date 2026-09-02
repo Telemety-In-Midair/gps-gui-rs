@@ -28,24 +28,29 @@ a NativeActivity via `android_main` (`src/lib.rs`). The Android build uses the
 `wgpu` renderer, reads the phone's GNSS via LocationManager, and caches tiles to
 the app's writable data dir for offline reuse.
 
-Prerequisites: Android SDK + NDK, and `rustup target add aarch64-linux-android`.
+Prerequisites: Android SDK + NDK, and `rustup target add aarch64-linux-android`
+(add `armv7-linux-androideabi` too for 32-bit devices).
 
 ```sh
-# no-Java flow with xbuild (recommended)
+# no-Java flow with xbuild (recommended), arm64-v8a only
 cargo install xbuild
 x doctor                              # verify SDK/NDK are found
 adb devices -l
 x run --release --device adb:<serial> # build APK, install, launch
 
-# or with cargo-apk
+# or with cargo-apk, which is the only route to an armeabi-v7a APK
 cargo install cargo-apk
 cargo apk run --release
 ```
 
+xbuild's `--arch` takes only `arm64` or `x64`, so 32-bit ARM has to go through
+cargo-apk; `build_targets` in Cargo.toml lists both ABIs for it.
+
 Point `ANDROID_HOME` / `ANDROID_NDK_HOME` at your installs (or let `x doctor`
-locate them). Permissions (INTERNET for tiles, LOCATION for GPS) are declared in
-`manifest.yaml`, which is what xbuild reads — it ignores Cargo.toml's
-`[package.metadata.android]`.
+locate them). Permissions (INTERNET for tiles, LOCATION for GPS) live in two
+places that must agree: `manifest.yaml` is what xbuild reads, and Cargo.toml's
+`[package.metadata.android]` is what cargo-apk reads. Neither tool warns when
+the other's list is short, so edit both.
 
 ## Architecture
 

@@ -1,6 +1,9 @@
 # xbuild reads THIS file (not Cargo.toml's [package.metadata.android], which is
 # cargo-apk's schema). Without the INTERNET permission here, Android blocks the
 # tile downloads. Location + Bluetooth permissions are for the GPS source.
+# The two lists are duplicates by necessity: keep them in step, or an APK built
+# with the other tool loses permissions with no build-time complaint. cargo-apk
+# is the only way to get an armeabi-v7a APK, so its copy matters.
 android:
   manifest:
     package: rs.gps.gui
