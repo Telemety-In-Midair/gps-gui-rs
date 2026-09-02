@@ -22,6 +22,10 @@ pub struct GpsFix {
     /// Course over ground: degrees clockwise from true north. Only present when
     /// moving (GPS cannot derive a bearing while stationary).
     pub bearing: Option<f32>,
+    /// Ground speed in meters per second. Optional for the same reason the
+    /// bearing is: a provider that cannot measure it reports none at all,
+    /// which must not read as a stationary zero.
+    pub speed: Option<f32>,
 }
 
 /// Spawn a GPS source backed by the phone's Android LocationManager.
@@ -176,15 +180,20 @@ fn last_known_fix(
             let lon = env.call_method(&location, "getLongitude", "()D", &[])?.d()?;
             let time = env.call_method(&location, "getTime", "()J", &[])?.j()?;
 
-            // Course over ground, only valid while moving.
+            // Course over ground and ground speed, only valid while moving.
             let bearing = if env.call_method(&location, "hasBearing", "()Z", &[])?.z()? {
                 Some(env.call_method(&location, "getBearing", "()F", &[])?.f()?)
             } else {
                 None
             };
+            let speed = if env.call_method(&location, "hasSpeed", "()Z", &[])?.z()? {
+                Some(env.call_method(&location, "getSpeed", "()F", &[])?.f()?)
+            } else {
+                None
+            };
 
             if best.map_or(true, |(_, t)| time > t) {
-                best = Some((GpsFix { lat, lon, bearing }, time));
+                best = Some((GpsFix { lat, lon, bearing, speed }, time));
             }
         }
 
@@ -210,11 +219,14 @@ extern "system" fn native_on_location(
     lon: jni::sys::jdouble,
     bearing: jni::sys::jfloat,
     has_bearing: jni::sys::jboolean,
+    speed: jni::sys::jfloat,
+    has_speed: jni::sys::jboolean,
 ) {
     let fix = GpsFix {
         lat,
         lon,
         bearing: (has_bearing != 0).then_some(bearing),
+        speed: (has_speed != 0).then_some(speed),
     };
     if let Some(tx) = LOC_TX.get() {
         if let Ok(tx) = tx.lock() {
@@ -282,7 +294,7 @@ fn load_location_bridge(
         &class,
         &[NativeMethod {
             name: "nativeOnLocation".into(),
-            sig: "(DDFZ)V".into(),
+            sig: "(DDFZFZ)V".into(),
             fn_ptr: native_on_location as *mut _,
         }],
     )?;

@@ -87,6 +87,18 @@ impl MyApp {
         match self.current {
             Some(pos) => {
                 ui.monospace(format!("{:.5}, {:.5}", pos.y(), pos.x()));
+                // Velocity, from the fix rather than the compass: the compass
+                // says where the device is pointed, which is not where it is
+                // going. A receiver reports neither while stationary and a
+                // hand-entered position reports neither ever, so the line is
+                // drawn only once there is a measurement behind it.
+                if let Some(speed) = self.speed {
+                    let course = match self.heading {
+                        Some(deg) => format!("   Course: {deg:.0} deg"),
+                        None => String::new(),
+                    };
+                    ui.label(format!("Speed: {speed:.1} m/s{course}"));
+                }
                 // Names the board it is measured to: the tracked one when
                 // tracking, otherwise the connected board.
                 if let (Some((kind, _)), Some(m)) =

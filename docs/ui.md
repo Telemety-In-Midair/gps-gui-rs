@@ -832,7 +832,9 @@ off the device. The model is `src/logging.rs`; the page is `logging_page`.
 With no live GPS source (`gps_rx.is_none()`, i.e. desktop), a bottom-anchored
 bar lets a position be typed as "lat, lon". A valid entry feeds the same
 `apply_gps_fix` pipeline a real fix would and recenters the map. It is shown on
-the Map page only.
+the Map page only. A typed position carries no course and no speed, so the
+Status page's velocity line stays off on desktop - both come from the receiver,
+and there is no second position to derive them from.
 
 ## The compass (mobile)
 

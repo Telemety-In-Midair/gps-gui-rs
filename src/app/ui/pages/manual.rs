@@ -40,6 +40,7 @@ impl MyApp {
                                     lat,
                                     lon,
                                     bearing: None,
+                                    speed: None,
                                 });
                                 self.map_memory.follow_my_position();
                             }

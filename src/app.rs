@@ -598,6 +598,9 @@ pub struct MyApp {
     current_time: Option<SystemTime>,
     /// Course over ground from the GPS fix.
     heading: Option<f32>,
+    /// Ground speed from the GPS fix, in meters per second. `None` until a
+    /// source reports one, which a manually entered position never does.
+    speed: Option<f32>,
     /// Device-facing heading from the compass sensor.
     compass_heading: Option<f32>,
     /// When set, the map is rotated so the current heading points up.
@@ -847,6 +850,7 @@ impl MyApp {
             current: None,
             current_time: None,
             heading: None,
+            speed: None,
             compass_heading: None,
             heading_up: false,
             show_paths: true,
@@ -2062,6 +2066,7 @@ impl MyApp {
         self.current = Some(pos);
         self.current_time = Some(SystemTime::now());
         self.heading = fix.bearing;
+        self.speed = fix.speed;
         if far_enough(
             self.track.last().map(|t| &t.pos),
             pos,
@@ -2080,6 +2085,7 @@ impl MyApp {
         row.lat = Some(fix.lat);
         row.lon = Some(fix.lon);
         row.course_deg = fix.bearing.map(f64::from);
+        row.speed_mps = fix.speed.map(f64::from);
         row.fix = Some(true);
         self.record(row);
     }
@@ -3112,6 +3118,34 @@ mod tests {
         // A zero minimum records everything, which is what turning decimation
         // off has to mean.
         assert!(far_enough(Some(&a), a, 0.0));
+    }
+
+    /// Velocity is the fix's, not a running average of our own: a receiver
+    /// that stops reporting one has to clear it rather than leave the last
+    /// reading on screen as though we were still moving at it.
+    #[test]
+    fn a_fix_carries_its_velocity_and_a_fix_without_one_clears_it() {
+        let (mut app, _cmds, _events) = test_app();
+        assert_eq!(app.speed, None);
+
+        app.apply_gps_fix(GpsFix {
+            lat: 51.4779,
+            lon: -0.0015,
+            bearing: Some(90.0),
+            speed: Some(3.5),
+        });
+        assert_eq!(app.speed, Some(3.5));
+        assert_eq!(app.heading, Some(90.0));
+
+        // Stopped: the provider reports neither, and neither may persist.
+        app.apply_gps_fix(GpsFix {
+            lat: 51.4779,
+            lon: -0.0015,
+            bearing: None,
+            speed: None,
+        });
+        assert_eq!(app.speed, None);
+        assert_eq!(app.heading, None);
     }
 
     /// A node's uptime, which unlike an interval has to render 0 as a time.

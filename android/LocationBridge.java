@@ -28,7 +28,8 @@ public final class LocationBridge {
     private LocationBridge() {}
 
     private static native void nativeOnLocation(
-            double lat, double lon, float bearing, boolean hasBearing);
+            double lat, double lon, float bearing, boolean hasBearing,
+            float speed, boolean hasSpeed);
 
     /**
      * Register for updates from the first available provider (GPS, else
@@ -47,11 +48,14 @@ public final class LocationBridge {
                 @Override
                 public void onLocationChanged(Location loc) {
                     boolean hasBearing = loc.hasBearing();
+                    boolean hasSpeed = loc.hasSpeed();
                     nativeOnLocation(
                             loc.getLatitude(),
                             loc.getLongitude(),
                             hasBearing ? loc.getBearing() : 0f,
-                            hasBearing);
+                            hasBearing,
+                            hasSpeed ? loc.getSpeed() : 0f,
+                            hasSpeed);
                 }
 
                 // Abstract on API < 30; override so the class is instantiable
