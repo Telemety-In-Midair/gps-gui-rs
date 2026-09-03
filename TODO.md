@@ -23,6 +23,10 @@ the request epoch, which ends the running session wherever it had got to and
 starts over from a scan.
 
 More statuses in the app.
+A map status bar (`[status_bar]`, off by default) now covers the LoRa side: a
+bar graph of the last 10 receptions colored per node, and one node's signal,
+age, satellites (red/green on fix) and speed, cycling every `cycle_secs` when
+several are heard. Still missing: anything about our own link or the board.
 
 Toml color theme control. (partly done)
 `[colors] outline` and a new `[ui]` table (`ok`, `error`, `pulse`) replaced the
@@ -141,3 +145,6 @@ distance to you and to a configurable fixed reference filled in on the same row
 as the RSSI. The graph plots any stat against time or against another stat, so
 distance-vs-RSSI is a scatter. Export copies the CSV into the phone's Downloads
 through MediaStore (`src/export.rs`, no dex shim needed).
+
+- BLE scan should always show time scanning seconds. Seconds should show even when minutes show.
+- Make a transparency slider for this and the maps top bars backgrounds.

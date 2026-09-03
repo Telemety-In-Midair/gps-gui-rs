@@ -44,6 +44,23 @@ pub(super) const BUTTON_PAD_Y_FRAC: f32 = 0.45;
 /// what is left after the gaps, so wider gaps mean smaller buttons.
 pub(super) const CONTROLS_GAP_FRAC: f32 = 0.15;
 
+/// Inner margin of a bar spanning the screen - the map's controls at the top,
+/// its status read-out at the bottom - as a fraction of the smaller screen
+/// dimension. Wider than it is tall: a bar spans the screen, so the side gaps
+/// are what keep its end content off the edges.
+const BAR_MARGIN_X_FRAC: f32 = 0.02;
+const BAR_MARGIN_Y_FRAC: f32 = 0.01;
+
+/// Those margins in whole points, rounded once so a frame and the width budget
+/// inside it agree to the point.
+pub(super) fn bar_margin(screen: egui::Rect) -> (i8, i8) {
+    let min = screen.size().min_elem();
+    (
+        (min * BAR_MARGIN_X_FRAC) as i8,
+        (min * BAR_MARGIN_Y_FRAC) as i8,
+    )
+}
+
 /// Padding around the floating corner toggle's glyph, as a fraction of the
 /// icon side. Far tighter than the toolbar's, and deliberately so: alone over
 /// the page, with nothing to space it from and its own fill showing, the

@@ -26,9 +26,10 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
   - `text.rs` - the long-form prose and the hover texts, one module per page.
   - `icons.rs` - the icon set, one function per glyph.
   - `menu.rs` - the menu page and the corner toggle that opens it.
-  - `mapdraw.rs`, `plot.rs` - the two hand-painted pictures, kept out of the
-    pages that frame them. `plot.rs` reaches nothing in `MyApp`: the page hands
-    it rows and it hands back a picture.
+  - `mapdraw.rs`, `plot.rs`, `statusbar.rs` - the hand-painted pictures, kept
+    out of the pages that frame them. `plot.rs` reaches nothing in `MyApp`: the
+    page hands it rows and it hands back a picture. `statusbar.rs` is the map's
+    optional bottom bar - the recent-signal graph plus one node's read-out.
 
 The page renderers read state that lives outside the UI too: `src/config.rs`
 holds the app's own TOML settings, `src/radio.rs` holds the board's RADIO.TOML
@@ -53,7 +54,7 @@ graph TD
         Text["text.rs<br/>prose"]
         Icons["icons.rs<br/>glyphs"]
         Menu["menu.rs"]
-        Draw["mapdraw.rs / plot.rs<br/>hand-painted"]
+        Draw["mapdraw.rs / plot.rs<br/>statusbar.rs<br/>hand-painted"]
     end
     subgraph model["models"]
         Config["config.rs"]
@@ -105,7 +106,8 @@ controlled by `egui::Order`, lowest first:
 - `Background` - the full-screen page content (the map, or a `content_page`).
 - `Middle` - the region-select box-drag layer, so drags draw a box instead of
   panning the map, while the controls above stay clickable.
-- `Foreground` - the controls bar, floating popups, the manual GPS bar.
+- `Foreground` - the controls bar, the bottom status bar, floating popups, the
+  manual GPS bar.
 - `Tooltip` - the floating corner page toggle on non-map pages.
 
 Pointer priority follows the same order: a higher layer under the pointer wins
@@ -422,6 +424,54 @@ edges. The key wrinkles:
   painted as eight offset copies in the contrasting theme color (the outline)
   under the label itself, all sharing one laid-out galley.
 
+## The map status bar (`statusbar.rs`)
+
+Off unless `[status_bar] show` is set. A `Foreground` area pinned to the bottom
+of the screen (pivot `LEFT_BOTTOM`), framed like the controls bar at the top:
+the same `theme::bar_margin`, the same panel fill, with the Android gesture-bar
+inset folded into the frame's bottom margin so the fill reaches the edge and
+the read-out still clears it.
+
+Two halves, side by side:
+
+- **The signal graph** - one bar per reception, oldest at the left, colored by
+  the node it came from (`config::remote_color`, the same palette the markers
+  and paths use, so a bar can be matched to a node without a legend). The
+  history is `MyApp::rssi_history`, a `VecDeque` of the last `RSSI_HISTORY`
+  (10) receptions fed by *both* node events - a position report and a ping each
+  carry a signal - and cleared by `forget_board_state`, since every bar was
+  measured by the board that has just been swapped out.
+
+  The dBm scale is **fixed** (`RSSI_FLOOR_DBM`..`RSSI_CEIL_DBM`), not
+  autoscaled: a bar's height has to mean the same thing frame to frame for a
+  glance to be worth anything, and an autoscale over ten samples turns a few dB
+  of noise on a steady link into a full-height swing. The slots are always ten
+  wide whatever has arrived, so bars fill from the left and then slide through
+  rather than re-spacing on every reception.
+- **One node's read-out** - its name in its own color, the signal it was last
+  heard at, how long ago, its satellite count (ok-colored with a fix,
+  error-colored without: the count means nothing on its own, since a node can
+  see four satellites and still not have solved a position), and its speed.
+  Signal and age come from the node itself; the count and the speed are from
+  its last position packet, which may predate a lost fix - `NodeStatus::fix` is
+  what says which.
+
+With more than one node heard, the read-out **cycles**, `[status_bar]
+cycle_secs` apiece. `statusbar::cycle_slot` derives the slot from
+`input.time` rather than storing it, so nothing has to be kept in step with a
+node appearing mid-cycle or with the dwell being dragged while it runs; it
+returns the time left in the turn, which schedules the repaint that moves it
+on (capped at a one-second tick, which the age count needs anyway). A lone node
+keeps the read-out and never rotates.
+
+The bar records its own height in `MyApp::status_bar_height` after laying out,
+because the read-out wraps and how tall it ends up depends on the text size and
+what is being reported. `MyApp::bottom_overlay_inset` is what the other
+bottom-anchored overlays - the desktop manual position bar and the offline
+download progress - position from: the larger of that height and the
+gesture-bar inset, not their sum (the bar's own frame already covers the
+inset), and only on the map page, which is the one page that draws it.
+
 ## Offline region download flow
 
 `RegionSelect` (in `app.rs`) is the state machine: `Inactive -> Picking ->
@@ -453,7 +503,8 @@ once; the file is only touched by the buttons.
 Settings holds what the app owns and can save: the config file itself, the text
 size of the pages, the marker colors and overlay sizes, what the map draws
 (including the beacon path and the distance read-out), the compass rate behind
-the marker arrow, track recording, and the offline-map download.
+the marker arrow, the map status bar, track recording, and the offline-map
+download.
 Everything the *board* owns, plus the link that reaches it, is on the Beacon
 page below. The beacon-related app settings (`[ble] enabled`, `mac` and the
 `[ble.names]` nicknames) live there anyway, because they decide how the link is
@@ -835,6 +886,10 @@ bar lets a position be typed as "lat, lon". A valid entry feeds the same
 the Map page only. A typed position carries no course and no speed, so the
 Status page's velocity line stays off on desktop - both come from the receiver,
 and there is no second position to derive them from.
+
+It positions from `MyApp::bottom_overlay_inset`, so it stacks above the map
+status bar instead of overlapping it (see that section for how the clearance is
+worked out).
 
 ## The compass (mobile)
 

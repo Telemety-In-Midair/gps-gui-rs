@@ -17,7 +17,8 @@ use crate::app::ui::widgets::{
 };
 use crate::app::{MyApp, Page, RegionSelect};
 use crate::config::{
-    DistanceUnits, COMPASS_HZ_MAX, COMPASS_HZ_MIN, TEXT_SCALE_MAX, TEXT_SCALE_MIN,
+    DistanceUnits, COMPASS_HZ_MAX, COMPASS_HZ_MIN, STATUS_CYCLE_MAX, STATUS_CYCLE_MIN,
+    TEXT_SCALE_MAX, TEXT_SCALE_MIN,
 };
 
 /// The path field is half the screen, leaving room for its label and the
@@ -39,6 +40,11 @@ const TEXT_SCALE_STEP: f64 = 0.05;
 /// file that will not load.
 const SIZE_SPEED: f64 = 0.1;
 const SIZE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=64.0;
+
+/// Drag speed for the status bar's per-node dwell, in seconds. Slower than a
+/// whole second per point of travel: the useful range is a handful of seconds,
+/// and the loader's own range is what stops the drag at either end.
+const CYCLE_SPEED: f64 = 0.05;
 
 /// A color that may be left to the light/dark theme: a checkbox that turns the
 /// override on and off, and a picker beside it, enabled only while it is on.
@@ -99,6 +105,7 @@ impl MyApp {
                 self.colors_ui(ui);
                 self.overlays_ui(ui);
                 self.compass_ui(ui);
+                self.status_bar_ui(ui);
                 self.track_ui(ui);
                 self.offline_ui(ui);
             });
@@ -234,6 +241,30 @@ impl MyApp {
                     COMPASS_HZ_MIN..=COMPASS_HZ_MAX,
                 )
                 .on_hover_text(text::ARROW_HZ_HOVER);
+            });
+        });
+    }
+
+    /// The map's bottom status bar: whether it is drawn, and how long each
+    /// node holds it.
+    fn status_bar_ui(&mut self, ui: &mut egui::Ui) {
+        section!(ui, "Map status bar", text::STATUS_BAR);
+        check!(
+            ui,
+            self.config.status_bar.show,
+            "Show the status bar at the bottom of the map",
+            hover: text::STATUS_BAR_SHOW_HOVER,
+        );
+        let on = self.config.status_bar.show;
+        row(ui, "Seconds per node:", |ui| {
+            ui.add_enabled_ui(on, |ui| {
+                drag(
+                    ui,
+                    &mut self.config.status_bar.cycle_secs,
+                    CYCLE_SPEED,
+                    STATUS_CYCLE_MIN..=STATUS_CYCLE_MAX,
+                )
+                .on_hover_text(text::STATUS_CYCLE_HOVER);
             });
         });
     }

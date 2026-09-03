@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -547,6 +547,44 @@ impl RemoteNode {
     }
 }
 
+/// How many receptions the map's status bar graphs. Ten bars is about what
+/// fits across a phone while each is still wide enough to read, and the point
+/// of the graph is the shape of the last few seconds rather than a history.
+pub(crate) const RSSI_HISTORY: usize = 10;
+
+/// One reception the connected board relayed, for the status bar's graph.
+///
+/// Kept as one flat history across every node rather than per node: what the
+/// graph shows is the recent traffic in the order it arrived, and which node
+/// each bar came from is carried by its color.
+#[derive(Clone, Copy)]
+pub(crate) struct RssiSample {
+    /// The LoRa address that was heard, which picks the bar's color.
+    pub addr: u8,
+    /// How strongly the relay heard it, in dBm.
+    pub dbm: i16,
+}
+
+/// One node's line in the map status bar: what it was heard at, when, what its
+/// receiver could see, and how fast it was going.
+///
+/// A flat snapshot rather than a borrow of the node, so the bar can read one
+/// node while the frame goes on drawing everything else.
+#[derive(Clone, Copy)]
+pub(crate) struct NodeStatus {
+    /// The signal the relay last heard this node at, in dBm.
+    pub rssi: i16,
+    /// When that was, which the bar shows as an age.
+    pub heard: SystemTime,
+    /// The node's newest report says it has a fix, so `sats` and `speed_mps`
+    /// are current rather than the last values before it lost one.
+    pub fix: bool,
+    /// Satellites in its last position packet.
+    pub sats: u8,
+    /// Ground speed from that packet, in meters per second.
+    pub speed_mps: f64,
+}
+
 /// What a ping says about why the node has no position.
 fn ping_reason(ping: NodePing) -> String {
     if !ping.gps_present {
@@ -642,6 +680,11 @@ pub struct MyApp {
     /// Remote LoRa nodes relayed by the connected board, keyed by address. Each
     /// draws as its own colored path and marker, and lists as its own source.
     remotes: BTreeMap<u8, RemoteNode>,
+    /// The last [`RSSI_HISTORY`] receptions across every node, oldest first,
+    /// for the map status bar's graph. Every relayed report and ping adds one,
+    /// so it is a picture of what the board is hearing rather than of any one
+    /// node.
+    rssi_history: VecDeque<RssiSample>,
     /// Last BLE status line, for the Beacon page.
     ble_status: String,
     ble_connected: bool,
@@ -782,6 +825,10 @@ pub struct MyApp {
     /// can't center a horizontal row in a single layout pass). `0.0` until the
     /// first frame has measured it.
     controls_width: f32,
+    /// Height the map's bottom status bar took last frame, so the other
+    /// bottom-anchored overlay can sit above it. `0.0` while the bar is off,
+    /// which is also what leaves that overlay where it was.
+    status_bar_height: f32,
     /// The CSV recorder behind the Logging page.
     logger: Logger,
     /// The log path typed on the Logging page. Seeded from `[log] file`, or a
@@ -863,6 +910,7 @@ impl MyApp {
             beacon_packet: None,
             beacon_track: Vec::new(),
             remotes: BTreeMap::new(),
+            rssi_history: VecDeque::new(),
             ble_status: "idle".to_string(),
             ble_connected: false,
             ble_interval_text: packet::UPDATE_INTERVAL_DEFAULT_MS.to_string(),
@@ -929,6 +977,7 @@ impl MyApp {
             zoom_tx,
             zoom_rx,
             controls_width: 0.0,
+            status_bar_height: 0.0,
             logger: Logger::default(),
             // Replaced below once the config has been loaded, which is what
             // may name a log file of its own.
@@ -1306,6 +1355,10 @@ impl MyApp {
             node.heard = None;
             node.no_fix = None;
         }
+        // Every bar in it was a signal measured by the old relay, from where
+        // it stood; graphing them beside the new board's would read as one
+        // link that had suddenly changed.
+        self.rssi_history.clear();
         self.board_settings = None;
         self.board_name = None;
         self.settings_unsupported = false;
@@ -1630,6 +1683,22 @@ impl MyApp {
         }
     }
 
+    /// The clearance a bottom-anchored overlay needs: the gesture-bar inset,
+    /// or the map's status bar when that is what occupies the foot of the
+    /// screen.
+    ///
+    /// The larger of the two rather than their sum - the status bar's own
+    /// frame already covers the inset - and only on the map, which is the one
+    /// page that draws it. The height itself is measured by the bar as it lays
+    /// out, so it is last frame's on the frame the bar appears.
+    fn bottom_overlay_inset(&self, ctx: &egui::Context) -> f32 {
+        let bar = match self.page {
+            Page::Map => self.status_bar_height,
+            _ => 0.0,
+        };
+        self.bottom_inset(ctx).max(bar)
+    }
+
     /// Device-facing compass heading if available, otherwise course over ground.
     fn effective_heading(&self) -> Option<f32> {
         self.compass_heading.or(self.heading)
@@ -1868,6 +1937,54 @@ impl MyApp {
             .filter(|(_, n)| n.pos.is_some() || n.heard.is_some())
             .map(|(&addr, n)| (addr, n.state_text(), n.rssi))
             .collect()
+    }
+
+    /// Note a reception for the status bar's graph, dropping the oldest once
+    /// the history is full.
+    fn record_rssi(&mut self, addr: u8, dbm: i16) {
+        if self.rssi_history.len() >= RSSI_HISTORY {
+            self.rssi_history.pop_front();
+        }
+        self.rssi_history.push_back(RssiSample { addr, dbm });
+    }
+
+    /// The receptions the status bar graphs, oldest first.
+    pub(crate) fn rssi_samples(&self) -> Vec<RssiSample> {
+        self.rssi_history.iter().copied().collect()
+    }
+
+    /// The nodes the status bar's read-out cycles through: every node the
+    /// connected board has actually heard, in address order.
+    ///
+    /// Heard, not merely known: a node kept on the map from an earlier board
+    /// (see [`Self::forget_board_state`]) has no signal, no age and no
+    /// satellite count to report, so a slot in the cycle would go to a blank
+    /// read-out.
+    pub(crate) fn status_bar_nodes(&self) -> Vec<u8> {
+        self.remotes
+            .iter()
+            .filter(|(_, n)| n.heard.is_some())
+            .map(|(&addr, _)| addr)
+            .collect()
+    }
+
+    /// What the status bar reports for one node: the signal it was last heard
+    /// at, when that was, its satellite count and whether it has a fix, and
+    /// how fast it is moving.
+    ///
+    /// The satellite count and the speed come from its last position packet,
+    /// which is the last one it managed even when the fix has since been lost
+    /// - `fix` is what says which of the two this is.
+    pub(crate) fn status_bar_node(&self, addr: u8) -> Option<NodeStatus> {
+        let node = self.remotes.get(&addr)?;
+        let heard = node.heard?;
+        Some(NodeStatus {
+            rssi: node.rssi,
+            heard,
+            fix: node.no_fix.is_none() && node.packet.has_fix(),
+            sats: node.packet.sats,
+            speed_mps: node.packet.speed_mps(),
+        })
     }
 
     /// Whether the board is still within its post-connect warm-up. A board
@@ -2226,6 +2343,7 @@ impl MyApp {
                     // relay resending its cache. Distance is what decides
                     // whether it becomes a track point, as for our own fixes.
                     let at = heard_at(age_s);
+                    self.record_rssi(src, rssi);
                     let node = self.remotes.entry(src).or_default();
                     node.rssi = rssi;
                     node.heard = Some(at);
@@ -2255,6 +2373,7 @@ impl MyApp {
                     // known position stays on the map - it is still the last
                     // place the node was - but the node is now flagged as
                     // having no fix, so the marker is not read as current.
+                    self.record_rssi(ping.src, ping.rssi);
                     let node = self.remotes.entry(ping.src).or_default();
                     node.rssi = ping.rssi;
                     node.heard = Some(heard_at(ping.age_s));
@@ -3146,6 +3265,178 @@ mod tests {
         });
         assert_eq!(app.speed, None);
         assert_eq!(app.heading, None);
+    }
+
+    /// The status bar's graph is fed by everything a node is heard through,
+    /// and only ever holds the last [`RSSI_HISTORY`] of them.
+    #[test]
+    fn the_signal_history_keeps_the_last_receptions_from_every_node() {
+        let (mut app, _cmds, events) = test_app();
+
+        // A position report and a ping both carry a signal, so both are a bar.
+        report(
+            &events,
+            &app,
+            BleEvent::Remote {
+                src: 3,
+                rssi: -80,
+                packet: fix(),
+                age_s: 0,
+            },
+        );
+        report(
+            &events,
+            &app,
+            BleEvent::NodePing(NodePing {
+                src: 5,
+                rssi: -95,
+                uptime_s: 60,
+                gps_present: true,
+                had_fix: false,
+                age_s: 0,
+            }),
+        );
+        app.drain_sources();
+        let samples = app.rssi_samples();
+        assert_eq!(samples.len(), 2);
+        assert_eq!((samples[0].addr, samples[0].dbm), (3, -80));
+        assert_eq!((samples[1].addr, samples[1].dbm), (5, -95));
+
+        // Past the window the oldest goes, so the graph is always the last few.
+        for i in 0..RSSI_HISTORY {
+            report(
+                &events,
+                &app,
+                BleEvent::Remote {
+                    src: 3,
+                    rssi: -60 - i as i16,
+                    packet: fix(),
+                    age_s: 0,
+                },
+            );
+        }
+        app.drain_sources();
+        let samples = app.rssi_samples();
+        assert_eq!(samples.len(), RSSI_HISTORY);
+        assert_eq!(samples.first().map(|s| s.dbm), Some(-60));
+        assert_eq!(
+            samples.last().map(|s| s.dbm),
+            Some(-60 - (RSSI_HISTORY as i16 - 1))
+        );
+    }
+
+    /// Every bar was a signal the old relay measured from where it stood.
+    /// Graphed beside the new board's they would read as one link that had
+    /// suddenly changed, so the history goes with the board.
+    #[test]
+    fn switching_boards_empties_the_signal_history() {
+        let (mut app, _cmds, events) = test_app();
+        report(
+            &events,
+            &app,
+            BleEvent::Remote {
+                src: 3,
+                rssi: -80,
+                packet: fix(),
+                age_s: 0,
+            },
+        );
+        app.drain_sources();
+        assert_eq!(app.rssi_samples().len(), 1);
+        assert_eq!(app.status_bar_nodes(), vec![3]);
+
+        app.select_device(Some("AA:BB:CC:DD:EE:01"));
+        assert!(app.rssi_samples().is_empty());
+        // The node is still on the map at its last recorded point, but nothing
+        // about it is current any more, so it is out of the read-out's cycle.
+        assert!(app.status_bar_nodes().is_empty());
+        assert!(app.status_bar_node(3).is_none());
+    }
+
+    /// What the read-out says about a node, and the one thing it has to get
+    /// right: a satellite count means nothing without whether there is a fix
+    /// behind it.
+    #[test]
+    fn a_nodes_readout_reports_its_last_report_and_whether_it_still_holds() {
+        let (mut app, _cmds, events) = test_app();
+        let mut packet = fix();
+        // 4.2 m/s, in the centimeters per second the packet carries.
+        packet.speed_cms = 420;
+        report(
+            &events,
+            &app,
+            BleEvent::Remote {
+                src: 3,
+                rssi: -80,
+                packet,
+                age_s: 0,
+            },
+        );
+        app.drain_sources();
+        let status = app.status_bar_node(3).expect("heard");
+        assert_eq!(status.rssi, -80);
+        assert_eq!(status.sats, 7);
+        assert!(status.fix);
+        assert!((status.speed_mps - 4.2).abs() < 0.01);
+
+        // A ping after it says the node is up but has lost the fix. The count
+        // and the speed are still the last it managed; `fix` is what says so.
+        report(
+            &events,
+            &app,
+            BleEvent::NodePing(NodePing {
+                src: 3,
+                rssi: -101,
+                uptime_s: 300,
+                gps_present: true,
+                had_fix: true,
+                age_s: 0,
+            }),
+        );
+        app.drain_sources();
+        let status = app.status_bar_node(3).expect("still heard");
+        assert_eq!(status.rssi, -101);
+        assert!(!status.fix);
+        assert_eq!(status.sats, 7);
+    }
+
+    /// The bar lays out and reports a height, which is what the manual
+    /// position bar above it is positioned from - a bar that measured zero
+    /// while drawn would put that one underneath it.
+    #[test]
+    fn the_status_bar_lays_out_and_measures_itself() {
+        let (mut app, _cmds, events) = test_app();
+        report(
+            &events,
+            &app,
+            BleEvent::Remote {
+                src: 3,
+                rssi: -80,
+                packet: fix(),
+                age_s: 0,
+            },
+        );
+        app.drain_sources();
+
+        let screen = egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 800.0));
+        let ctx = egui::Context::default();
+
+        // Off, it takes no room at all.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.map_status_bar(ctx, screen);
+        });
+        assert_eq!(app.status_bar_height, 0.0);
+
+        app.config.status_bar.show = true;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.map_status_bar(ctx, screen);
+        });
+        assert!(app.status_bar_height > 0.0, "{}", app.status_bar_height);
+        assert!(
+            app.status_bar_height < screen.height() / 2.0,
+            "a read-out strip, not half the map: {}",
+            app.status_bar_height
+        );
     }
 
     /// A node's uptime, which unlike an interval has to render 0 as a time.

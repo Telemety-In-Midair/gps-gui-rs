@@ -58,6 +58,10 @@
 //! marker_arrow = true # point the marker arrow with the compass outside heading-up
 //! arrow_hz = 4.0      # compass rate while only that arrow needs it
 //!
+//! [status_bar]        # the read-out along the bottom of the map
+//! show = false        # draw it at all
+//! cycle_secs = 5.0    # seconds each node holds the read-out when several are heard
+//!
 //! [log]
 //! auto_start = false  # start recording the CSV log as soon as the app launches
 //! file = ""           # log path; empty means a timestamped file beside this one
@@ -440,6 +444,31 @@ impl Default for CompassSettings {
     }
 }
 
+/// The map's bottom status bar: the recent-signal graph and the per-node
+/// read-out beside it.
+///
+/// Off by default. It covers a strip of the map with a read-out that only
+/// means anything once a node is being heard, so it is something to turn on
+/// for a run rather than the map's resting state.
+#[derive(Clone, Copy)]
+pub struct StatusBarSettings {
+    /// Draw the bar along the bottom of the map.
+    pub show: bool,
+    /// Seconds each node holds the read-out before the next one takes it.
+    /// Only used when more than one node has been heard; a single node keeps
+    /// the read-out to itself and never cycles.
+    pub cycle_secs: f32,
+}
+
+impl Default for StatusBarSettings {
+    fn default() -> Self {
+        Self {
+            show: false,
+            cycle_secs: 5.0,
+        }
+    }
+}
+
 /// CSV logging settings.
 ///
 /// The log is a file rather than a view, so its two settings are a path and
@@ -491,6 +520,7 @@ pub struct AppConfig {
     pub lora: LoraSettings,
     pub track: TrackSettings,
     pub compass: CompassSettings,
+    pub status_bar: StatusBarSettings,
     pub log: LogSettings,
 }
 
@@ -514,6 +544,8 @@ struct RawConfig {
     track: RawTrack,
     #[serde(default)]
     compass: RawCompass,
+    #[serde(default)]
+    status_bar: RawStatusBar,
     #[serde(default)]
     log: RawLog,
 }
@@ -579,6 +611,12 @@ struct RawTrack {
 struct RawCompass {
     marker_arrow: Option<bool>,
     arrow_hz: Option<f32>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawStatusBar {
+    show: Option<bool>,
+    cycle_secs: Option<f32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -741,6 +779,13 @@ fn set_lora_names(doc: &mut DocumentMut, names: &BTreeMap<u8, String>) {
 pub const COMPASS_HZ_MIN: f32 = 0.5;
 pub const COMPASS_HZ_MAX: f32 = 30.0;
 
+/// Range the status bar's per-node dwell is accepted (and edited) in. The
+/// floor is about the shortest a reading can be taken in at a glance; the
+/// ceiling is where a node further down the cycle waits long enough that the
+/// bar reads as stuck on one of them.
+pub const STATUS_CYCLE_MIN: f32 = 1.0;
+pub const STATUS_CYCLE_MAX: f32 = 60.0;
+
 /// Range the page text scale is accepted (and edited) in. Below 1.0 is there to
 /// walk an overshoot back rather than to shrink the text far; the ceiling is
 /// about where a phone page holds a few words to the line and the buttons stop
@@ -853,6 +898,13 @@ impl AppConfig {
             "arrow_hz",
             f32_value(self.compass.arrow_hz),
         );
+        set(&mut doc, "status_bar", "show", self.status_bar.show.into());
+        set(
+            &mut doc,
+            "status_bar",
+            "cycle_secs",
+            f32_value(self.status_bar.cycle_secs),
+        );
         set(&mut doc, "log", "auto_start", self.log.auto_start.into());
         set(
             &mut doc,
@@ -961,6 +1013,10 @@ impl AppConfig {
              marker_arrow = {marker_arrow}  # point the marker arrow with the compass in north-up and tracking\n\
              arrow_hz = {arrow_hz:?}       # sensor rate while only that arrow needs it\n\
              \n\
+             [status_bar]         # the read-out along the bottom of the map\n\
+             show = {status_show}         # draw it at all\n\
+             cycle_secs = {cycle_secs:?}     # seconds each node holds the read-out ({cycle_min} - {cycle_max})\n\
+             \n\
              [log]                # the CSV log on the Logging page\n\
              auto_start = {auto_start}  # start recording as soon as the app launches\n\
              file = \"{log_file}\"           # log path; empty is a timestamped file beside this one\n\
@@ -995,6 +1051,10 @@ impl AppConfig {
             show_track = self.track.show_path,
             marker_arrow = self.compass.marker_arrow,
             arrow_hz = self.compass.arrow_hz,
+            status_show = self.status_bar.show,
+            cycle_secs = self.status_bar.cycle_secs,
+            cycle_min = STATUS_CYCLE_MIN,
+            cycle_max = STATUS_CYCLE_MAX,
             auto_start = self.log.auto_start,
             log_file = self.log.file.clone().unwrap_or_default(),
             reference = reference,
@@ -1119,6 +1179,18 @@ impl AppConfig {
             }
             config.compass.arrow_hz = v;
         }
+        if let Some(v) = raw.status_bar.show {
+            config.status_bar.show = v;
+        }
+        if let Some(v) = raw.status_bar.cycle_secs {
+            if !v.is_finite() || !(STATUS_CYCLE_MIN..=STATUS_CYCLE_MAX).contains(&v) {
+                return Err(format!(
+                    "status_bar.cycle_secs must be between {STATUS_CYCLE_MIN} and \
+                     {STATUS_CYCLE_MAX}, got {v}"
+                ));
+            }
+            config.status_bar.cycle_secs = v;
+        }
         if let Some(v) = raw.log.auto_start {
             config.log.auto_start = v;
         }
@@ -1193,6 +1265,8 @@ mod tests {
         assert_eq!(back.track.show_path, cfg.track.show_path);
         assert_eq!(back.compass.marker_arrow, cfg.compass.marker_arrow);
         assert_eq!(back.compass.arrow_hz, cfg.compass.arrow_hz);
+        assert_eq!(back.status_bar.show, cfg.status_bar.show);
+        assert_eq!(back.status_bar.cycle_secs, cfg.status_bar.cycle_secs);
         // The generated `mac = ""` means "scan by service", not a pinned MAC.
         assert_eq!(back.ble.mac, None);
     }
@@ -1427,6 +1501,24 @@ mod tests {
         let _ = std::fs::remove_file(path);
         assert!(cfg.save(path).unwrap());
         assert_eq!(AppConfig::load(path).unwrap().ui.text_scale, 1.5);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn status_bar_dwell_is_range_checked_and_saved() {
+        assert!(AppConfig::from_toml("[status_bar]\ncycle_secs = 0.0").is_err());
+        assert!(AppConfig::from_toml("[status_bar]\ncycle_secs = 600.0").is_err());
+        let cfg = AppConfig::from_toml("[status_bar]\nshow = true\ncycle_secs = 8.0").unwrap();
+        assert!(cfg.status_bar.show);
+        assert_eq!(cfg.status_bar.cycle_secs, 8.0);
+
+        let path = std::env::temp_dir().join("gps-gui-rs-config-status-bar-test.toml");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(cfg.save(path).unwrap());
+        let back = AppConfig::load(path).unwrap();
+        assert!(back.status_bar.show);
+        assert_eq!(back.status_bar.cycle_secs, 8.0);
         let _ = std::fs::remove_file(path);
     }
 

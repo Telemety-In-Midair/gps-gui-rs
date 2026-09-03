@@ -17,13 +17,15 @@ impl MyApp {
     /// source is wired up (desktop). Accepts "lat, lon" or "lat lon"; a valid
     /// entry feeds the same pipeline a real fix would and recenters the map.
     pub(crate) fn manual_gps_bar(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let bottom = self.bottom_inset(ctx);
         let margin = corner_margin(screen);
+        // The status bar owns the foot of the screen when it is on, so this
+        // sits on top of it rather than under it.
+        let foot = self.bottom_overlay_inset(ctx);
         floating(
             ctx,
             "manual_gps",
             egui::Order::Foreground,
-            egui::Pos2::new(screen.center().x, screen.bottom() - bottom - margin),
+            egui::Pos2::new(screen.center().x, screen.bottom() - foot - margin),
             egui::Align2::CENTER_BOTTOM,
             false,
             |ui| {

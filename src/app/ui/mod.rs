@@ -13,14 +13,15 @@
 //! - [`text`] - the long-form prose and hover texts.
 //! - [`icons`] - the icon set, named.
 //! - [`menu`] - the menu page and the corner toggle that opens it.
-//! - [`mapdraw`], [`plot`] - the two hand-painted pictures, kept out of the
-//!   pages that frame them.
+//! - [`mapdraw`], [`plot`], [`statusbar`] - the hand-painted pictures, kept out
+//!   of the pages that frame them.
 
 pub(super) mod icons;
 mod mapdraw;
 mod menu;
 mod pages;
 mod plot;
+mod statusbar;
 mod text;
 mod theme;
 mod widgets;

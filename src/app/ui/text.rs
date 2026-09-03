@@ -69,11 +69,25 @@ pub(crate) mod settings {
         "Lower is cheaper: the sensor is fused from the accelerometer, gyroscope and \
          magnetometer, so it keeps all three awake";
 
+    pub(crate) const STATUS_BAR: &str =
+        "A strip along the bottom of the map: the last few receptions as a bar graph, one bar \
+         per node in that node's map color, and beside it one node's signal, age, satellites \
+         and speed.";
+    pub(crate) const STATUS_BAR_SHOW_HOVER: &str =
+        "Covers a strip of the map, so it is worth having only while nodes are being heard";
+    pub(crate) const STATUS_CYCLE_HOVER: &str =
+        "Only used once a second node has been heard; one node keeps the read-out to itself";
+
     pub(crate) const DISCARD_HOVER: &str =
         "Drops every track: yours, the beacon's and the nodes'. Not undoable";
 
     pub(crate) const DOWNLOAD_HOVER: &str = "Pick a box on the map to cache for offline use";
     pub(crate) const DOWNLOAD_BUSY: &str = "A download is already in progress.";
+}
+
+/// The map's bottom status bar.
+pub(crate) mod statusbar {
+    pub(crate) const NO_NODES: &str = "No nodes heard";
 }
 
 /// The Beacon page: the BLE link, and the board's own power settings.

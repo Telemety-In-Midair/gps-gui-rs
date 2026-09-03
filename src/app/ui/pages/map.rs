@@ -1,8 +1,9 @@
 //! The interactive map page: the floating controls bar, the marker info
 //! popups, and the offline region-download selection and progress.
 //!
-//! The map picture itself is painted in [`crate::app::ui::mapdraw`]; what is
-//! declared here is everything laid over it.
+//! The map picture itself is painted in [`crate::app::ui::mapdraw`] and the
+//! bottom status bar in [`crate::app::ui::statusbar`]; what is declared here
+//! is everything else laid over it.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
@@ -14,8 +15,8 @@ use crate::app::ui::icons;
 use crate::app::ui::mapdraw::{default_position, rotate_pos};
 use crate::app::ui::text::map as text;
 use crate::app::ui::theme::{
-    corner_margin, gap, icon_size_for, icon_size_for_row, BUTTON_PAD_X_FRAC, BUTTON_PAD_Y_FRAC,
-    CONTROLS_GAP_FRAC, GAP_ITEM,
+    bar_margin, corner_margin, gap, icon_size_for, icon_size_for_row, BUTTON_PAD_X_FRAC,
+    BUTTON_PAD_Y_FRAC, CONTROLS_GAP_FRAC, GAP_ITEM,
 };
 use crate::app::ui::widgets::{button, floating, icon_button, icon_button_pulse};
 use crate::app::{ease_heading, ping_reason, MarkerKind, MyApp, RegionSelect, ROTATE_TAU};
@@ -33,12 +34,6 @@ const TILE_SIZE_ESTIMATE_KB: u64 = 15;
 /// Smallest box drag that counts as a region selection rather than a tap, as a
 /// fraction of the smaller screen dimension.
 const MIN_DRAG_FRAC: f32 = 0.025;
-
-/// Inner margin of the controls bar frame, as a fraction of the smaller screen
-/// dimension. Wider than it is tall: the bar spans the screen, so the side gaps
-/// are what keep the end buttons off the edges.
-const CONTROLS_MARGIN_X_FRAC: f32 = 0.02;
-const CONTROLS_MARGIN_Y_FRAC: f32 = 0.01;
 
 /// Zoom levels past the current view a region download offers, and the highest
 /// it will ever reach.
@@ -62,16 +57,6 @@ const MARKER_INFO_LIFT_FRAC: f32 = 0.35;
 /// so the reach is the same as a toolbar button's touch target.
 fn marker_hit_radius(screen: egui::Rect) -> f32 {
     icon_size_for(screen)
-}
-
-/// The controls bar margins in whole points, rounded once so the frame and the
-/// width budget inside it agree to the point.
-fn controls_margin(screen: egui::Rect) -> (i8, i8) {
-    let min = screen.size().min_elem();
-    (
-        (min * CONTROLS_MARGIN_X_FRAC) as i8,
-        (min * CONTROLS_MARGIN_Y_FRAC) as i8,
-    )
 }
 
 impl MyApp {
@@ -168,7 +153,7 @@ impl MyApp {
             .movable(false)
             .constrain(false)
             .show(ctx, |ui| {
-                let (margin_x, margin_y) = controls_margin(screen);
+                let (margin_x, margin_y) = bar_margin(screen);
                 egui::Frame::NONE
                     .fill(ui.visuals().panel_fill)
                     .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
@@ -182,6 +167,11 @@ impl MyApp {
                         self.controls(ui, screen);
                     });
             });
+
+        // The signal read-out along the bottom, when it is turned on. Drawn
+        // before the transient popups so a confirmation still lands on top of
+        // it.
+        self.map_status_bar(ctx, screen);
 
         // Selection hint / download confirmation, floating over everything.
         self.select_ui(ctx, screen);
@@ -734,7 +724,10 @@ impl MyApp {
         let Some(progress) = self.download.clone() else {
             return;
         };
-        let bottom = self.bottom_inset(ctx);
+        // Clears the gesture bar, and the map's status bar when that is what
+        // is at the foot of the screen - this floats over every page, so the
+        // progress of a download is never hidden behind either.
+        let bottom = self.bottom_overlay_inset(ctx);
         // Inset from the corner by the same fraction the floating page toggle
         // uses, so the two read as the same distance from the edge.
         let margin = corner_margin(screen);
