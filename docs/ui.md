@@ -568,6 +568,16 @@ sending you back here for it, writing the same file and sharing the same
   phone, beacon and every remote track). `mac` is an `Option<String>` where
   `None` means "any board"; it is no longer typed by hand but chosen in the
   Beacon page's device picker.
+- `[ble] show_on_map` takes the connected board off the map altogether: its
+  marker, heartbeat, path, the distance line and label, and its place among the
+  tracking and center targets. Everything the map draws or points at for the
+  board reads `MyApp::beacon_on_map` (the live position filtered by the
+  setting) rather than `beacon`; the Status page, the log and the recording
+  read `beacon` itself, because the board is still connected and still
+  reporting - the setting is for a board held next to the phone, whose marker
+  only sits on top of yours. `distance_target` is left alone so the Status page
+  still measures to the board; `mapdraw::drawn_distance_target` is the map's
+  filtered view of it.
 - **Remote LoRa nodes** are relayed to the app by the connected board over the
   `midair_proto::ble::REMOTE_UUID` characteristic (`[src, rssi, PositionPacket]`);
   the transports decode it with `ble::remote_event` into `BleEvent::Remote`, and
@@ -593,13 +603,29 @@ configured or woken, rather than tracked. **Only one is ever connected**, so the
 picker is a single-choice list and the transports keep their single-session
 shape.
 
-- **Identity is the MAC, the readable name is the app's.** Every board runs the
-  same firmware and so advertises the same `packet::DEVICE_NAME`, which makes a
-  raw scan a list of identical entries. `[ble.names]` maps MAC -> nickname in
-  the app's config; the board is never told its name. `normalize_mac` is what
-  makes the key stable - addresses come back in whatever case the stack prefers
-  and a hand-edited file may use dashes, so the raw string would file one board
+- **Identity is the MAC; the name comes from the board first, then the app.**
+  A Wio-S3 board stores a label in its flash (written with `CFG_NAME` on the
+  config characteristic, from the page's "Board name" section) and advertises
+  `ws3gps-<label>`; one that has never been named advertises the tail of its
+  own address instead, and every C3 beacon advertises the same
+  `packet::DEVICE_NAME`. `[ble.names]` maps MAC -> nickname in the app's config
+  for the boards that carry no name of their own. `normalize_mac` is what makes
+  the key stable - addresses come back in whatever case the stack prefers and a
+  hand-edited file may use dashes, so the raw string would file one board
   twice.
+- **One resolver names the board everywhere.** `MyApp::board_label` picks, in
+  order: the label stored on the board (`ble::board_label` strips the prefix
+  and rejects the address fallback, reproducing it exactly from the pinned MAC
+  or, with none, taking four lowercase hex digits for one), the nickname, the
+  board's full advertised name, then the MAC. `selected_device_label` ("Any
+  board" when nothing is known) and `beacon_label` ("Beacon" when nothing is
+  known) both read it, and `marker_label` / `source_label` route the map
+  markers, the Points page, the Status page and the Logging legend through
+  `beacon_label`, so a board named on the board is called that on every page.
+  The live name (`BleEvent::Name`, read on connect and notified on a rename)
+  outranks the scan's, since a renamed board advertises the old name until its
+  next window, and a live report also updates the scan's record of the pinned
+  MAC so the picker row follows.
 - **Discovery is its own worker mode, not the connect scan.** `BleCommand::Scan`
   reports every board that answers as a `BleEvent::Discovered` and keeps going;
   the scan inside a connect stops at the first match. `BleIntent::Scanning` maps

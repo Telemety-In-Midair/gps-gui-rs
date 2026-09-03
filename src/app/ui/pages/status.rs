@@ -116,16 +116,19 @@ impl MyApp {
             }
         }
 
-        // The beacon's own position, when it is streaming.
+        // The board's own position, when it is streaming, under the name the
+        // map uses for it. Read whether or not the map draws the board: this
+        // page is where a board taken off the map is still accounted for.
         if let (Some(b), Some(p)) = (self.beacon, self.beacon_packet) {
+            let name = self.beacon_label();
             gap(ui, GAP_ITEM);
-            ui.monospace(format!("Beacon: {:.5}, {:.5}", b.y(), b.x()));
-            ui.label(format!("Beacon speed: {:.1} m/s", p.speed_mps()));
+            ui.monospace(format!("{name}: {:.5}, {:.5}", b.y(), b.x()));
+            ui.label(format!("{name} speed: {:.1} m/s", p.speed_mps()));
             // Satellite count from the packet only when there is no telemetry
             // to report it below, so it is never on screen twice from two
             // different sources.
             if self.telemetry.is_none() {
-                ui.label(format!("Beacon satellites: {}", p.sats));
+                ui.label(format!("{name} satellites: {}", p.sats));
             }
         }
     }
@@ -151,6 +154,8 @@ impl MyApp {
     fn ble_status_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Wio-S3 (BLE)");
         status_bool(ui, self.config.ui, "Link", self.ble_connected);
+        // Which board, by the same name the Beacon page and the map use.
+        ui.label(format!("Board: {}", self.selected_device_label()));
         ui.label(self.ble_intent_text());
         hint!(ui, "BLE: {}", self.ble_status);
         if let Some(secs) = self

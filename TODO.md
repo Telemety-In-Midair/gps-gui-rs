@@ -84,9 +84,13 @@ line to the beacon and its distance stay. Discarding points moved to Settings.
 
 better documentation of systems. Maybe mermaid block diagram?
 
-Add name to status page.
+~~Add name to status page.~~
+The BLE section says which board, by the same name every other page uses - the
+one stored on the board when it has one.
 
 List of BLE addresses/names in toml
+(`[ble.names]` is that list; a name stored on the board, set from the Beacon
+page, wins over it.)
 
 ~~Mode for BLE sleep while transmitting~~
 The board has three modes now (stored / idle / tracking) and the Beacon page

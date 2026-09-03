@@ -56,6 +56,10 @@ pub(crate) mod settings {
 
     pub(crate) const CENTRAL_PATH_HOVER: &str =
         "This device's own track. Hiding a path never stops it being recorded";
+    pub(crate) const BOARD_ON_MAP_HOVER: &str =
+        "Its marker, heartbeat, path and the distance line to it. The link, the recording and \
+         the Status page carry on either way; this is for a board held next to the phone, \
+         where its marker only sits on top of yours";
     pub(crate) const REMOTE_PATHS_HOVER: &str =
         "The LoRa nodes relayed by the connected board, one color each";
     pub(crate) const PATHS_NOTE: &str =
@@ -108,9 +112,10 @@ pub(crate) mod beacon {
     pub(crate) const ANY_BOARD_HOVER: &str =
         "Connect to the first board that answers, whichever it is";
     pub(crate) const NAMES_NOTE: &str =
-        "Names are the app's own and are saved with the rest of its settings. Clearing a name \
-         forgets the board. The grey name beside a board is the one it calls itself, which is \
-         set on the board and travels with it.";
+        "Names typed here are the app's own and are saved with the rest of its settings; \
+         clearing one forgets the board. A name stored on the board itself (under Board name, \
+         once connected) travels with the board and is what every page calls it, over the \
+         name typed here. A board without one shows its address name in grey.";
 
     // Link controls.
     pub(crate) const RECONNECT_HOVER: &str =
@@ -143,6 +148,24 @@ pub(crate) mod beacon {
         "Write the board names and these settings to the app's config file, set on the Settings \
          page";
     pub(crate) const AWAITING_ACK: &str = "waiting for device ack...";
+
+    // Board name.
+    pub(crate) const BOARD_NAME_INTRO: &str =
+        "What the board calls itself. Stored in its flash, so it survives a power cycle and \
+         travels with the board to any phone; while it is set, it is the board's name on \
+         every page here, over the name typed in the list above.";
+    pub(crate) const BOARD_NO_NAME: &str =
+        "Board: no name reported yet. A board on firmware older than names never reports one.";
+    pub(crate) const NAME_CLEAR_HOVER: &str =
+        "Forget the stored name; the board goes back to advertising by its address";
+
+    /// What a name may be, for the box it is typed in.
+    pub(crate) fn board_name_hover(max: usize) -> String {
+        format!(
+            "Up to {max} letters, digits, - or _. The board advertises it from its next \
+             window on and reports it at once."
+        )
+    }
 
     // Board power and sleep.
     pub(crate) const BOARD_INTRO: &str =

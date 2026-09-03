@@ -438,10 +438,10 @@ impl MyApp {
         };
 
         // Present markers, nearest-first is resolved below by distance: you,
-        // the connected board, then every remote node.
+        // the connected board (when it is drawn), then every remote node.
         let mut markers: Vec<(MarkerKind, Option<Position>)> = vec![
             (MarkerKind::You, self.current),
-            (MarkerKind::Beacon, self.beacon),
+            (MarkerKind::Beacon, self.beacon_on_map()),
         ];
         markers.extend(
             self.remotes
@@ -474,7 +474,7 @@ impl MyApp {
         let mut no_fix = None;
         let (pos, time) = match kind {
             MarkerKind::You => (self.current, self.current_time),
-            MarkerKind::Beacon => (self.beacon, self.beacon_time),
+            MarkerKind::Beacon => (self.beacon_on_map(), self.beacon_time),
             MarkerKind::Remote(addr) => match self.remotes.get(&addr) {
                 Some(node) => {
                     no_fix = node.no_fix.map(|ping| (ping, node.heard));

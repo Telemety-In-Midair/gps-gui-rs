@@ -193,7 +193,18 @@ impl MyApp {
             "Show central path on map",
             hover: text::CENTRAL_PATH_HOVER,
         );
-        check!(ui, self.config.ble.show_path, "Show beacon path on map");
+        check!(
+            ui,
+            self.config.ble.show_on_map,
+            "Show the connected board on map",
+            hover: text::BOARD_ON_MAP_HOVER,
+        );
+        // The path is part of what the switch above takes off the map, so
+        // its own box has nothing to say while the board is hidden.
+        let board_drawn = self.config.ble.show_on_map;
+        ui.add_enabled_ui(board_drawn, |ui| {
+            check!(ui, self.config.ble.show_path, "Show beacon path on map");
+        });
         check!(
             ui,
             self.config.lora.show_path,

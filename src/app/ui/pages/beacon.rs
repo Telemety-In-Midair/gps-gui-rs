@@ -51,6 +51,10 @@ impl MyApp {
                 gap(ui, GAP_TIGHT);
                 self.connection_ui(ui);
 
+                section!(ui, sep "Board name", text::BOARD_NAME_INTRO);
+                gap(ui, GAP_TIGHT);
+                self.board_name_ui(ui);
+
                 section!(ui, sep "Board power and sleep", text::BOARD_INTRO);
                 gap(ui, GAP_ITEM);
                 self.board_power_ui(ui);
@@ -61,10 +65,12 @@ impl MyApp {
     /// Pick which board to talk to. Only one is connected at a time, so this is
     /// a single-choice list rather than a set of toggles.
     ///
-    /// Every board runs the same firmware and advertises the same name, so a
-    /// raw scan is a list of identical entries told apart only by MAC. The
-    /// nickname box on each row is what makes the list readable, and it is
-    /// stored in the app's config file rather than on the board.
+    /// A board nobody has named advertises by its address, and every C3
+    /// beacon advertises the same name, so a raw scan of those is told apart
+    /// only by MAC. The nickname box on each row is what makes such a list
+    /// readable, and it is stored in the app's config file. A board named on
+    /// the board itself carries its own label, which is shown in the box's
+    /// place of honor since it is what every page calls it.
     fn device_picker_ui(&mut self, ui: &mut egui::Ui) {
         let scanning = self.ble_intent == BleIntent::Scanning;
         ui.horizontal_wrapped(|ui| {
@@ -123,12 +129,18 @@ impl MyApp {
                 if text_field(ui, name, "name this board", name_width).lost_focus() {
                     self.commit_name(&device.mac);
                 }
-                // The board's own name before the address, because it is the
-                // half a person can read. It is not a substitute for the box
-                // to its left: that one is this user's name for the board and
-                // is what every other page labels it by.
-                if let Some(advertised) = &device.advertised {
-                    hint!(ui, advertised.as_str());
+                // A name stored on the board is what every page calls it,
+                // over the box to its left, so it is drawn as a label rather
+                // than as a hint. An unnamed board's address name is shown
+                // grey: legible, but nobody chose it.
+                match (&device.own_name, &device.advertised) {
+                    (Some(own), _) => {
+                        ui.label(own.as_str());
+                    }
+                    (None, Some(advertised)) => {
+                        hint!(ui, advertised.as_str());
+                    }
+                    (None, None) => {}
                 }
                 hint!(ui, device.mac.as_str());
                 match device.rssi {
@@ -265,6 +277,47 @@ impl MyApp {
         } else {
             feedback_label(ui, self.config.ui, &self.ble_ack);
         }
+    }
+
+    /// The name stored on the board.
+    ///
+    /// A section of its own rather than one of the power settings below: it
+    /// rides the same config characteristic and the same one-write-at-a-time
+    /// rule, but it is read off its own characteristic, so a board whose
+    /// settings blob is too new to decode can still be named. The line under
+    /// the box is the board's own report of what it is called, which is the
+    /// confirmation that matters - the ack only says a length was stored.
+    fn board_name_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.ble_connected {
+            ui.label(text::BOARD_NEED_LINK);
+            return;
+        }
+        let busy = self.ble_ack_pending;
+        let named = self.board_own_name().is_some();
+        let width = em(ui) * NAME_EM;
+        row(ui, "Name:", |ui| {
+            text_field(ui, &mut self.board_name_text, "name this board", width)
+                .on_hover_text(text::board_name_hover(ble::NAME_LABEL_MAX));
+            if button!(ui, "Apply", enabled: !busy).clicked() {
+                self.apply_board_name();
+            }
+            let clear = button!(
+                ui,
+                "Clear",
+                enabled: !busy && named,
+                hover: text::NAME_CLEAR_HOVER,
+            );
+            if clear.clicked() {
+                self.clear_board_name();
+            }
+        });
+        ui.label(match (self.board_own_name(), &self.board_name) {
+            (Some(label), _) => format!("Board: called {label}."),
+            (None, Some(advertised)) => {
+                format!("Board: unnamed, advertising as {advertised}.")
+            }
+            (None, None) => text::BOARD_NO_NAME.to_string(),
+        });
     }
 
     /// The board's sleep switches and the wake-check interval.

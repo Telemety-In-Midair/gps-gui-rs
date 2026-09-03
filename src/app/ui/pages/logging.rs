@@ -252,7 +252,7 @@ impl MyApp {
                 let label = match source {
                     LogSource::Node(addr) => self.config.lora.label_of(addr),
                     LogSource::Phone => "This device".to_string(),
-                    LogSource::Board => "Board".to_string(),
+                    LogSource::Board => self.beacon_label(),
                     LogSource::Telemetry => "Board link".to_string(),
                 };
                 let points = counts.get(&source).copied().unwrap_or(0);

@@ -45,7 +45,10 @@ impl MyApp {
         // Heartbeat phase for the beacon marker while the BLE link is up. The
         // animation is driven by repainting on a timer rather than every frame,
         // so an idle map costs a handful of frames a second instead of sixty.
-        let beacon_pulse = self.ble_connected.then(|| {
+        // A board taken off the map has no marker to beat, and the timer
+        // would only be waking an idle map for nothing.
+        let beacon = self.beacon_on_map();
+        let beacon_pulse = (self.ble_connected && beacon.is_some()).then(|| {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs_f32(PULSE_FRAME));
             (ui.input(|i| i.time).rem_euclid(PULSE_PERIOD) / PULSE_PERIOD) as f32
@@ -93,7 +96,7 @@ impl MyApp {
             .collect();
         // The user->target line goes to the tracked board (or the connected
         // board when not tracking), drawn in that board's color.
-        let distance_line = self.distance_target().map(|(kind, pos)| {
+        let distance_line = self.drawn_distance_target().map(|(kind, pos)| {
             let color = match kind {
                 MarkerKind::Remote(addr) => remote_color(addr),
                 _ => self.config.colors.fixed,
@@ -104,8 +107,11 @@ impl MyApp {
             current: self.current,
             track: paths(self.config.track.show_path, &self.track),
             heading: arrow,
-            beacon: self.beacon,
-            beacon_track: paths(self.config.ble.show_path, &self.beacon_track),
+            beacon,
+            beacon_track: match beacon {
+                Some(_) => paths(self.config.ble.show_path, &self.beacon_track),
+                None => Vec::new(),
+            },
             beacon_pulse,
             remotes,
             distance_line,
@@ -226,9 +232,11 @@ impl MyApp {
         if !self.config.distance.show {
             return;
         }
-        let (Some(user), Some((_, target)), Some(meters)) =
-            (self.current, self.distance_target(), self.distance_to_target())
-        else {
+        let (Some(user), Some((_, target)), Some(meters)) = (
+            self.current,
+            self.drawn_distance_target(),
+            self.distance_to_target(),
+        ) else {
             return;
         };
 
@@ -299,6 +307,17 @@ impl MyApp {
             TextShape::new(top_left, galley, text_color)
                 .with_angle_and_anchor(angle, egui::Align2::CENTER_BOTTOM),
         );
+    }
+}
+
+impl MyApp {
+    /// The distance target as the map draws it: the same board the read-outs
+    /// measure to, unless that is the connected board and it has been taken
+    /// off the map - a line to a marker that is not there would point at
+    /// nothing.
+    fn drawn_distance_target(&self) -> Option<(MarkerKind, Position)> {
+        self.distance_target()
+            .filter(|(kind, _)| *kind != MarkerKind::Beacon || self.beacon_on_map().is_some())
     }
 }
 

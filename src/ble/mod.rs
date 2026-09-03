@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use gps_proto::packet::{self, Ack};
 use midair_proto::{ble, link, lora};
+
+use crate::config::normalize_mac;
 pub use gps_proto::packet::PositionPacket;
 pub use midair_proto::ble::{Mode, Settings};
 pub use midair_proto::link::Telemetry;
@@ -217,38 +219,127 @@ pub enum ConfigWrite {
     /// of the settings above the board even reads, and what it comes back
     /// as after a flat cell.
     Mode(ble::Mode),
+    /// The board's name: the label it stores in flash and advertises behind
+    /// the firmware's prefix (`ble::CFG_NAME`). A length of 0 clears it,
+    /// returning the board to its address-derived name.
+    ///
+    /// Built through [`ConfigWrite::name`], which is where the label is
+    /// checked, so the worker never sends what the board would refuse.
+    /// Bytes rather than a `String` so a write stays `Copy` like the others.
+    Name {
+        label: [u8; ble::NAME_LABEL_MAX],
+        len: u8,
+    },
 }
 
 impl ConfigWrite {
-    /// The encoded write and its length.
-    pub fn encode(&self) -> ([u8; 6], usize) {
+    /// A name write for `label`, or `None` for a label the board would
+    /// refuse: longer than [`ble::NAME_LABEL_MAX`] bytes, or anything but
+    /// ASCII letters, digits, `-` and `_`. A blank label clears the name.
+    pub fn name(label: &str) -> Option<Self> {
+        let label = label.trim();
+        if !label.is_empty() && !ble::valid_label(label.as_bytes()) {
+            return None;
+        }
+        let mut bytes = [0u8; ble::NAME_LABEL_MAX];
+        bytes[..label.len()].copy_from_slice(label.as_bytes());
+        Some(ConfigWrite::Name {
+            label: bytes,
+            len: label.len() as u8,
+        })
+    }
+
+    /// The encoded write and its length. The buffer is the longest write the
+    /// config characteristic takes, which is a full-length name; every other
+    /// write uses the first few bytes of it.
+    pub fn encode(&self) -> ([u8; ble::CONFIG_WRITE_MAX], usize) {
+        let mut b = [0u8; ble::CONFIG_WRITE_MAX];
         match *self {
             ConfigWrite::Interval(ms) => {
-                packet::encode_config(packet::ConfigCommand::UpdateIntervalMs(ms))
+                let (small, n) =
+                    packet::encode_config(packet::ConfigCommand::UpdateIntervalMs(ms));
+                b[..n].copy_from_slice(&small[..n]);
+                (b, n)
             }
             ConfigWrite::Flag { id, on } => {
-                let mut b = [0u8; 6];
                 b[0] = id;
                 b[1] = 1;
                 b[2] = on as u8;
                 (b, 3)
             }
             ConfigWrite::Seconds { id, secs } => {
-                let mut b = [0u8; 6];
                 b[0] = id;
                 b[1] = 4;
                 b[2..6].copy_from_slice(&secs.to_le_bytes());
                 (b, 6)
             }
             ConfigWrite::Mode(mode) => {
-                let mut b = [0u8; 6];
                 b[0] = ble::CFG_MODE;
                 b[1] = 1;
                 b[2] = mode.as_wire();
                 (b, 3)
             }
+            ConfigWrite::Name { label, len } => {
+                let len = usize::from(len);
+                b[0] = ble::CFG_NAME;
+                b[1] = len as u8;
+                b[2..2 + len].copy_from_slice(&label[..len]);
+                (b, 2 + len)
+            }
         }
     }
+}
+
+/// The label a board's name carries, when somebody gave it one.
+///
+/// A board advertises `<prefix>-<label>`, and one that has never been named
+/// puts the tail of its own address where the label goes. That fallback is a
+/// name only in the sense that it is unique: nobody chose it, so it is not
+/// what the board should be called anywhere a person reads, and a nickname
+/// in the app config outranks it. With the board's address to hand the
+/// fallback is reproduced exactly, by the rule the firmware builds it with.
+/// Without one (connected to "any board"), a label of four lowercase hex
+/// digits is taken for the fallback - which a chosen name could be, at the
+/// cost of nothing worse than the whole advertised string being shown.
+///
+/// `None` for the fallback, for a name without the prefix (a C3 beacon, or
+/// something that is not one of these boards), and for an empty label.
+pub fn board_label<'a>(name: &'a str, mac: Option<&str>) -> Option<&'a str> {
+    let label = name
+        .strip_prefix(ble::NAME_PREFIX)?
+        .strip_prefix(char::from(ble::NAME_SEP))?;
+    if label.is_empty() {
+        return None;
+    }
+    let unnamed = match mac.and_then(mac_bytes) {
+        Some(addr) => {
+            let mut buf = [0u8; ble::NAME_MAX];
+            ble::advertised_name("", &addr, &mut buf) == name
+        }
+        None => {
+            label.len() == 4
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+    };
+    (!unnamed).then_some(label)
+}
+
+/// A printed address as the bytes the controller takes, LSB first:
+/// `AA:BB:CC:DD:EE:FF` becomes `[FF, EE, DD, CC, BB, AA]`. `None` for
+/// anything that is not six hex bytes.
+fn mac_bytes(mac: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut n = 0;
+    for part in normalize_mac(mac).split(':') {
+        if n == 6 {
+            return None;
+        }
+        out[5 - n] = u8::from_str_radix(part, 16).ok()?;
+        n += 1;
+    }
+    (n == 6).then_some(out)
 }
 
 /// How long a push waits for a bulk ack before giving up. Every op is answered
@@ -969,6 +1060,50 @@ mod tests {
         let (mine, n) = ConfigWrite::Interval(1500).encode();
         let (theirs, m) = packet::encode_config(packet::ConfigCommand::UpdateIntervalMs(1500));
         assert_eq!((&mine[..n], n), (&theirs[..m], m));
+    }
+
+    /// A name goes out as `[id, len, bytes]`, a blank one as a length of 0,
+    /// and one the board would refuse is refused here first.
+    #[test]
+    fn name_framing_and_validation() {
+        let (b, n) = ConfigWrite::name("sky-1").unwrap().encode();
+        assert_eq!(&b[..n], &[ble::CFG_NAME, 5, b's', b'k', b'y', b'-', b'1']);
+
+        let (b, n) = ConfigWrite::name("  ").unwrap().encode();
+        assert_eq!(&b[..n], &[ble::CFG_NAME, 0]);
+
+        let longest = "x".repeat(ble::NAME_LABEL_MAX);
+        let (b, n) = ConfigWrite::name(&longest).unwrap().encode();
+        assert_eq!(n, ble::CONFIG_WRITE_MAX);
+        assert_eq!(&b[2..n], longest.as_bytes());
+
+        assert!(ConfigWrite::name(&"x".repeat(ble::NAME_LABEL_MAX + 1)).is_none());
+        assert!(ConfigWrite::name("has space").is_none());
+        assert!(ConfigWrite::name("caf\u{e9}").is_none());
+    }
+
+    /// A chosen label is the board's name; the address tail an unnamed board
+    /// advertises is not, and neither is a name from other firmware.
+    #[test]
+    fn board_label_tells_a_name_from_the_address_fallback() {
+        let mac = "FF:C6:A1:53:50:47";
+        assert_eq!(board_label("ws3gps-sky-1", Some(mac)), Some("sky-1"));
+        assert_eq!(board_label("ws3gps-5047", Some(mac)), None);
+        // A label that merely looks like an address tail is a name when the
+        // address says it is not this board's.
+        assert_eq!(board_label("ws3gps-beef", Some(mac)), Some("beef"));
+        // Any spelling of the address finds the same fallback.
+        assert_eq!(board_label("ws3gps-5047", Some("ff-c6-a1-53-50-47")), None);
+
+        // Without an address the shape of the label has to do.
+        assert_eq!(board_label("ws3gps-sky-1", None), Some("sky-1"));
+        assert_eq!(board_label("ws3gps-5047", None), None);
+        assert_eq!(board_label("ws3gps-beef", None), None);
+        assert_eq!(board_label("ws3gps-BEEF", None), Some("BEEF"));
+
+        assert_eq!(board_label("ws3gps-", Some(mac)), None);
+        assert_eq!(board_label("GPS-C3", Some(mac)), None);
+        assert_eq!(board_label("", None), None);
     }
 
     #[test]

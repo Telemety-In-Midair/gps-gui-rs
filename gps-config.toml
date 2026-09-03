@@ -23,6 +23,9 @@ text_scale = 1.0
 
 [ble]
 enabled = true
+# Draw the connected board on the map at all: marker, heartbeat, path and the
+# distance line to it. The link, the recording and the Status page carry on.
+show_on_map = true
 show_path = false
 mac = ""
 # Pin a specific beacon instead of scanning for the GPS service:

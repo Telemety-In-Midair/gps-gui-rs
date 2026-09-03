@@ -14,8 +14,8 @@ use walkers::{
 };
 
 use crate::ble::{
-    BleCommand, BleEvent, BleHandle, BleRequest, ConfigWrite, Epoch, NodePing, RadioConfig,
-    Settings, Telemetry,
+    board_label, BleCommand, BleEvent, BleHandle, BleRequest, ConfigWrite, Epoch, NodePing,
+    RadioConfig, Settings, Telemetry,
 };
 use crate::compass::{self, CompassHandle};
 use crate::config::{normalize_mac, AppConfig};
@@ -44,6 +44,7 @@ fn setting_name(id: u8) -> &'static str {
         ble::CFG_SLEEP_NOW => "sleep now",
         ble::CFG_MODE => "mode",
         ble::CFG_IDLE_TIMEOUT_S => "idle timeout",
+        ble::CFG_NAME => "board name",
         _ => "setting",
     }
 }
@@ -124,6 +125,13 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
                     secs_text(applied)
                 )
             }
+            // The ack carries the stored length, not the name: the name
+            // itself comes back on its own characteristic, and the pages
+            // pick it up from there.
+            ble::CFG_NAME if applied == 0 => {
+                "Board applied: name cleared, it goes by its address again".to_string()
+            }
+            ble::CFG_NAME => "Board applied: name stored".to_string(),
             _ => format!("Board applied: {name}"),
         }),
         packet::ACK_UNKNOWN_ID => Err(format!(
@@ -204,10 +212,13 @@ pub(crate) struct DeviceRow {
     /// Absent for a board known only from the config, and on firmware that
     /// predates board names.
     ///
-    /// Shown beside the MAC rather than in place of the app's own nickname:
-    /// the nickname is what this user decided to call the board, and it wins
-    /// wherever one label has to be picked.
+    /// Shown beside the MAC in place of nothing: for a board nobody has
+    /// named it is the address again, and the nickname box is the label.
     pub advertised: Option<String>,
+    /// The name stored on the board, when it has one (see
+    /// [`crate::ble::board_label`]). This is the board's label wherever one
+    /// is picked, over the nickname, so the row shows it as such.
+    pub own_name: Option<String>,
     /// This board is the pinned one, so it is what Connect will go to.
     pub selected: bool,
 }
@@ -706,6 +717,9 @@ pub struct MyApp {
     /// notified on a rename. Absent until it answers, and on firmware that
     /// predates board names.
     board_name: Option<String>,
+    /// Board-name input on the Beacon page: the label to store on the board,
+    /// seeded from the first name the board reports in a session.
+    board_name_text: String,
     /// The board's settings layout is newer than this build can decode, so
     /// its settings are unknown rather than defaulted.
     settings_unsupported: bool,
@@ -948,6 +962,7 @@ impl MyApp {
             // make the uncommon one look like the default.
             idle_timeout_text: ble::IDLE_TIMEOUT_DEFAULT_S.to_string(),
             sleep_now_text: String::new(),
+            board_name_text: String::new(),
             sleep_commanded: None,
             page: Page::Map,
             menu_from: Page::Map,
@@ -1388,18 +1403,25 @@ impl MyApp {
             }
         }
         macs.into_iter()
-            .map(|mac| DeviceRow {
-                rssi: self
+            .map(|mac| {
+                let advertised = self
                     .discovered
                     .get(&mac)
-                    .filter(|seen| seen.at.elapsed() < SEEN_TIMEOUT)
-                    .and_then(|seen| seen.rssi),
-                advertised: self
-                    .discovered
-                    .get(&mac)
-                    .and_then(|seen| seen.name.clone()),
-                selected: self.config.ble.is_selected(&mac),
-                mac,
+                    .and_then(|seen| seen.name.clone());
+                DeviceRow {
+                    rssi: self
+                        .discovered
+                        .get(&mac)
+                        .filter(|seen| seen.at.elapsed() < SEEN_TIMEOUT)
+                        .and_then(|seen| seen.rssi),
+                    own_name: advertised
+                        .as_deref()
+                        .and_then(|name| board_label(name, Some(&mac)))
+                        .map(str::to_string),
+                    advertised,
+                    selected: self.config.ble.is_selected(&mac),
+                    mac,
+                }
             })
             .collect()
     }
@@ -1468,29 +1490,89 @@ impl MyApp {
     }
 
     /// The board the app is pinned to, named for a heading or a status line.
-    /// "Any board" when nothing is pinned, which is what an empty MAC means.
-    ///
-    /// Three sources, in the order they are trusted: the nickname this user
-    /// gave the board, the name the board gives itself, and the MAC. The
-    /// board's own name is worth more than a raw address and less than a
-    /// decision the user made, which is exactly the middle.
+    /// "Any board" when nothing is pinned and nothing is connected, which is
+    /// what an empty MAC means.
     pub(crate) fn selected_device_label(&self) -> String {
-        let Some(mac) = &self.config.ble.mac else {
-            // Pinned to nothing, but connected to something: say which,
-            // since the board is the only one that can answer that here.
-            return match (&self.board_name, self.ble_connected) {
-                (Some(name), true) => name.clone(),
-                _ => "Any board".to_string(),
-            };
-        };
-        if let Some(nickname) = self.config.ble.name_of(mac) {
-            return nickname.to_string();
+        self.board_label()
+            .unwrap_or_else(|| "Any board".to_string())
+    }
+
+    /// The connected board's name wherever the map and the pages label it:
+    /// its marker, its points, its log series, its read-outs. "Beacon" when
+    /// nothing better is known, which is the marker's generic name.
+    pub(crate) fn beacon_label(&self) -> String {
+        self.board_label()
+            .unwrap_or_else(|| MarkerKind::Beacon.label())
+    }
+
+    /// The best name there is for the board the app is pinned to, or
+    /// connected to when pinned to none. `None` when nothing at all is known
+    /// about it, which only happens pinned to nothing with no link up.
+    ///
+    /// Four sources, in the order they are trusted. First the name stored on
+    /// the board itself: it was chosen by someone, it travels with the board
+    /// to every phone, and a board is the authority on what it is called.
+    /// Then the nickname in the app's config, this user's own decision, for
+    /// a board that has none. Then the name the board advertises under when
+    /// it is only its address in a firmware prefix - a person can still read
+    /// it - and last the MAC.
+    fn board_label(&self) -> Option<String> {
+        if let Some(own) = self.board_own_name() {
+            return Some(own);
         }
-        self.discovered
-            .get(&normalize_mac(mac))
-            .and_then(|seen| seen.name.clone())
-            .or_else(|| self.ble_connected.then(|| self.board_name.clone()).flatten())
-            .unwrap_or_else(|| mac.clone())
+        let mac = self.config.ble.mac.as_deref();
+        if let Some(nickname) = mac.and_then(|mac| self.config.ble.name_of(mac)) {
+            return Some(nickname.to_string());
+        }
+        self.advertised_name().or_else(|| mac.map(str::to_string))
+    }
+
+    /// The label stored on the board, when it has one: what it calls itself
+    /// with the firmware prefix taken off, and `None` for a board that goes
+    /// by its address (see [`board_label`]).
+    pub(crate) fn board_own_name(&self) -> Option<String> {
+        let name = self.advertised_name()?;
+        board_label(&name, self.config.ble.mac.as_deref()).map(str::to_string)
+    }
+
+    /// The name the board advertises under, prefix and all: what the link
+    /// reports while it is up, since a renamed board keeps advertising the
+    /// old name until its next window, else what the last scan saw of the
+    /// pinned board. `None` when neither has said, and on firmware that
+    /// predates board names.
+    fn advertised_name(&self) -> Option<String> {
+        // "Connected" gates the live name: a name from a session that is
+        // over says nothing about the next one.
+        let live = self.ble_connected.then(|| self.board_name.clone()).flatten();
+        live.or_else(|| {
+            let mac = self.config.ble.mac.as_deref()?;
+            self.discovered
+                .get(&normalize_mac(mac))
+                .and_then(|seen| seen.name.clone())
+        })
+    }
+
+    /// Store the typed name on the board, or clear it when the box is blank.
+    /// A label the board would refuse is refused here, with the rule spelled
+    /// out, rather than sent for a bare "bad value" back.
+    pub(crate) fn apply_board_name(&mut self) {
+        match ConfigWrite::name(&self.board_name_text) {
+            Some(write) => self.send_config(write),
+            None => {
+                self.ble_ack = Some(Err(format!(
+                    "Enter up to {} letters, digits, - or _.",
+                    ble::NAME_LABEL_MAX
+                )))
+            }
+        }
+    }
+
+    /// Clear the name stored on the board, returning it to its address name.
+    pub(crate) fn clear_board_name(&mut self) {
+        self.board_name_text.clear();
+        if let Some(write) = ConfigWrite::name("") {
+            self.send_config(write);
+        }
     }
 
     /// Queue one config write to the board and wait for its ack. The controls
@@ -1781,13 +1863,24 @@ impl MyApp {
         targets
     }
 
+    /// The connected board's position as far as the map is concerned: its
+    /// live position, unless `[ble] show_on_map` has taken the board off the
+    /// map. Everything the map draws or points at for the board reads this;
+    /// the pages that are not the map read `beacon` itself, since the board
+    /// is still there and still reporting.
+    fn beacon_on_map(&self) -> Option<Position> {
+        self.beacon.filter(|_| self.config.ble.show_on_map)
+    }
+
     /// The beacon boards the map can point to: the connected board first, then
     /// each remote node in address order, each with a known position. Tracking
     /// mode cycles through this and the center menu jumps to it, so the two
-    /// keep the same order and the tracking index stays meaningful.
+    /// keep the same order and the tracking index stays meaningful. A board
+    /// taken off the map is not on the list either: there is nothing to
+    /// track or center on where nothing is drawn.
     fn beacon_targets(&self) -> Vec<(MarkerKind, Position)> {
         let mut targets: Vec<(MarkerKind, Position)> = self
-            .beacon
+            .beacon_on_map()
             .map(|p| (MarkerKind::Beacon, p))
             .into_iter()
             .collect();
@@ -1875,12 +1968,25 @@ impl MyApp {
         }
     }
 
-    /// A marker's display name, resolving a remote node's nickname from the
-    /// config. The one place a node's name is decided, so every page agrees.
+    /// A marker's display name: the connected board by its name, a remote
+    /// node by its nickname from the config. The one place a marker's name is
+    /// decided, so every page agrees.
     fn marker_label(&self, kind: MarkerKind) -> String {
         match kind {
             MarkerKind::Remote(addr) => self.config.lora.label_of(addr),
-            other => other.label(),
+            MarkerKind::Beacon => self.beacon_label(),
+            MarkerKind::You => MarkerKind::You.label(),
+        }
+    }
+
+    /// How a recorded point's source is named on the Points page: the same
+    /// names the map's markers go by, so a board or a node reads the same
+    /// on both.
+    pub(crate) fn source_label(&self, source: PointSource) -> String {
+        match source {
+            PointSource::Phone => PointSource::Phone.label(),
+            PointSource::Esp => self.beacon_label(),
+            PointSource::Remote(addr) => self.config.lora.label_of(addr),
         }
     }
 
@@ -1899,7 +2005,7 @@ impl MyApp {
             .chain(self.beacon_track.iter())
             .chain(remote_points)
             .filter(|p| filter.admits(p.source))
-            .filter(|p| query.is_empty() || p.matches(query))
+            .filter(|p| query.is_empty() || p.matches(&self.source_label(p.source), query))
             .copied()
             .collect();
         // Newest first; every track interleaves by record time.
@@ -2445,7 +2551,32 @@ impl MyApp {
                     self.board_settings = None;
                     self.settings_unsupported = true;
                 }
-                BleEvent::Name(name) => self.board_name = Some(name),
+                BleEvent::Name(name) => {
+                    // The box is seeded from the first report of a session,
+                    // like the settings inputs: the board also reports a
+                    // name to confirm a rename, and that must not overwrite
+                    // what is being typed.
+                    if self.board_name.is_none() {
+                        self.board_name_text =
+                            board_label(&name, self.config.ble.mac.as_deref())
+                                .unwrap_or_default()
+                                .to_string();
+                    }
+                    // The scan's record of the pinned board is brought up to
+                    // date too: the picker row reads from it, and a renamed
+                    // board advertises the old name until its next window.
+                    if let Some(mac) = &self.config.ble.mac {
+                        self.discovered
+                            .entry(normalize_mac(mac))
+                            .and_modify(|seen| seen.name = Some(name.clone()))
+                            .or_insert(Seen {
+                                rssi: None,
+                                name: Some(name.clone()),
+                                at: Instant::now(),
+                            });
+                    }
+                    self.board_name = Some(name);
+                }
                 BleEvent::RadioConfig(c) => {
                     self.board_radio_config = Some(c);
                     self.radio_config_unsupported = false;
@@ -2712,9 +2843,10 @@ mod tests {
         ));
     }
 
-    /// Three sources for a board's label, and each one only steps in where
-    /// the one above it has nothing: the user's nickname, the board's own
-    /// name, then the address.
+    /// Four sources for a board's label, and each one only steps in where
+    /// the one above it has nothing: the name stored on the board, the
+    /// user's nickname, the address name the board advertises under, then
+    /// the address.
     #[test]
     fn a_board_is_labelled_by_the_best_name_available() {
         let (mut app, _cmds, events) = test_app();
@@ -2722,6 +2854,58 @@ mod tests {
         app.config.ble.mac = Some(mac.to_string());
         assert_eq!(app.selected_device_label(), mac, "nothing but the address yet");
 
+        let seen = |name: &str| {
+            BleEvent::Discovered(crate::ble::DiscoveredDevice {
+                address: mac.to_string(),
+                name: Some(name.to_string()),
+                rssi: Some(-60),
+            })
+        };
+        // An unnamed board advertises its address tail; legible, but nobody
+        // chose it.
+        report(&events, &app, seen("ws3gps-ee01"));
+        app.drain_sources();
+        assert_eq!(app.selected_device_label(), "ws3gps-ee01");
+
+        app.config.ble.set_name(mac, "The one on the mast");
+        assert_eq!(
+            app.selected_device_label(),
+            "The one on the mast",
+            "a name the user chose outranks the address name"
+        );
+
+        // Named on the board, which is what every page calls it from now on,
+        // shown without the firmware prefix.
+        report(&events, &app, seen("ws3gps-sky-1"));
+        app.drain_sources();
+        assert_eq!(
+            app.selected_device_label(),
+            "sky-1",
+            "a name stored on the board outranks the nickname"
+        );
+        assert_eq!(app.beacon_label(), "sky-1", "the map and the pages agree");
+        assert_eq!(app.marker_label(MarkerKind::Beacon), "sky-1");
+        assert_eq!(app.source_label(PointSource::Esp), "sky-1");
+    }
+
+    /// With no board known at all, the marker keeps its generic name and the
+    /// pinned-board line says the app is pinned to nothing.
+    #[test]
+    fn an_unknown_board_has_generic_names() {
+        let (app, _cmds, _events) = test_app();
+        assert_eq!(app.selected_device_label(), "Any board");
+        assert_eq!(app.beacon_label(), "Beacon");
+        assert_eq!(app.source_label(PointSource::Esp), "Beacon");
+    }
+
+    /// The name the board reports over the link outranks what the scan saw,
+    /// and the picker row is brought up to date with it: a renamed board
+    /// keeps advertising the old name until its next window.
+    #[test]
+    fn a_rename_reported_over_the_link_reaches_the_picker() {
+        let (mut app, _cmds, events) = test_app();
+        let mac = "AA:BB:CC:DD:EE:01";
+        app.config.ble.mac = Some(mac.to_string());
         report(
             &events,
             &app,
@@ -2731,15 +2915,89 @@ mod tests {
                 rssi: Some(-60),
             }),
         );
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Name("ws3gps-sky-1".to_string()));
         app.drain_sources();
-        assert_eq!(app.selected_device_label(), "ws3gps-sky-1");
+        assert_eq!(app.board_name_text, "sky-1", "the box opens on the stored name");
 
-        app.config.ble.set_name(mac, "The one on the mast");
+        app.board_name_text = "sky-2".to_string();
+        report(&events, &app, BleEvent::Name("ws3gps-sky-2".to_string()));
+        app.drain_sources();
+        assert_eq!(app.selected_device_label(), "sky-2");
         assert_eq!(
-            app.selected_device_label(),
-            "The one on the mast",
-            "a name the user chose outranks the one the board chose"
+            app.device_rows()[0].own_name.as_deref(),
+            Some("sky-2"),
+            "the picker row shows the name the board now has"
         );
+        assert_eq!(app.board_name_text, "sky-2", "a later report leaves the box alone");
+    }
+
+    /// A name the board would refuse never reaches it: the rule is shown
+    /// instead. A blank box clears the name, and so does the Clear button.
+    #[test]
+    fn board_name_writes_are_checked_before_they_are_sent() {
+        let (mut app, cmds, _events) = test_app();
+        // The startup auto-connect is already on the channel.
+        let _ = cmds.try_iter().count();
+        app.board_name_text = "has space".to_string();
+        app.apply_board_name();
+        assert!(matches!(&app.ble_ack, Some(Err(msg)) if msg.contains("letters")));
+        assert!(!app.ble_ack_pending);
+        assert_eq!(cmds.try_iter().count(), 0, "nothing was sent");
+
+        app.board_name_text = " sky-1 ".to_string();
+        app.apply_board_name();
+        assert!(app.ble_ack_pending);
+        let sent: Vec<_> = cmds.try_iter().collect();
+        assert!(matches!(
+            &sent.last().expect("the name is sent").command,
+            BleCommand::Config(ConfigWrite::Name { len: 5, .. })
+        ));
+
+        app.ble_ack_pending = false;
+        app.clear_board_name();
+        assert!(app.board_name_text.is_empty());
+        let sent: Vec<_> = cmds.try_iter().collect();
+        assert!(matches!(
+            &sent.last().expect("the clear is sent").command,
+            BleCommand::Config(ConfigWrite::Name { len: 0, .. })
+        ));
+    }
+
+    /// Taking the connected board off the map takes it out of everything
+    /// the map points at - tracking, the center menu, the distance line -
+    /// while the board itself, and what the Status page says of it, stays.
+    #[test]
+    fn a_board_off_the_map_is_not_a_map_target() {
+        let (mut app, _cmds, _events) = test_app();
+        app.current = Some(lat_lon(51.0, 0.0));
+        app.beacon = Some(lat_lon(52.0, 1.0));
+        assert!(app.can_track());
+        app.cycle_tracking();
+        assert_eq!(app.tracking_beacon, Some(MarkerKind::Beacon));
+
+        app.config.ble.show_on_map = false;
+        assert!(app.beacon_on_map().is_none());
+        assert!(app.beacon_targets().is_empty());
+        assert!(!app.can_track());
+        assert!(
+            app.beacon_target(MarkerKind::Beacon).is_none(),
+            "tracking finds nothing to frame and leaves the mode"
+        );
+        assert!(app.beacon.is_some(), "the board is still reporting");
+        assert!(
+            app.distance_target().is_none(),
+            "tracking a board that is not drawn has no target"
+        );
+        app.tracking_beacon = None;
+        assert_eq!(
+            app.distance_target().map(|(kind, _)| kind),
+            Some(MarkerKind::Beacon),
+            "off tracking, the Status page still measures to the board"
+        );
+
+        app.config.ble.show_on_map = true;
+        assert_eq!(app.beacon_targets().len(), 1);
     }
 
     /// An advertisement without a name does not erase the name an earlier one
@@ -2762,7 +3020,7 @@ mod tests {
             );
             app.drain_sources();
         }
-        assert_eq!(app.selected_device_label(), "ws3gps-sky-1");
+        assert_eq!(app.selected_device_label(), "sky-1");
     }
 
     /// Pinned to nothing, the app still says which board it is talking to -
@@ -2783,7 +3041,14 @@ mod tests {
         report(&events, &app, BleEvent::Connected(true));
         report(&events, &app, BleEvent::Name("ws3gps-ground-1".to_string()));
         app.drain_sources();
-        assert_eq!(app.selected_device_label(), "ws3gps-ground-1");
+        assert_eq!(app.selected_device_label(), "ground-1");
+
+        // A board nobody has named is still said by name, address and all:
+        // with no address pinned there is nothing else to call it.
+        report(&events, &app, BleEvent::Name("ws3gps-5047".to_string()));
+        app.drain_sources();
+        assert_eq!(app.selected_device_label(), "ws3gps-5047");
+        assert_eq!(app.board_own_name(), None);
     }
 
     /// A page waiting on the link is answered by the press that drops it,
@@ -2926,6 +3191,24 @@ mod tests {
         assert!(state.contains("radio standby"), "{state}");
         let bad = ack_message(&ack(ble::CFG_GPS_SLEEP, packet::ACK_BAD_VALUE)).unwrap_err();
         assert!(bad.contains("GPS backup mode"), "{bad}");
+
+        // A name acks with its stored length; zero is a cleared name.
+        let stored = ack_message(&Ack {
+            id: ble::CFG_NAME,
+            status: packet::ACK_OK,
+            value_u32: Some(5),
+        })
+        .unwrap();
+        assert!(stored.contains("stored"), "{stored}");
+        let cleared = ack_message(&Ack {
+            id: ble::CFG_NAME,
+            status: packet::ACK_OK,
+            value_u32: Some(0),
+        })
+        .unwrap();
+        assert!(cleared.contains("cleared"), "{cleared}");
+        let old = ack_message(&ack(ble::CFG_NAME, packet::ACK_UNKNOWN_ID)).unwrap_err();
+        assert!(old.contains("board name"), "{old}");
         // An interval of 0 turns sleep off, and must not read as "every off".
         assert_eq!(
             ack_message(&Ack {

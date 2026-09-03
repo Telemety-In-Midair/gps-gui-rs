@@ -18,16 +18,17 @@ pub enum PointSource {
 }
 
 impl PointSource {
-    /// How the source is named in the points list and its filter.
+    /// The generic name of the source, before any name is applied to it.
     ///
-    /// The phone is the BLE central of the link the ESP beacon sits on the far
-    /// end of, which is the name it goes by everywhere else in the system. A
-    /// remote node has no app-side nickname here (that lives in the config and
-    /// is applied where the config is in reach); the list names it by address.
+    /// The phone is the BLE central of the link the board sits on the far end
+    /// of, which is the name it goes by everywhere else in the system. The
+    /// connected board's own name and a remote node's nickname live where the
+    /// config and the link are in reach, so the pages resolve those through
+    /// the app and fall back to these.
     pub fn label(self) -> String {
         match self {
             PointSource::Phone => "Central".to_string(),
-            PointSource::Esp => "esp".to_string(),
+            PointSource::Esp => "Beacon".to_string(),
             PointSource::Remote(addr) => format!("Node {addr}"),
         }
     }
@@ -48,11 +49,13 @@ impl TrackPoint {
         format!("{:.5} {:.5}", self.pos.y(), self.pos.x())
     }
 
-    /// Substring search across the source label and the coordinates. `query`
-    /// must already be lowercase; the label is folded to match, so searching is
-    /// case-insensitive however the labels are capitalized.
-    pub fn matches(&self, query: &str) -> bool {
-        self.source.label().to_lowercase().contains(query) || self.coord_text().contains(query)
+    /// Substring search across the source's label and the coordinates.
+    /// `label` is the name the list prints for this point's source, which the
+    /// page resolves (the board's name, a node's nickname) rather than the
+    /// generic one. `query` must already be lowercase; the label is folded to
+    /// match, so searching is case-insensitive however it is capitalized.
+    pub fn matches(&self, label: &str, query: &str) -> bool {
+        label.to_lowercase().contains(query) || self.coord_text().contains(query)
     }
 }
 
@@ -112,27 +115,39 @@ mod tests {
     #[test]
     fn search_matches_source_and_coordinates() {
         let p = point(PointSource::Esp);
-        assert!(p.matches(""));
-        assert!(p.matches("esp"));
-        assert!(p.matches("51.477"));
-        assert!(p.matches("-0.0015"));
-        assert!(!p.matches("central"));
-        assert!(!p.matches("52."));
+        let label = p.source.label();
+        assert!(p.matches(&label, ""));
+        assert!(p.matches(&label, "beacon"));
+        assert!(p.matches(&label, "51.477"));
+        assert!(p.matches(&label, "-0.0015"));
+        assert!(!p.matches(&label, "central"));
+        assert!(!p.matches(&label, "52."));
     }
 
     #[test]
     fn source_search_ignores_label_case() {
         // The query arrives lowercased; a capitalized label still matches.
-        assert!(point(PointSource::Phone).matches("central"));
+        let p = point(PointSource::Phone);
+        assert!(p.matches(&p.source.label(), "central"));
+    }
+
+    /// The label searched is the one the page prints, so a board named on
+    /// the board is found by that name and not by the generic one.
+    #[test]
+    fn search_uses_the_label_the_page_resolved() {
+        let p = point(PointSource::Esp);
+        assert!(p.matches("sky-1", "sky"));
+        assert!(!p.matches("sky-1", "beacon"));
     }
 
     #[test]
     fn remote_nodes_are_named_and_searchable_by_address() {
         let p = point(PointSource::Remote(7));
-        assert_eq!(p.source.label(), "Node 7");
-        assert!(p.matches("node 7"));
-        assert!(p.matches("node"));
-        assert!(!p.matches("central"));
+        let label = p.source.label();
+        assert_eq!(label, "Node 7");
+        assert!(p.matches(&label, "node 7"));
+        assert!(p.matches(&label, "node"));
+        assert!(!p.matches(&label, "central"));
     }
 
     #[test]

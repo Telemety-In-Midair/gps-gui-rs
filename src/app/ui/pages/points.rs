@@ -19,6 +19,10 @@ const SEARCH_FRAC: f32 = 0.6;
 /// page would show filters over nothing.
 const LIST_MIN_EM: f32 = 4.0;
 
+/// The narrowest the source column is drawn, in characters: room for the
+/// generic names, so the column does not jump when the first board is named.
+const SOURCE_COLUMN_MIN: usize = 8;
+
 impl MyApp {
     pub(crate) fn points_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
@@ -37,15 +41,15 @@ impl MyApp {
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Source:");
-                // The source names come from `PointSource::label`, so the
-                // filter and the rows below it always read the same. The
-                // exception is the one entry standing for every remote node: a
-                // node's own address shows in its rows rather than as its own
-                // filter button.
+                // The source names come from `MyApp::source_label`, so the
+                // filter and the rows below it always read the same - and the
+                // same as the map's markers. The exception is the one entry
+                // standing for every remote node: a node's own name shows in
+                // its rows rather than as its own filter button.
                 for (filter, label) in [
                     (PointFilter::All, "all".to_string()),
-                    (PointFilter::Phone, PointSource::Phone.label()),
-                    (PointFilter::Esp, PointSource::Esp.label()),
+                    (PointFilter::Phone, self.source_label(PointSource::Phone)),
+                    (PointFilter::Esp, self.source_label(PointSource::Esp)),
                     (PointFilter::Remote, "nodes".to_string()),
                 ] {
                     ui.selectable_value(&mut self.points_filter, filter, label);
@@ -59,6 +63,18 @@ impl MyApp {
             gap(ui, GAP_HAIR);
 
             let now = SystemTime::now();
+            // The source column is as wide as the longest name any row could
+            // carry, so the coordinates stay in line down the list. Measured
+            // over the sources rather than the rows: a name is per source,
+            // and there are a few of those against thousands of rows.
+            let sources = [PointSource::Phone, PointSource::Esp]
+                .into_iter()
+                .chain(self.remotes.keys().map(|&addr| PointSource::Remote(addr)));
+            let column = sources
+                .map(|source| self.source_label(source).chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(SOURCE_COLUMN_MIN);
             // A row is a `selectable_label`, which egui floors at the control
             // height, so that is what `show_rows` has to be told: it places
             // rows by arithmetic, and a height that disagrees with the one
@@ -76,11 +92,9 @@ impl MyApp {
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, rows.len(), |ui, range| {
                     for p in &rows[range] {
-                        // The source column is wide enough for the longest
-                        // label, so the coordinates stay in line.
                         let text = format!(
-                            "{:<8} {}  {:>7}",
-                            p.source.label(),
+                            "{:<column$} {}  {:>7}",
+                            self.source_label(p.source),
                             p.coord_text(),
                             age_text(now, p.time),
                         );

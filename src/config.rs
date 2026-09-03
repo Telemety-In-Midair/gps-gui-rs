@@ -37,11 +37,12 @@
 //!
 //! [ble]
 //! enabled = true      # master switch for the BLE GPS source
+//! show_on_map = true  # draw the connected board on the map at all
 //! show_path = false   # draw the path of the incoming BLE GPS data
 //! mac = "AA:BB:CC:DD:EE:FF"  # pin a specific device; omit to scan by service
 //!
-//! [ble.names]         # nicknames for known boards, keyed by MAC (they win
-//!                     # over the name a board advertises for itself)
+//! [ble.names]         # nicknames for known boards, keyed by MAC (a name
+//!                     # stored on the board itself wins over these)
 //! "AA:BB:CC:DD:EE:FF" = "Truck"
 //!
 //! [lora]
@@ -277,15 +278,22 @@ impl Default for DistanceSettings {
 pub struct BleSettings {
     /// Connect to the beacon at all.
     pub enabled: bool,
+    /// Draw the connected board on the map at all: its marker, heartbeat,
+    /// path and the distance line to it. Off, the map is the phone and the
+    /// remote nodes only; the link, the recording and the Status page carry
+    /// on regardless, since a board held in the hand next to the phone is
+    /// a marker on top of your own and nothing else.
+    pub show_on_map: bool,
     /// Draw the path of the incoming BLE GPS data on the map.
     pub show_path: bool,
     /// Pin a specific device MAC; `None` scans for the GPS service.
     pub mac: Option<String>,
-    /// Nicknames for known boards, keyed by MAC. Every board runs the same
-    /// firmware and so advertises the same name, which makes a scan a list of
-    /// identical entries; these names are what tells them apart in the picker.
-    /// Keys are normalized by [`normalize_mac`] so lookups ignore case and
-    /// separator style.
+    /// Nicknames for known boards, keyed by MAC. A board that has not been
+    /// named advertises by its address, and a C3 beacon by a name every C3
+    /// shares, so these are what tell such boards apart in the picker. A
+    /// name stored on the board itself wins over the nickname wherever the
+    /// board is labelled. Keys are normalized by [`normalize_mac`] so
+    /// lookups ignore case and separator style.
     pub names: BTreeMap<String, String>,
 }
 
@@ -293,6 +301,7 @@ impl Default for BleSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            show_on_map: true,
             show_path: false,
             mac: None,
             names: BTreeMap::new(),
@@ -587,6 +596,7 @@ struct RawDistance {
 #[derive(Deserialize, Default)]
 struct RawBle {
     enabled: Option<bool>,
+    show_on_map: Option<bool>,
     show_path: Option<bool>,
     mac: Option<String>,
     #[serde(default)]
@@ -869,6 +879,7 @@ impl AppConfig {
         );
         set(&mut doc, "distance", "dotted", self.distance.dotted.into());
         set(&mut doc, "ble", "enabled", self.ble.enabled.into());
+        set(&mut doc, "ble", "show_on_map", self.ble.show_on_map.into());
         set(&mut doc, "ble", "show_path", self.ble.show_path.into());
         // An empty string reads back as "unset", so an unpinned MAC keeps the
         // key in the file rather than dropping the line.
@@ -993,10 +1004,11 @@ impl AppConfig {
              \n\
              [ble]\n\
              enabled = {enabled}       # master switch for the BLE GPS source\n\
+             show_on_map = {show_on_map}   # draw the connected board on the map at all\n\
              show_path = {show_path}    # draw the path of the incoming BLE GPS data\n\
              mac = \"{mac}\"            # pin a specific device; empty scans by service\n\
              \n\
-             [ble.names]          # your names for known boards, keyed by MAC; they win over the board's own\n\
+             [ble.names]          # your names for known boards, keyed by MAC; a name stored on the board wins\n\
              {names}\
              \n\
              [lora]               # remote nodes heard over LoRa and relayed by the connected board\n\
@@ -1042,6 +1054,7 @@ impl AppConfig {
             units = self.distance.units.as_str(),
             dotted = self.distance.dotted,
             enabled = self.ble.enabled,
+            show_on_map = self.ble.show_on_map,
             show_path = self.ble.show_path,
             mac = self.ble.mac.clone().unwrap_or_default(),
             names = names,
@@ -1125,6 +1138,9 @@ impl AppConfig {
         }
         if let Some(v) = raw.ble.enabled {
             config.ble.enabled = v;
+        }
+        if let Some(v) = raw.ble.show_on_map {
+            config.ble.show_on_map = v;
         }
         if let Some(v) = raw.ble.show_path {
             config.ble.show_path = v;
@@ -1269,6 +1285,17 @@ mod tests {
         assert_eq!(back.status_bar.cycle_secs, cfg.status_bar.cycle_secs);
         // The generated `mac = ""` means "scan by service", not a pinned MAC.
         assert_eq!(back.ble.mac, None);
+        assert_eq!(back.ble.show_on_map, cfg.ble.show_on_map);
+    }
+
+    /// The map switch for the connected board reads back from a file, and a
+    /// file that predates it leaves the board drawn.
+    #[test]
+    fn board_on_map_is_read_and_defaults_to_shown() {
+        let cfg = AppConfig::from_toml("[ble]\nshow_on_map = false\n").unwrap();
+        assert!(!cfg.ble.show_on_map);
+        let cfg = AppConfig::from_toml("[ble]\nenabled = true\n").unwrap();
+        assert!(cfg.ble.show_on_map);
     }
 
     #[test]
