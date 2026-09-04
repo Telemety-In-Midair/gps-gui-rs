@@ -15,7 +15,13 @@
 //! - [`menu`] - the menu page and the corner toggle that opens it.
 //! - [`mapdraw`], [`plot`], [`statusbar`] - the hand-painted pictures, kept out
 //!   of the pages that frame them.
+//! - [`adjust`] - the adjuster: pick a thing on any page and move the measures
+//!   behind it, live, then write them to the look sheet.
+//!
+//! The measures themselves are not here: they are the look sheet's
+//! ([`crate::look`]), which [`theme`] reads for the pages.
 
+pub(super) mod adjust;
 pub(super) mod icons;
 mod mapdraw;
 mod menu;
@@ -28,5 +34,6 @@ mod widgets;
 
 /// Size every control off the body text, with a touch-target floor under the
 /// lot. Applied to the style by [`crate::app::MyApp::apply_ui_style`], beside
-/// the text sizes it is derived from.
-pub(super) use theme::apply_spacing;
+/// the text sizes it is derived from. `publish` puts the look up for a frame,
+/// which the app loop does before it draws anything.
+pub(super) use theme::{apply_spacing, publish};

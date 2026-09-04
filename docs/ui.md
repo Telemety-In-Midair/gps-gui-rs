@@ -26,6 +26,8 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
   - `text.rs` - the long-form prose and the hover texts, one module per page.
   - `icons.rs` - the icon set, one function per glyph.
   - `menu.rs` - the menu page and the corner toggle that opens it.
+  - `adjust.rs` - the adjuster: pick a thing on any page and move the
+    measures behind it, live, then write them to the look sheet.
   - `mapdraw.rs`, `plot.rs`, `statusbar.rs` - the hand-painted pictures, kept
     out of the pages that frame them. `plot.rs` reaches nothing in `MyApp`: the
     page hands it rows and it hands back a picture. `statusbar.rs` is the map's
@@ -35,7 +37,8 @@ The page renderers read state that lives outside the UI too: `src/config.rs`
 holds the app's own TOML settings, `src/radio.rs` holds the board's RADIO.TOML
 model the Radio page edits (and the airtime estimate the Radio page prints),
 and `src/logging.rs` holds the CSV recorder behind the Logging page (all three
-below).
+below). `src/look.rs` holds the look sheet: every size and spacing, as a
+fraction, in a text file of its own (see "The look sheet and the adjuster").
 
 The split is deliberate: `app.rs` reads as state + logic, the `ui` modules read
 as "how each page is drawn". Add new state to `MyApp`; add new drawing to a
@@ -55,12 +58,14 @@ graph TD
         Icons["icons.rs<br/>glyphs"]
         Menu["menu.rs"]
         Draw["mapdraw.rs / plot.rs<br/>statusbar.rs<br/>hand-painted"]
+        Adjust["adjust.rs<br/>the adjuster"]
     end
     subgraph model["models"]
         Config["config.rs"]
         Radio["radio.rs"]
         Logging["logging.rs"]
         Points["points.rs"]
+        Look["look.rs<br/>the look sheet"]
     end
 
     Loop --> Pages
@@ -78,6 +83,10 @@ graph TD
     MyApp --> Radio
     MyApp --> Logging
     MyApp --> Points
+    MyApp --> Look
+    Theme -->|reads each frame| Look
+    Loop --> Adjust
+    Adjust --> Theme
 ```
 
 ## The frame loop
@@ -92,6 +101,12 @@ graph TD
 3. After the page, it draws the always-on overlays: the corner page toggle (on
    every page but the map), the download-progress readout, and - on desktop
    only - the manual position bar.
+4. Last of all the adjuster, when it is open, so every probe of the frame is
+   in before its picker searches them.
+
+Between steps 1 and 2 the frame's look is published: `ui::publish` puts the
+`Look` and its `Scale` for this screen into the egui context, which is where
+every `theme` function reads them back from.
 
 Because egui is immediate mode, there is no retained widget tree: each renderer
 re-emits its whole page every frame from current state. To change what shows,
@@ -109,6 +124,7 @@ controlled by `egui::Order`, lowest first:
 - `Foreground` - the controls bar, the bottom status bar, floating popups, the
   manual GPS bar.
 - `Tooltip` - the floating corner page toggle on non-map pages.
+- `Debug` - the adjuster, over everything, in one `Area` (below).
 
 Pointer priority follows the same order: a higher layer under the pointer wins
 the click. This is why the controls sit in `Foreground` over an interactive
@@ -199,46 +215,60 @@ needing a literal pattern.
 
 ## Measures (`theme.rs`)
 
-`ICON_SIZE_*`, `BUTTON_PAD_*_FRAC`, `TOGGLE_PAD_FRAC`, `CORNER_MARGIN_FRAC`,
-`PAGE_MARGIN_FRAC`, `GAP_*` and `FIELD_*_EM` live there with the functions that
-apply them, so a size is decided in one place and a page reads
-`gap(ui, GAP_SECTION)` rather than a point count:
+Nothing in `theme.rs` decides a size any more: the sizes are the look sheet's
+(`src/look.rs`), one `Key` per measure, and `theme.rs` is how a page reads
+them for the current screen. A page reads `gap(ui, Key::GapSection)` rather
+than a point count:
 
-- `icon_size_for(screen)` - icon side length as a fraction of the smaller
-  screen dimension, clamped, so the toolbar stays proportional on phone and
-  desktop.
-- `icon_size_for_row(screen, avail, spacing, count)` - the same size, but capped
+- `px(ctx, key)` - a key in points for this frame. Everything else here is
+  written on it.
+- `gap(ui, key)` - vertical space of one of the sheet's `page.gap` keys.
+- `icon_size(ctx)` - the sheet's `icon.size`, held between a fingertip and
+  the icon cap.
+- `icon_size_for_row(ctx, avail, spacing, count)` - the same size, but capped
   so `count` buttons still fit `avail` points: no button may exceed a `1/count`
   share of the width, counting its padding and the gaps between buttons. The
   controls bar counts its buttons before laying any out and sizes itself with
   this, so adding one shrinks the row instead of pushing it off the edge.
-- `em`, `gap`, `page_margin`, `corner_margin`, `field_width`,
-  `control_height` - the rest of the page measures.
-- `apply_spacing(style)` - the insides of every control, off the body font with
-  a touch-target floor (below).
+- `em`, `page_margin`, `corner_margin`, `bar_margin`, `control_height` - the
+  rest of the page measures, each one key.
+- `apply_spacing(style, look, screen)` - the insides of every control, off the
+  body font with a touch-target floor (below), from the sheet's `control`
+  block.
+- `publish(ctx, look, probing)` - once per frame, before anything is drawn:
+  the look and its `Scale` (the screen, the text height, the icon side) go
+  into the egui context, which is how the functions above reach them without
+  being handed a `Look`. With `probing` on, `probe(ctx, rect, name, keys)`
+  records where each measured thing landed, for the adjuster.
 
 ## Sizing: nothing is a fixed pixel count
 
 Every measure in the UI is a fraction of something that already scales, so a
-page holds its proportions on a phone and on a desktop:
+page holds its proportions on a phone and on a desktop. The sheet's units are
+the whole vocabulary, and there is no unit for points:
 
-- **Fractions of the screen** for the layout frame - the icon size
-  (`icon_size_for`), the page and controls-bar margins (`page_margin`,
-  `controls_margin`), the corner inset (`CORNER_MARGIN_FRAC`), the marker hit
-  radius, and the smallest drag that counts as a region box.
-- **Fractions of the icon size** for anything sitting beside the toolbar: the
-  button padding, the menu page's button sizes, and how far the floating panels
-  hang below the bar.
-- **Text units** (`em(ui)`, the body text height) for everything inside a page:
-  the vertical rhythm (`gap(ui, GAP_*)`, five steps from `GAP_HAIR` to
-  `GAP_SECTION`) and input widths (`field_width`, a fraction of the screen held
-  between `FIELD_MIN_EM` and `FIELD_MAX_EM`). Spacing written this way follows
-  the font rather than fighting it.
+- **Fractions of the screen** (`%` of the smaller side, `%w`, `%h`) for the
+  layout frame - the icon size (`icon.size`), the page and bar margins
+  (`page.margin`, `bar.margin`), the corner inset (`corner.margin`), the
+  smallest drag that counts as a region box (`map.drag_min`), and the widths
+  of the path fields (`settings.path` and friends, each held between two text
+  widths with `min`/`max`).
+- **Fractions of the icon side** (`icon`) for anything sitting beside the
+  toolbar: the button padding (`bar.button.pad`), the menu page's buttons
+  (`menu.row`), and how far the map's popups hang below the bar (`map.*`).
+- **Text heights** (`em`) for everything inside a page: the vertical rhythm
+  (`page.gap`, five steps from `hair` to `section`), the insides of a control
+  (`control.*`) and the narrow inputs (`beacon.name`, `radio.enum_field`).
+  Spacing written this way follows the font rather than fighting it.
+- **Plain ratios** (`x`) for the few things that are a share of something
+  else: the status bar's bar gap, the radio page's glyph as a share of its
+  button.
 
-The one deliberate exception is `TOUCH_MIN` (and `ICON_SIZE_MAX`), which clamps
-in absolute points: it is a touch target, and a fingertip is the same size
-whatever the screen is. It is one number for the whole app - the floor under an
-icon's side and under the height of every button, field, checkbox and dropdown.
+The one deliberate exception is `TOUCH_MIN` (and `ICON_MAX`), which clamps in
+absolute points and lives in code rather than the sheet: it is a touch target,
+and a fingertip is the same size whatever the screen is. It is one number for
+the whole app - the floor under an icon's side and under the height of every
+button, field, checkbox and dropdown.
 
 ### The insides of a control (`apply_spacing`)
 
@@ -253,11 +283,12 @@ alone that gives two problems:
   control height are not fonts, so they stayed put: doubling the text size gave
   big letters in the same cramped rows, beside a checkbox that had not moved.
 
-`theme::apply_spacing` rewrites that set off the body font size with `TOUCH_MIN`
-as the floor, and `MyApp::apply_ui_style` calls it alongside the text styles it
-is derived from - so it is re-applied exactly when `text_scale` changes. Being
-on the style rather than per page, it reaches the dropdown popups, the color
-pickers and the map's popups too.
+`theme::apply_spacing` rewrites that set from the sheet's `control` block, off
+the body font size with `TOUCH_MIN` as the floor, and `MyApp::apply_ui_style`
+calls it alongside the text styles it is derived from - so it is re-applied
+exactly when `text_scale` or the look changes. Being on the style rather than
+per page, it reaches the dropdown popups, the color pickers and the map's popups
+too.
 
 Two things follow from it that are easy to miss when adding a page:
 
@@ -280,6 +311,62 @@ text is not larger glyphs in the same cramped rows. What it does not touch is an
 the screen or the icon: the toolbar, the menu page's buttons (sized to the icon,
 text included, so a scaled label would not fit them) and the map overlays, whose
 sizes are `[sizes]` and are set separately.
+
+## The look sheet and the adjuster (`look.rs` + `adjust.rs`)
+
+The pages say *what* is on them and the code says what it does; the look sheet
+says how big. It is a small text file of measures and nothing else - no
+conditions, no bindings - so the in-app adjuster can read and write it and a
+hand edit can too:
+
+```text
+page
+    margin  2.5%        # of the smaller screen side
+    gap
+        item   0.5em    # of the body text height
+bar
+    gap     0.15icon    # of the toolbar icon side
+settings
+    path    50%w min 8em max 22em
+```
+
+Indentation nests; a dotted name (`page.gap.item`) is the same as nesting.
+Comments run from `#`. A missing key keeps its default, an unknown one is
+reported and skipped, a key set twice is an error, and a measure may be held
+in a range in other units. The file is `gps-gui.look` beside the config (the
+one directory writable on both platforms); `cargo run --example print-look`
+prints the documented default sheet.
+
+In code, `Key` is the enum of every measure with its path, default and note
+(`look.rs` declares them in one place); `Look` is the full set, `Measure` one
+value, and `Scale` the screen, text height and icon side a frame is measured
+against. `Look::save` edits an existing sheet in place - only the values that
+differ are rewritten, so comments and alignment survive - and generates a
+documented one where there is none.
+
+The adjuster (Settings, "Adjust the look", or `cargo run -- --adjust` on
+desktop) floats over every page:
+
+- **Pick** arms the picker. The next tap picks the smallest thing under it; a
+  hold (or a right click) lists everything under the finger, the page
+  included, so a gap or a margin can be picked from behind whatever sits on
+  it. A `Probe` is what it searches: while it is open, the theme functions
+  and the vocabulary record a rect, a name and the keys behind each thing
+  they draw, and the picker sorts the ones under the point smallest first.
+- The docked panel then shows the picked element's measures as sliders, each
+  in its own unit with a way to change the unit (which converts the number so
+  the size stays put), a reset per measure, and the app redraws with every
+  move: an edit bumps the look's generation, which is what makes
+  `apply_ui_style` rewrite the control spacing.
+- **Save** writes the sheet in place, **Reload** reads it back, **Defaults**
+  drops every measure to what the app ships with.
+
+Everything it draws lives in one `Area` at the `Debug` order: the full-screen
+catcher that takes the pointer away from the pages while picking, then the
+list, then the panel, in that order so the later ones are what the pointer
+meets. They cannot be separate areas: egui moves an area to the top of its
+order on every click, so a catcher and a panel side by side would swap places
+under the finger.
 
 ## Pages and navigation
 

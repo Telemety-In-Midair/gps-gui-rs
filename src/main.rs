@@ -24,7 +24,7 @@ fn main() -> eframe::Result<()> {
             let cache_dir = Some(std::path::PathBuf::from(".cache"));
             // No platform export either: the log is written to a path typed
             // on the Logging page, which is already somewhere reachable here.
-            Ok(Box::new(MyApp::new(
+            let mut app = MyApp::new(
                 cc.egui_ctx.clone(),
                 None,
                 cache_dir,
@@ -32,7 +32,13 @@ fn main() -> eframe::Result<()> {
                 None,
                 ble,
                 None,
-            )))
+            );
+            // `--adjust` opens straight into the look adjuster, for tuning
+            // the sheet without a trip through the menu each launch.
+            if std::env::args().any(|arg| arg == "--adjust") {
+                app.open_adjuster();
+            }
+            Ok(Box::new(app))
         }),
     )
 }

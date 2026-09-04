@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 use crate::app::SafeArea;
 use crate::config::UiSettings;
 
-use super::theme::{control_height, em, gap, page_margin, GAP_ITEM};
+use super::theme::{control_height, em, gap, page_margin, probe, px, Key};
 
 /// A square icon button. The icons are white SVGs tinted to the current text
 /// color so they follow the theme.
@@ -68,7 +68,10 @@ pub(super) fn content_page(
 ) {
     // `Margin` counts in whole points, so the fractions are rounded once here
     // and the layout inside uses those same rounded values.
-    let margin = page_margin(screen) as i8;
+    let margin = page_margin(ctx) as i8;
+    // The whole screen, so a tap on empty page is a tap on the page: the
+    // picker takes the smallest thing under a point, and this is the largest.
+    probe(ctx, screen, "Page", &[Key::PageMargin]);
     // The bottom inset is part of the frame's margin rather than space added
     // after the content, and that is the whole point of it: a `ScrollArea`
     // sizes its viewport to the height it is given, so the inset has to come
@@ -105,7 +108,7 @@ pub(super) fn content_page(
                     // full screen for the next frame to lay out against.
                     ui.set_min_height(screen.height() - margin - f32::from(foot));
                     ui.add_space(safe.top);
-                    gap(ui, GAP_ITEM);
+                    gap(ui, Key::GapItem);
                     add(ui);
                 });
         });
@@ -113,7 +116,7 @@ pub(super) fn content_page(
 
 /// A floating popup `Frame` in its own `Area`, used for the transient overlays
 /// (selection hint, download confirm/progress, marker info bubble, manual
-/// position bar).
+/// position bar). Returns where it landed, for a probe.
 pub(super) fn floating(
     ctx: &egui::Context,
     id: &str,
@@ -122,7 +125,7 @@ pub(super) fn floating(
     pivot: egui::Align2,
     constrain: bool,
     add: impl FnOnce(&mut egui::Ui),
-) {
+) -> egui::Rect {
     egui::Area::new(egui::Id::new(id))
         .order(order)
         .fixed_pos(pos)
@@ -131,7 +134,9 @@ pub(super) fn floating(
         .constrain(constrain)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| add(ui));
-        });
+        })
+        .response
+        .rect
 }
 
 /// A centered confirm popup: a question, then the two buttons that answer it.
@@ -206,38 +211,48 @@ pub(super) fn drag<N: egui::emath::Numeric>(
     speed: f64,
     range: RangeInclusive<N>,
 ) -> egui::Response {
-    ui.add(egui::DragValue::new(value).speed(speed).range(range))
+    let resp = ui.add(egui::DragValue::new(value).speed(speed).range(range));
+    probe(
+        ui.ctx(),
+        resp.rect,
+        "Number",
+        &[Key::ControlWidth, Key::ControlHeight],
+    );
+    resp
 }
 
-/// Side padding inside a text input, in body-text heights. The vertical
-/// padding is not a constant: it is whatever brings the field up to the height
-/// of the button beside it (see below).
-const FIELD_PAD_X_EM: f32 = 0.3;
-
-/// A single-line text input `width` points wide, with `hint` shown while it is
-/// empty. Pair with [`submitted`] where Enter should act as the button beside
-/// it.
+/// A single-line text input as wide as the sheet's `width` key says, with
+/// `hint` shown while it is empty. Pair with [`submitted`] where Enter should
+/// act as the button beside it.
 ///
 /// A `TextEdit` is the one control egui sizes to its *text* rather than to
 /// `interact_size`, so left alone it comes out around half the height of the
 /// button next to it - which looks broken and is half as easy to hit. The
 /// vertical margin here is the difference, so a field and its button are one
-/// row of one height.
+/// row of one height; the side padding is the sheet's.
 pub(super) fn text_field(
     ui: &mut egui::Ui,
     text: &mut String,
     hint: &str,
-    width: f32,
+    width: Key,
 ) -> egui::Response {
     let row = em(ui);
     let pad_y = ((control_height(ui) - row) / 2.0).max(0.0) as i8;
-    let pad_x = (row * FIELD_PAD_X_EM) as i8;
-    ui.add(
+    let pad_x = px(ui.ctx(), Key::FieldPadX) as i8;
+    let desired = px(ui.ctx(), width);
+    let resp = ui.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
-            .desired_width(width)
+            .desired_width(desired)
             .margin(egui::Margin::symmetric(pad_x, pad_y)),
-    )
+    );
+    probe(
+        ui.ctx(),
+        resp.rect,
+        "Text field",
+        &[width, Key::FieldPadX, Key::ControlHeight],
+    );
+    resp
 }
 
 /// Whether a text field was just committed with Enter, so a page can treat it
@@ -282,7 +297,7 @@ macro_rules! heading {
     };
     ($ui:expr, $title:expr, $hint:expr $(,)?) => {{
         $ui.heading($title);
-        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::GAP_TIGHT);
+        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapTight);
         $crate::app::ui::widgets::hint!($ui, $hint);
     }};
 }
@@ -294,20 +309,20 @@ macro_rules! heading {
 /// pages whose groups are big enough that space alone stops separating them.
 macro_rules! section {
     ($ui:expr, sep $title:expr $(, $hint:expr)? $(,)?) => {{
-        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::GAP_SECTION);
+        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapSection);
         $ui.separator();
-        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::GAP_ITEM);
+        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapItem);
         $ui.strong($title);
         $(
-            $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::GAP_TIGHT);
+            $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapTight);
             $crate::app::ui::widgets::hint!($ui, $hint);
         )?
     }};
     ($ui:expr, $title:expr $(, $hint:expr)? $(,)?) => {{
-        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::GAP_SECTION);
+        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapSection);
         $ui.strong($title);
         $(
-            $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::GAP_TIGHT);
+            $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapTight);
             $crate::app::ui::widgets::hint!($ui, $hint);
         )?
     }};
@@ -333,6 +348,16 @@ macro_rules! button {
         // it is not given rather than needing a mutable default.
         let live = true $( && $enabled )?;
         let resp = $ui.add_enabled(live, egui::Button::new($label));
+        $crate::app::ui::theme::probe(
+            $ui.ctx(),
+            resp.rect,
+            "Button",
+            &[
+                $crate::app::ui::theme::Key::ControlPadX,
+                $crate::app::ui::theme::Key::ControlPadY,
+                $crate::app::ui::theme::Key::ControlHeight,
+            ],
+        );
         $( let resp = resp.on_hover_text($hover); )?
         $( let resp = resp.on_disabled_hover_text($disabled); )?
         resp
@@ -344,6 +369,16 @@ macro_rules! button {
 macro_rules! check {
     ($ui:expr, $value:expr, $label:expr $(, hover: $hover:expr)? $(,)?) => {{
         let resp = $ui.checkbox(&mut $value, $label);
+        $crate::app::ui::theme::probe(
+            $ui.ctx(),
+            resp.rect,
+            "Checkbox",
+            &[
+                $crate::app::ui::theme::Key::ControlCheckSize,
+                $crate::app::ui::theme::Key::ControlCheckMark,
+                $crate::app::ui::theme::Key::ControlHeight,
+            ],
+        );
         $( let resp = resp.on_hover_text($hover); )?
         resp
     }};

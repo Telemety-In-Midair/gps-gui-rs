@@ -15,29 +15,24 @@ use crate::config::MarkerColors;
 use crate::logging::{iso8601, LogAxis, LogRow, LogSource, LogStat};
 
 use super::text::logging as text;
-use super::theme::em;
-
-/// Plot height as a fraction of the screen height. Written against the screen
-/// rather than the text because it is a picture: it should keep its shape when
-/// the page text is scaled, not grow into the whole page.
-const PLOT_H_FRAC: f32 = 0.34;
-
-/// Padding inside the plot frame for the axis labels, in text heights - that
-/// side of it *is* text, so it follows the text size.
-const PAD_LEFT_EM: f32 = 3.4;
-const PAD_BOTTOM_EM: f32 = 1.6;
-const PAD_TOP_EM: f32 = 0.6;
-const PAD_RIGHT_EM: f32 = 1.2;
+use super::theme::{em, probe, px, Key};
 
 /// Grid divisions on each axis. Few enough that the labels never collide on a
 /// phone, which is the narrowest the plot ever gets.
 const X_TICKS: usize = 4;
 const Y_TICKS: usize = 4;
 
-/// Scatter dot radius and line width, as fractions of a text height, so the
-/// marks stay in proportion with the labels around them.
-const DOT_R_EM: f32 = 0.16;
-const LINE_W_EM: f32 = 0.12;
+/// What shapes the plot, for the adjuster: its height, the room its labels
+/// need, and the marks.
+const PLOT_KEYS: [Key; 7] = [
+    Key::PlotHeight,
+    Key::PlotPadLeft,
+    Key::PlotPadBottom,
+    Key::PlotPadTop,
+    Key::PlotPadRight,
+    Key::PlotDot,
+    Key::PlotLine,
+];
 
 /// One drawn series: a source, its color, and the points that had both axes.
 pub(super) struct Series {
@@ -93,18 +88,21 @@ impl Series {
 /// different axes.
 pub(super) fn draw(
     ui: &mut egui::Ui,
-    screen: egui::Rect,
     x_axis: LogAxis,
     y_axis: LogStat,
     series: &[Series],
     anything_recorded: bool,
 ) {
     let em = em(ui);
-    let height = screen.height() * PLOT_H_FRAC;
+    let ctx = ui.ctx().clone();
+    let height = px(&ctx, Key::PlotHeight);
+    let dot_r = px(&ctx, Key::PlotDot);
+    let line_w = px(&ctx, Key::PlotLine);
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
     );
+    probe(&ctx, rect, "Graph", &PLOT_KEYS);
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
     let frame_stroke = visuals.widgets.noninteractive.bg_stroke;
@@ -118,8 +116,8 @@ pub(super) fn draw(
 
     // The area the data itself occupies, inside the room the labels need.
     let plot = egui::Rect::from_min_max(
-        rect.min + egui::vec2(em * PAD_LEFT_EM, em * PAD_TOP_EM),
-        rect.max - egui::vec2(em * PAD_RIGHT_EM, em * PAD_BOTTOM_EM),
+        rect.min + egui::vec2(px(&ctx, Key::PlotPadLeft), px(&ctx, Key::PlotPadTop)),
+        rect.max - egui::vec2(px(&ctx, Key::PlotPadRight), px(&ctx, Key::PlotPadBottom)),
     );
     if plot.width() <= 0.0 || plot.height() <= 0.0 {
         return;
@@ -202,17 +200,17 @@ pub(super) fn draw(
                 if points.len() > 1 {
                     painter.add(egui::Shape::line(
                         points,
-                        egui::Stroke::new(em * LINE_W_EM, s.color),
+                        egui::Stroke::new(line_w, s.color),
                     ));
                 } else if let Some(&p) = points.first() {
-                    painter.circle_filled(p, em * DOT_R_EM, s.color);
+                    painter.circle_filled(p, dot_r, s.color);
                 }
             }
             // Against another stat the order is meaningless, so joining them
             // up would draw a shape that is not in the data.
             LogAxis::Stat(_) => {
                 for p in points {
-                    painter.circle_filled(p, em * DOT_R_EM, s.color);
+                    painter.circle_filled(p, dot_r, s.color);
                 }
             }
         }

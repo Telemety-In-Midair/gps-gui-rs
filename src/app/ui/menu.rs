@@ -6,23 +6,22 @@
 
 use super::icons;
 use super::text::map as text;
-use super::theme::{corner_margin, em, icon_size_for, page_margin, GAP_ITEM, TOGGLE_PAD_FRAC};
+use super::theme::{corner_margin, icon_size, page_margin, probe, px, Key};
 use super::widgets::content_page;
 use crate::app::{MyApp, Page};
 
-/// Menu-page measures, as fractions of the icon size (which is itself a
-/// fraction of the screen, see [`icon_size_for`]): the height of a button, its
-/// width, the gap between two of them, and the text size inside one.
-///
-/// Written against the icon rather than the body text because these are touch
-/// targets first - the point of the page is that they are comfortable to hit.
-const ROW_H_FRAC: f32 = 1.3;
-const ROW_W_FRAC: f32 = 5.0;
-const ROW_GAP_FRAC: f32 = 0.3;
-const TEXT_FRAC: f32 = 0.45;
-
 /// How long the hamburger takes to cross-fade into the X, in seconds.
 const TOGGLE_FADE_S: f32 = 0.15;
+
+/// What shapes a button on the menu page, for the adjuster. The sheet writes
+/// them against the icon rather than the body text because these are touch
+/// targets first - the point of the page is that they are comfortable to hit.
+const MENU_BUTTON_KEYS: [Key; 4] = [
+    Key::MenuRowWidth,
+    Key::MenuRowHeight,
+    Key::MenuRowGap,
+    Key::MenuText,
+];
 
 /// Every page in menu order, each with its label and icon. Drives the menu
 /// page. [`Page::Menu`] is deliberately absent: it is the page doing the
@@ -94,11 +93,11 @@ impl MyApp {
     /// now) is what returns there.
     pub(crate) fn menu_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
-        let margin = page_margin(screen);
-        let icon = icon_size_for(screen);
-        let row = egui::vec2(icon * ROW_W_FRAC, icon * ROW_H_FRAC);
-        let row_gap = icon * ROW_GAP_FRAC;
-        let text_size = icon * TEXT_FRAC;
+        let margin = page_margin(ctx);
+        let row = egui::vec2(px(ctx, Key::MenuRowWidth), px(ctx, Key::MenuRowHeight));
+        let row_gap = px(ctx, Key::MenuRowGap);
+        let text_size = px(ctx, Key::MenuText);
+        let item_gap = px(ctx, Key::GapItem);
         let items = page_items();
         content_page(ctx, "menu", screen, safe, |ui| {
             // Center the column vertically by hand: the page lives in an `Area`
@@ -108,7 +107,7 @@ impl MyApp {
             // down under the top one.
             let count = items.len() as f32;
             let content = count * row.y + (count - 1.0) * row_gap;
-            let used = 2.0 * margin + safe.top + safe.bottom + em(ui) * GAP_ITEM;
+            let used = 2.0 * margin + safe.top + safe.bottom + item_gap;
             ui.add_space(((screen.height() - used - content) / 2.0).max(0.0));
 
             // The button font, which the glyph beside it is sized to as well,
@@ -130,7 +129,9 @@ impl MyApp {
                     let button = egui::Button::image_and_text(image, label)
                         .selected(selected)
                         .min_size(row);
-                    if ui.add(button).clicked() {
+                    let resp = ui.add(button);
+                    probe(ui.ctx(), resp.rect, "Menu button", &MENU_BUTTON_KEYS);
+                    if resp.clicked() {
                         self.page = page;
                     }
                 }
@@ -141,12 +142,15 @@ impl MyApp {
     /// Floating menu button in the top-right corner. Used on every page but the
     /// map, where it lives at the right end of the controls bar instead.
     pub(crate) fn page_toggle(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let size = icon_size_for(screen);
+        let size = icon_size(ctx);
         let top = self.top_inset(ctx);
         // Corner inset as a fraction of the screen, so the button stays clear
         // of the edge on any size (a fixed few points crowds a dense screen).
-        let margin = corner_margin(screen);
-        egui::Area::new(egui::Id::new("page_toggle"))
+        let margin = corner_margin(ctx);
+        // Square padding, not the toolbar's wide-and-short pair: this button is
+        // on its own, so there is nothing for the extra width to space it from.
+        let pad = px(ctx, Key::CornerPad);
+        let area = egui::Area::new(egui::Id::new("page_toggle"))
             // Float above the (Background) page content it sits over.
             .order(egui::Order::Tooltip)
             .fixed_pos(egui::Pos2::new(screen.right() - margin, top + margin))
@@ -154,11 +158,14 @@ impl MyApp {
             .movable(false)
             .constrain(false)
             .show(ctx, |ui| {
-                // Square padding, not the toolbar's wide-and-short pair: this
-                // button is on its own, so there is nothing for the extra width
-                // to space it from.
-                ui.spacing_mut().button_padding = egui::Vec2::splat(size * TOGGLE_PAD_FRAC);
+                ui.spacing_mut().button_padding = egui::Vec2::splat(pad);
                 self.page_menu(ui, size);
             });
+        probe(
+            ctx,
+            area.response.rect,
+            "Corner toggle",
+            &[Key::CornerMargin, Key::CornerPad, Key::IconSize],
+        );
     }
 }

@@ -2,22 +2,18 @@
 //! GPS source is wired up.
 
 use crate::app::ui::text::manual as text;
-use crate::app::ui::theme::{corner_margin, field_width};
+use crate::app::ui::theme::{corner_margin, Key};
 use crate::app::ui::widgets::{floating, submitted, text_field};
 use crate::app::MyApp;
 use crate::gps::GpsFix;
 use crate::points::parse_lat_lon;
-
-/// The entry field is half the bar, leaving its label and the Set button
-/// beside it.
-const FIELD_FRAC: f32 = 0.5;
 
 impl MyApp {
     /// Bottom-anchored bar for entering a position by hand when no live GPS
     /// source is wired up (desktop). Accepts "lat, lon" or "lat lon"; a valid
     /// entry feeds the same pipeline a real fix would and recenters the map.
     pub(crate) fn manual_gps_bar(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let margin = corner_margin(screen);
+        let margin = corner_margin(ctx);
         // The status bar owns the foot of the screen when it is on, so this
         // sits on top of it rather than under it.
         let foot = self.bottom_overlay_inset(ctx);
@@ -31,8 +27,8 @@ impl MyApp {
             |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Position:");
-                    let width = field_width(ui, screen, FIELD_FRAC);
-                    let resp = text_field(ui, &mut self.manual_gps_text, "lat, lon", width);
+                    let resp =
+                        text_field(ui, &mut self.manual_gps_text, "lat, lon", Key::ManualField);
                     let entered = submitted(ui, &resp);
                     if ui.button("Set").clicked() || entered {
                         match parse_lat_lon(&self.manual_gps_text) {

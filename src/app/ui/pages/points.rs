@@ -5,19 +5,10 @@ use std::time::SystemTime;
 use walkers::Position;
 
 use crate::app::ui::text::points as text;
-use crate::app::ui::theme::{
-    control_height, em, field_width, gap, page_margin, GAP_BLOCK, GAP_HAIR, GAP_ITEM,
-};
+use crate::app::ui::theme::{control_height, gap, page_margin, probe, px, Key};
 use crate::app::ui::widgets::{content_page, heading, text_field};
 use crate::app::{MyApp, Page, PointFilter};
 use crate::points::{age_text, PointSource};
-
-/// The search box is most of its row, leaving the Clear button beside it.
-const SEARCH_FRAC: f32 = 0.6;
-
-/// The shortest the list may be squeezed to, in text heights: below this the
-/// page would show filters over nothing.
-const LIST_MIN_EM: f32 = 4.0;
 
 /// The narrowest the source column is drawn, in characters: room for the
 /// generic names, so the column does not jump when the first board is named.
@@ -28,16 +19,20 @@ impl MyApp {
         let safe = self.safe_area(ctx);
         content_page(ctx, "points", screen, safe, |ui| {
             heading!(ui, "GPS points");
-            gap(ui, GAP_BLOCK);
+            gap(ui, Key::GapBlock);
 
             ui.horizontal_wrapped(|ui| {
-                let width = field_width(ui, screen, SEARCH_FRAC);
-                text_field(ui, &mut self.points_search, text::SEARCH_HINT, width);
+                text_field(
+                    ui,
+                    &mut self.points_search,
+                    text::SEARCH_HINT,
+                    Key::PointsSearch,
+                );
                 if ui.button("Clear").clicked() {
                     self.points_search.clear();
                 }
             });
-            gap(ui, GAP_HAIR);
+            gap(ui, Key::GapHair);
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Source:");
@@ -55,12 +50,16 @@ impl MyApp {
                     ui.selectable_value(&mut self.points_filter, filter, label);
                 }
             });
-            gap(ui, GAP_ITEM);
+            gap(ui, Key::GapItem);
 
             let query = self.points_search.trim().to_lowercase();
             let rows = self.visible_points(self.points_filter, &query);
-            ui.label(format!("{} of {} points", rows.len(), self.recorded_points()));
-            gap(ui, GAP_HAIR);
+            ui.label(format!(
+                "{} of {} points",
+                rows.len(),
+                self.recorded_points()
+            ));
+            gap(ui, Key::GapHair);
 
             let now = SystemTime::now();
             // The source column is as wide as the longest name any row could
@@ -84,10 +83,10 @@ impl MyApp {
                 .max(control_height(ui));
             // Everything left below the filters, less the page's own bottom
             // margin, and never so short that no row fits.
-            let floor = screen.bottom() - safe.bottom - page_margin(screen);
-            let list_height = (floor - ui.cursor().min.y).max(em(ui) * LIST_MIN_EM);
+            let floor = screen.bottom() - safe.bottom - page_margin(ctx);
+            let list_height = (floor - ui.cursor().min.y).max(px(ctx, Key::PointsListMin));
             let mut goto: Option<Position> = None;
-            egui::ScrollArea::vertical()
+            let list = egui::ScrollArea::vertical()
                 .max_height(list_height)
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, rows.len(), |ui, range| {
@@ -106,6 +105,12 @@ impl MyApp {
                         }
                     }
                 });
+            probe(
+                ctx,
+                list.inner_rect,
+                "Points list",
+                &[Key::PointsListMin, Key::ControlHeight],
+            );
             if let Some(pos) = goto {
                 self.map_memory.center_at(pos);
                 self.page = Page::Map;

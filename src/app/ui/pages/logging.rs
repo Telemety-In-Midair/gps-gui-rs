@@ -10,9 +10,7 @@ use walkers::Position;
 
 use crate::app::ui::plot::{self, Series};
 use crate::app::ui::text::logging as text;
-use crate::app::ui::theme::{
-    field_width, gap, GAP_BLOCK, GAP_HAIR, GAP_ITEM, GAP_SECTION, GAP_TIGHT,
-};
+use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{
     button, check, content_page, feedback_label, heading, hint, text_field,
 };
@@ -20,40 +18,34 @@ use crate::app::MyApp;
 use crate::logging::{LogAxis, LogSource, LogStat};
 use crate::points::parse_lat_lon;
 
-/// The file path takes half the row, the reference coordinate a little less:
-/// the reference sits ahead of three buttons rather than two.
-const PATH_FRAC: f32 = 0.5;
-const REFERENCE_FRAC: f32 = 0.45;
-
 impl MyApp {
     pub(crate) fn logging_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "logging", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Logging", text::INTRO);
-                gap(ui, GAP_BLOCK);
-                self.log_controls_ui(ui, screen);
-                gap(ui, GAP_SECTION);
-                self.log_reference_ui(ui, screen);
-                gap(ui, GAP_SECTION);
-                self.log_graph_ui(ui, screen);
+                gap(ui, Key::GapBlock);
+                self.log_controls_ui(ui);
+                gap(ui, Key::GapSection);
+                self.log_reference_ui(ui);
+                gap(ui, Key::GapSection);
+                self.log_graph_ui(ui);
             });
         });
     }
 
     /// The file, the Start/Stop switch, and what the run has written so far.
-    fn log_controls_ui(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn log_controls_ui(&mut self, ui: &mut egui::Ui) {
         let recording = self.logger.is_recording();
-        let path_width = field_width(ui, screen, PATH_FRAC);
 
         ui.strong("Log file (CSV)");
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         ui.horizontal_wrapped(|ui| {
             // Locked while recording: the open file is what the path names,
             // and letting it be retyped mid-run would leave the two disagreeing
             // about where the rows are going.
             ui.add_enabled_ui(!recording, |ui| {
-                text_field(ui, &mut self.log_path, "/path/to/log.csv", path_width);
+                text_field(ui, &mut self.log_path, "/path/to/log.csv", Key::LoggingPath);
             });
             if recording {
                 if button!(ui, "Stop", hover: text::STOP_HOVER).clicked() {
@@ -64,13 +56,13 @@ impl MyApp {
             }
         });
 
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         // An existing file is appended to, which is what makes a stop a pause
         // rather than the end of a run - and is worth saying, since the usual
         // meaning of picking a file to write is that it gets replaced.
         hint!(ui, text::APPEND_NOTE);
 
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         ui.horizontal_wrapped(|ui| {
             check!(ui, self.config.log.auto_start, "Start recording at launch");
             if button!(ui, "Save settings", hover: text::SAVE_HOVER).clicked() {
@@ -81,10 +73,10 @@ impl MyApp {
                 self.save_config();
             }
         });
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         feedback_label(ui, self.config.ui, &self.config_feedback);
 
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         let rows = self.logger.rows().len();
         ui.label(
             egui::RichText::new(text::state(
@@ -103,7 +95,7 @@ impl MyApp {
             hint!(ui, text::dropped(self.logger.dropped()));
         }
 
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         ui.horizontal_wrapped(|ui| {
             let hover = if self.export.is_some() {
                 text::EXPORT_HOVER_PHONE
@@ -123,24 +115,28 @@ impl MyApp {
                 self.logger.clear_rows();
             }
         });
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         feedback_label(ui, self.config.ui, &self.log_feedback);
     }
 
     /// The fixed coordinate the `dist_ref_m` column is measured against.
-    fn log_reference_ui(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn log_reference_ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("Reference point");
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         hint!(ui, text::REFERENCE);
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
 
-        let width = field_width(ui, screen, REFERENCE_FRAC);
         // Every button here sets the same thing, so they all report through
         // one slot applied after the row: `Some(point)` sets it, `Some(None)`
         // clears it, `None` means nothing was pressed.
         let mut commit: Option<Option<(f64, f64)>> = None;
         ui.horizontal_wrapped(|ui| {
-            let resp = text_field(ui, &mut self.log_ref_text, "lat, lon", width);
+            let resp = text_field(
+                ui,
+                &mut self.log_ref_text,
+                "lat, lon",
+                Key::LoggingReference,
+            );
             // Committed on blur, like the board nicknames: a coordinate is not
             // valid until it is fully typed, and parsing per keystroke would
             // flag every half of one as bad.
@@ -185,9 +181,9 @@ impl MyApp {
 
     /// The graph: the two axis pickers, the plot, and the legend that doubles
     /// as the per-source filter.
-    fn log_graph_ui(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn log_graph_ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("Graph");
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         ui.horizontal_wrapped(|ui| {
             ui.label("Plot");
             egui::ComboBox::from_id_salt("log_y")
@@ -208,7 +204,7 @@ impl MyApp {
                 });
         });
 
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
         let series = Series::collect(
             self.logger.rows(),
             self.log_x,
@@ -218,13 +214,12 @@ impl MyApp {
         );
         plot::draw(
             ui,
-            screen,
             self.log_x,
             self.log_y,
             &series,
             !self.logger.rows().is_empty(),
         );
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
         self.log_legend_ui(ui, &series);
     }
 

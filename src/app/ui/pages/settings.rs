@@ -9,11 +9,12 @@
 //! a change takes effect on the map immediately; Save is what makes it outlast
 //! the session.
 
+use crate::app::ui::adjust::Adjust;
 use crate::app::ui::text::settings as text;
-use crate::app::ui::theme::{field_width, gap, GAP_BLOCK, GAP_HAIR, GAP_ITEM, GAP_TIGHT};
+use crate::app::ui::theme::{gap, probe, px, Key};
 use crate::app::ui::widgets::{
-    button, check, content_page, drag, feedback_label, grid, heading, hint, row, section, submitted,
-    text_field,
+    button, check, content_page, drag, feedback_label, grid, heading, hint, row, section,
+    submitted, text_field,
 };
 use crate::app::{MyApp, Page, RegionSelect};
 use crate::config::{
@@ -21,18 +22,7 @@ use crate::config::{
     TEXT_SCALE_MAX, TEXT_SCALE_MIN,
 };
 
-/// The path field is half the screen, leaving room for its label and the
-/// buttons beside it.
-const PATH_FRAC: f32 = 0.5;
-
-/// Width of the text-size slider, as a fraction of the screen width, and the
-/// step it moves in.
-///
-/// A fraction of the screen rather than of the text, unlike every other input
-/// on the page: this is the one control whose own text grows while it is
-/// dragged, and a width in text heights would walk out from under the finger
-/// setting it.
-const TEXT_SCALE_SLIDER_FRAC: f32 = 0.45;
+/// The step the text-size slider moves in.
 const TEXT_SCALE_STEP: f64 = 0.05;
 
 /// Range and drag speed for the overlay sizes, in points. The loader rejects a
@@ -76,20 +66,23 @@ impl MyApp {
     pub(crate) fn settings_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "settings", screen, safe, |ui| {
-            let path_width = field_width(ui, screen, PATH_FRAC);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "App settings", text::INTRO);
-                gap(ui, GAP_BLOCK);
+                gap(ui, Key::GapBlock);
 
                 ui.label("Config file (TOML):");
                 ui.horizontal_wrapped(|ui| {
-                    let resp =
-                        text_field(ui, &mut self.config_path, "/path/to/config.toml", path_width);
+                    let resp = text_field(
+                        ui,
+                        &mut self.config_path,
+                        "/path/to/config.toml",
+                        Key::SettingsPath,
+                    );
                     if ui.button("Load").clicked() || submitted(ui, &resp) {
                         self.load_config();
                     }
                 });
-                gap(ui, GAP_ITEM);
+                gap(ui, Key::GapItem);
                 ui.horizontal_wrapped(|ui| {
                     if button!(ui, "Save", hover: text::SAVE_HOVER).clicked() {
                         self.save_config();
@@ -98,10 +91,11 @@ impl MyApp {
                         self.reset_config();
                     }
                 });
-                gap(ui, GAP_ITEM);
+                gap(ui, Key::GapItem);
                 feedback_label(ui, self.config.ui, &self.config_feedback);
 
-                self.text_size_ui(ui, screen);
+                self.text_size_ui(ui);
+                self.look_ui(ui);
                 self.colors_ui(ui);
                 self.overlays_ui(ui);
                 self.compass_ui(ui);
@@ -112,12 +106,12 @@ impl MyApp {
         });
     }
 
-    fn text_size_ui(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn text_size_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Text size", text::TEXT_SCALE);
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().slider_width = screen.width() * TEXT_SCALE_SLIDER_FRAC;
-            ui.add(
+            ui.spacing_mut().slider_width = px(ui.ctx(), Key::SettingsSlider);
+            let slider = ui.add(
                 egui::Slider::new(
                     &mut self.config.ui.text_scale,
                     TEXT_SCALE_MIN..=TEXT_SCALE_MAX,
@@ -126,6 +120,7 @@ impl MyApp {
                 .fixed_decimals(2)
                 .suffix("x"),
             );
+            probe(ui.ctx(), slider.rect, "Slider", &[Key::SettingsSlider]);
             // Compared with a tolerance of half a step: the slider lands on
             // multiples of the step, which need not be exactly 1.0.
             let scaled = (self.config.ui.text_scale - 1.0).abs() > TEXT_SCALE_STEP as f32 / 2.0;
@@ -139,6 +134,46 @@ impl MyApp {
                 self.config.ui.text_scale = 1.0;
             }
         });
+    }
+
+    /// The look sheet: every size and spacing on the pages, and the adjuster
+    /// that edits it live.
+    fn look_ui(&mut self, ui: &mut egui::Ui) {
+        section!(ui, "Look", text::LOOK);
+        gap(ui, Key::GapTight);
+        ui.horizontal_wrapped(|ui| {
+            let resp = text_field(
+                ui,
+                &mut self.look_path,
+                "/path/to/gps-gui.look",
+                Key::SettingsPath,
+            );
+            if ui.button("Load").clicked() || submitted(ui, &resp) {
+                self.load_look();
+            }
+        });
+        gap(ui, Key::GapItem);
+        ui.horizontal_wrapped(|ui| {
+            if button!(ui, "Save", hover: text::LOOK_SAVE_HOVER).clicked() {
+                self.save_look();
+            }
+            if button!(ui, "Reset to defaults", hover: text::LOOK_RESET_HOVER).clicked() {
+                self.reset_look();
+            }
+            let open = self.adjust.is_some();
+            let adjust = button!(
+                ui,
+                "Adjust the look",
+                enabled: !open,
+                hover: text::ADJUST_HOVER,
+                disabled: text::ADJUST_OPEN,
+            );
+            if adjust.clicked() {
+                self.adjust = Some(Adjust::new());
+            }
+        });
+        gap(ui, Key::GapItem);
+        feedback_label(ui, self.config.ui, &self.look_feedback);
     }
 
     /// The marker colors, the few page colors that carry meaning, and the
@@ -158,7 +193,7 @@ impl MyApp {
             "no-target pulse" => ui.color_edit_button_srgba(&mut self.config.ui.pulse),
         });
 
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         // The surfaces and the text everything else is drawn with. Read out of
         // the live visuals, so an unticked row shows what the theme is
         // actually using and ticking it starts from there.
@@ -168,7 +203,7 @@ impl MyApp {
         theme_color(ui, "Set the background", &mut self.config.ui.background, bg);
         theme_color(ui, "Set the buttons", &mut self.config.ui.button, button);
         theme_color(ui, "Set the text", &mut self.config.ui.text, fg);
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         hint!(ui, text::THEME_COLORS);
     }
 
@@ -211,10 +246,10 @@ impl MyApp {
             "Show remote node paths on map",
             hover: text::REMOTE_PATHS_HOVER,
         );
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         hint!(ui, text::PATHS_NOTE);
 
-        gap(ui, GAP_HAIR);
+        gap(ui, Key::GapHair);
         check!(
             ui,
             self.config.distance.show,
@@ -285,7 +320,7 @@ impl MyApp {
         row(ui, "Minimum move between points (m):", |ui| {
             drag(ui, &mut self.config.track.min_distance, 0.1, 0.0..=1000.0);
         });
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         // The map bar's old Clear button is a path toggle now, and discarding
         // the recorded points is not something to leave a finger's width from
         // the buttons used while moving.
@@ -309,7 +344,7 @@ impl MyApp {
             return;
         }
         section!(ui, sep "Offline maps");
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         let downloading = self.download.is_some();
         let start = button!(
             ui,

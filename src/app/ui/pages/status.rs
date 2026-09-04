@@ -10,7 +10,7 @@ use midair_proto::hop::{STRATUM_GPS, STRATUM_MAX};
 use midair_proto::link::{TELEM_FLAG_CFG_LOADED, TELEM_FLAG_GPS_FIX, TELEM_FLAG_SD_OK};
 
 use crate::app::ui::text::status as text;
-use crate::app::ui::theme::{gap, GAP_ITEM, GAP_SECTION};
+use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{content_page, heading, hint, section, status_bool};
 use crate::app::{secs_text, BleIntent, MyApp};
 
@@ -47,13 +47,13 @@ impl MyApp {
                 // not a fault.
                 let warming = self.board_warming();
                 if warming {
-                    gap(ui, GAP_ITEM);
+                    gap(ui, Key::GapItem);
                     ui.label(text::WARMING);
                 }
 
                 let Some(t) = self.telemetry else {
                     if !warming {
-                        gap(ui, GAP_SECTION);
+                        gap(ui, Key::GapSection);
                         ui.label(text::NO_TELEMETRY);
                     }
                     self.board_log_ui(ui);
@@ -91,7 +91,12 @@ impl MyApp {
                 // Board housekeeping.
                 section!(ui, "Board");
                 status_bool(ui, colors, "SD logging", t.flags & TELEM_FLAG_SD_OK != 0);
-                status_bool(ui, colors, "Radio config", t.flags & TELEM_FLAG_CFG_LOADED != 0);
+                status_bool(
+                    ui,
+                    colors,
+                    "Radio config",
+                    t.flags & TELEM_FLAG_CFG_LOADED != 0,
+                );
 
                 self.board_log_ui(ui);
             });
@@ -140,7 +145,7 @@ impl MyApp {
         // page is where a board taken off the map is still accounted for.
         if let (Some(b), Some(p)) = (self.beacon, self.beacon_packet) {
             let name = self.beacon_label();
-            gap(ui, GAP_ITEM);
+            gap(ui, Key::GapItem);
             ui.monospace(format!("{name}: {:.5}, {:.5}", b.y(), b.x()));
             ui.label(format!("{name} speed: {:.1} m/s", p.speed_mps()));
             // Satellite count from the packet only when there is no telemetry
@@ -184,7 +189,11 @@ impl MyApp {
         {
             match secs {
                 0 => hint!(ui, "Board sleep: disabled."),
-                secs => hint!(ui, "Board sleep: every {} once disconnected.", secs_text(secs)),
+                secs => hint!(
+                    ui,
+                    "Board sleep: every {} once disconnected.",
+                    secs_text(secs)
+                ),
             };
         }
         if self.ble_intent != BleIntent::Idle

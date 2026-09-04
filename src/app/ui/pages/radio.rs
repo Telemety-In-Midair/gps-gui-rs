@@ -5,9 +5,7 @@
 
 use crate::app::ui::icons;
 use crate::app::ui::text::radio as text;
-use crate::app::ui::theme::{
-    control_height, em, field_width, gap, GAP_BLOCK, GAP_ITEM, GAP_TIGHT,
-};
+use crate::app::ui::theme::{control_height, gap, probe, px, Key};
 use crate::app::ui::widgets::{
     button, confirm_popup, content_page, feedback_label, heading, hint, icon_button, submitted,
     text_field,
@@ -15,25 +13,13 @@ use crate::app::ui::widgets::{
 use crate::app::{MyApp, RadioEdit};
 use crate::radio::{self, EditVal, FieldType};
 
-/// The path field is half the screen, leaving room for the four buttons the
-/// row carries beside it.
-const PATH_FRAC: f32 = 0.5;
-
-/// The glyph in a field-row action button (the pencil, the check, the x), as a
-/// fraction of the height the button is laid out at.
-///
-/// Written against the button rather than the text so the two agree: the
-/// button's height is the touch-target floor, and a glyph sized off the text
-/// alone left a tall thin key with a small mark adrift in it.
-const ACTION_GLYPH_FRAC: f32 = 0.55;
-
-/// Width of a free-text field in a radio row, in text heights, so it scales
-/// with the font rather than being a raw pixel count.
-const ENUM_FIELD_EM: f32 = 12.0;
-
-/// Width of the push-confirm popup, in text heights - enough for its two lines
-/// to wrap into a block rather than one long line across the screen.
-const CONFIRM_EM: f32 = 18.0;
+/// A field-row action button (the pencil, the check, the x), with its glyph
+/// drawn at `size` and recorded for the adjuster.
+fn action_button(ui: &mut egui::Ui, size: f32, glyph: egui::ImageSource<'_>) -> egui::Response {
+    let resp = icon_button(ui, size, glyph);
+    probe(ui.ctx(), resp.rect, "Action button", &[Key::RadioGlyph]);
+    resp
+}
 
 /// Render the type-specific input for an unlocked radio field, bound to `val`.
 /// The kind of widget follows the field's type: a draggable number, a checkbox,
@@ -59,8 +45,9 @@ fn radio_input(ui: &mut egui::Ui, key: &str, ty: &FieldType, val: &mut EditVal) 
                         }
                     });
             } else {
-                let width = em(ui) * ENUM_FIELD_EM;
-                ui.add(egui::TextEdit::singleline(s).desired_width(width));
+                let width = px(ui.ctx(), Key::RadioEnumField);
+                let resp = ui.add(egui::TextEdit::singleline(s).desired_width(width));
+                probe(ui.ctx(), resp.rect, "Text field", &[Key::RadioEnumField]);
             }
         }
     }
@@ -72,27 +59,26 @@ impl MyApp {
         content_page(ctx, "radio", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Radio config", text::INTRO);
-                gap(ui, GAP_BLOCK);
+                gap(ui, Key::GapBlock);
 
                 ui.label("File:");
-                self.radio_file_ui(ui, screen);
-                gap(ui, GAP_TIGHT);
+                self.radio_file_ui(ui);
+                gap(ui, Key::GapTight);
                 feedback_label(ui, self.config.ui, &self.radio_feedback);
 
                 if self.radio.is_some() {
-                    gap(ui, GAP_ITEM);
+                    gap(ui, Key::GapItem);
                     self.radio_fields_ui(ui);
                     self.radio_estimate_ui(ui);
                     self.radio_backups_ui(ui);
                 } else {
-                    gap(ui, GAP_BLOCK);
+                    gap(ui, Key::GapBlock);
                     ui.label(text::EMPTY);
-                    gap(ui, GAP_ITEM);
+                    gap(ui, Key::GapItem);
                     // With no file to load (a fresh SD card), start from the
                     // firmware defaults instead. It fills the editor only; Save
                     // is what writes the file.
-                    if button!(ui, "Generate default config", hover: text::GENERATE_HOVER)
-                        .clicked()
+                    if button!(ui, "Generate default config", hover: text::GENERATE_HOVER).clicked()
                     {
                         self.default_radio();
                     }
@@ -109,10 +95,14 @@ impl MyApp {
     /// The file path and the four things that can be done with it: read the
     /// file, write it, send the editor to the board, and read the board back
     /// into the editor.
-    fn radio_file_ui(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn radio_file_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            let width = field_width(ui, screen, PATH_FRAC);
-            let resp = text_field(ui, &mut self.radio_path, "/path/to/RADIO.toml", width);
+            let resp = text_field(
+                ui,
+                &mut self.radio_path,
+                "/path/to/RADIO.toml",
+                Key::RadioPath,
+            );
             if ui.button("Load").clicked() || submitted(ui, &resp) {
                 self.load_radio();
             }
@@ -190,7 +180,7 @@ impl MyApp {
                 )
             };
             if section != section_shown {
-                gap(ui, GAP_BLOCK);
+                gap(ui, Key::GapBlock);
                 ui.strong(if section.is_empty() {
                     "general"
                 } else {
@@ -223,17 +213,13 @@ impl MyApp {
         let colors = self.config.ui;
         let est = radio::airtime(&cfg);
 
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.strong("Airtime estimate");
         ui.separator();
 
         ui.label(format!(
             "Time on air: {:.1} ms per beacon (SF{}, BW{} kHz, CR 4/{}, {}-byte frame)",
-            est.toa_ms,
-            cfg.spreading_factor,
-            cfg.bandwidth_khz,
-            cfg.coding_rate,
-            est.payload_len,
+            est.toa_ms, cfg.spreading_factor, cfg.bandwidth_khz, cfg.coding_rate, est.payload_len,
         ));
         match est.duty_pct {
             Some(duty) => {
@@ -278,7 +264,10 @@ impl MyApp {
                 Some(over) => {
                     ui.colored_label(
                         colors.error,
-                        format!("Over the {:.0} ms slot window by {over:.0} ms", fit.window_ms),
+                        format!(
+                            "Over the {:.0} ms slot window by {over:.0} ms",
+                            fit.window_ms
+                        ),
                     );
                     hint!(ui, text::HOP_OVERRUN);
                 }
@@ -339,9 +328,11 @@ impl MyApp {
             RadioEdit::Active { section: s, key: k, .. }
                 if s.as_str() == section && k.as_str() == key
         );
-        // Sized off the button, which is sized off the text: nothing here is a
-        // raw pixel constant.
-        let bsz = control_height(ui) * ACTION_GLYPH_FRAC;
+        // The glyph is sized off the button, which is sized off the text, so
+        // the two agree: the button's height is the touch-target floor, and a
+        // glyph sized off the text alone left a tall thin key with a small
+        // mark adrift in it.
+        let bsz = control_height(ui) * px(ui.ctx(), Key::RadioGlyph);
         // Wrapped so a long key or value drops its input to the next line
         // rather than pushing the edit buttons past the screen edge.
         ui.horizontal_wrapped(|ui| {
@@ -350,7 +341,10 @@ impl MyApp {
                 if let RadioEdit::Active { val, .. } = &mut self.radio_edit {
                     radio_input(ui, key, ty, val);
                 }
-                if icon_button(ui, bsz, icons::check()).on_hover_text("Set").clicked() {
+                if action_button(ui, bsz, icons::check())
+                    .on_hover_text("Set")
+                    .clicked()
+                {
                     if let RadioEdit::Active { val, .. } = &self.radio_edit {
                         let val = val.clone();
                         if let Some(doc) = self.radio.as_mut() {
@@ -359,7 +353,7 @@ impl MyApp {
                     }
                     self.radio_edit = RadioEdit::None;
                 }
-                if icon_button(ui, bsz, icons::close())
+                if action_button(ui, bsz, icons::close())
                     .on_hover_text("Cancel")
                     .clicked()
                 {
@@ -373,7 +367,7 @@ impl MyApp {
                 let busy = !matches!(self.radio_edit, RadioEdit::None);
                 let edit = ui
                     .add_enabled_ui(!busy, |ui| {
-                        icon_button(ui, bsz, icons::edit()).on_hover_text("Edit")
+                        action_button(ui, bsz, icons::edit()).on_hover_text("Edit")
                     })
                     .inner;
                 if edit.clicked() {
@@ -387,7 +381,7 @@ impl MyApp {
         if let Some(d) = desc {
             hint!(ui, small d);
         }
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
     }
 
     /// The floating Edit / Cancel popup shown when a field's pencil is pressed.
@@ -399,7 +393,7 @@ impl MyApp {
         };
         confirm_popup(ctx, "radio_confirm", screen, |ui| {
             ui.label(format!("Edit \"{key}\"?"));
-            gap(ui, GAP_ITEM);
+            gap(ui, Key::GapItem);
             ui.horizontal(|ui| {
                 if ui.button("Edit").clicked() {
                     let val = self
@@ -429,10 +423,10 @@ impl MyApp {
             return;
         }
         confirm_popup(ctx, "radio_push_confirm", screen, |ui| {
-            ui.set_max_width(em(ui) * CONFIRM_EM);
+            ui.set_max_width(px(ui.ctx(), Key::RadioConfirm));
             ui.label(text::PUSH_CONFIRM);
             hint!(ui, small text::PUSH_CONFIRM_MORE);
-            gap(ui, GAP_ITEM);
+            gap(ui, Key::GapItem);
             ui.horizontal(|ui| {
                 if ui.button("Send").clicked() {
                     self.radio_push_confirm = false;
@@ -452,7 +446,7 @@ impl MyApp {
             Some(r) => r.backups(),
             None => return,
         };
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.separator();
         egui::CollapsingHeader::new(format!("Backups ({})", backups.len()))
             .id_salt("radio_backups")

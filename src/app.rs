@@ -22,6 +22,7 @@ use crate::config::{normalize_mac, AppConfig};
 use crate::export::Saver;
 use crate::gps::GpsFix;
 use crate::logging::{self, LogAxis, LogRow, LogSource, LogStat, Logger};
+use crate::look::{Key, Look, Measure};
 use crate::offline::{self, DownloadProgress};
 use crate::points::{PointSource, TrackPoint};
 use crate::radio::{self, EditVal, RadioDoc};
@@ -294,11 +295,23 @@ const DEFAULT_CONFIG_NAME: &str = "gps-config.toml";
 /// read but never saved). On desktop the cache is a relative directory, which
 /// leaves the plain filename in the working directory.
 fn default_config_path(cache_dir: Option<&std::path::Path>) -> String {
+    beside_cache(cache_dir, DEFAULT_CONFIG_NAME)
+}
+
+/// The look sheet loaded at startup and written back by the adjuster. Kept
+/// beside the config, for the same reason the config is where it is.
+const DEFAULT_LOOK_NAME: &str = "gps-gui.look";
+
+fn default_look_path(cache_dir: Option<&std::path::Path>) -> String {
+    beside_cache(cache_dir, DEFAULT_LOOK_NAME)
+}
+
+/// `name` in the directory holding the tile cache, or bare when the cache is
+/// a relative directory (desktop) or there is none.
+fn beside_cache(cache_dir: Option<&std::path::Path>, name: &str) -> String {
     match cache_dir.and_then(std::path::Path::parent) {
-        Some(dir) if !dir.as_os_str().is_empty() => {
-            dir.join(DEFAULT_CONFIG_NAME).display().to_string()
-        }
-        _ => DEFAULT_CONFIG_NAME.to_string(),
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).display().to_string(),
+        _ => name.to_string(),
     }
 }
 
@@ -496,6 +509,8 @@ struct AppliedStyle {
     button: Option<egui::Color32>,
     text: Option<egui::Color32>,
     text_scale: f32,
+    /// Which edition of the look the control spacing was taken from.
+    look_gen: u64,
 }
 
 /// A remote LoRa node relayed over BLE by the connected board, keyed in
@@ -791,6 +806,19 @@ pub struct MyApp {
     config_path: String,
     /// Result of the last load/save: `Ok` message (green) or error (red).
     config_feedback: Option<Result<String, String>>,
+    /// Every size and spacing the pages are drawn with, from the look sheet.
+    /// Put up in the egui context each frame, which is how the theme
+    /// functions reach it without being handed it.
+    look: Arc<Look>,
+    /// Bumped on every change to `look`, so the style is rewritten when the
+    /// control measures move and not otherwise.
+    look_gen: u64,
+    /// The look-sheet path on the Settings page.
+    look_path: String,
+    /// Result of the last sheet load or save.
+    look_feedback: Option<Result<String, String>>,
+    /// The adjuster, while it is open.
+    adjust: Option<ui::adjust::Adjust>,
     /// Boards seen since the current scan started, keyed by normalized MAC.
     /// Cleared when a scan begins, so the picker shows what is on the air now
     /// rather than everything ever seen.
@@ -972,6 +1000,11 @@ impl MyApp {
             // same file without the user having to type it.
             config_path: default_config_path(cache_dir.as_deref()),
             config_feedback: None,
+            look: Arc::new(Look::default()),
+            look_gen: 0,
+            look_path: default_look_path(cache_dir.as_deref()),
+            look_feedback: None,
+            adjust: None,
             discovered: BTreeMap::new(),
             name_edits: BTreeMap::new(),
             radio: None,
@@ -1013,6 +1046,11 @@ impl MyApp {
         match AppConfig::load(&startup_path) {
             Ok(cfg) => app.apply_config(cfg),
             Err(_) => app.sync_ble_to_config(),
+        }
+        // The look sheet, when there is one. Its absence is the usual case
+        // and not worth a message; a sheet that is there but wrong is.
+        if std::path::Path::new(&app.look_path).exists() {
+            app.load_look();
         }
         // After the config, which is where both the path and the auto-start
         // come from.
@@ -1167,6 +1205,7 @@ impl MyApp {
             button: colors.button,
             text: colors.text,
             text_scale: colors.text_scale,
+            look_gen: self.look_gen,
         };
         if self.style_applied == Some(wanted) {
             return;
@@ -1176,6 +1215,8 @@ impl MyApp {
         // Text size first, and for both themes: the sizes are the same either
         // way, so switching theme has nothing to redo here.
         let scale = colors.text_scale;
+        let look = self.look.clone();
+        let screen = ctx.input(|i| i.viewport_rect());
         ctx.all_styles_mut(|style| {
             style.text_styles = egui::style::default_text_styles()
                 .into_iter()
@@ -1183,7 +1224,7 @@ impl MyApp {
                 .collect();
             // The controls are measured off the text, so they are rewritten
             // here with it rather than being left on egui's absolute defaults.
-            ui::apply_spacing(style);
+            ui::apply_spacing(style, &look, screen);
         });
 
         let mut visuals = theme.default_visuals();
@@ -1622,6 +1663,66 @@ impl MyApp {
     fn reset_config(&mut self) {
         self.apply_config(AppConfig::default());
         self.config_feedback = Some(Ok("Reset to defaults. Not saved yet.".to_string()));
+    }
+
+    // --- The look sheet ----------------------------------------------------
+
+    /// Replace one measure, live: the pages draw with it from the next frame.
+    fn set_measure(&mut self, key: Key, measure: Measure) {
+        Arc::make_mut(&mut self.look).set(key, measure);
+        self.look_gen += 1;
+    }
+
+    /// Read the sheet at `look_path` over the defaults. A sheet with lines it
+    /// did not understand still loads, but says so in the error color.
+    fn load_look(&mut self) {
+        let path = self.look_path.trim().to_string();
+        if path.is_empty() {
+            self.look_feedback = Some(Err("Enter a file path.".to_string()));
+            return;
+        }
+        self.look_feedback = Some(match Look::load(&path) {
+            Ok((look, warnings)) => {
+                self.look = Arc::new(look);
+                self.look_gen += 1;
+                if warnings.is_empty() {
+                    Ok(format!("Loaded {path}"))
+                } else {
+                    Err(format!("Loaded {path}, skipping {}", warnings.join("; ")))
+                }
+            }
+            Err(e) => Err(e),
+        });
+    }
+
+    /// Write the look as it stands to `look_path`. An existing sheet is
+    /// edited in place; with none there yet, a documented one is generated.
+    fn save_look(&mut self) {
+        let path = self.look_path.trim().to_string();
+        if path.is_empty() {
+            self.look_feedback = Some(Err("Enter a file path.".to_string()));
+            return;
+        }
+        self.look_feedback = Some(match self.look.save(&path) {
+            Ok(true) => Ok(format!("Created {path}")),
+            Ok(false) => Ok(format!("Saved {path}")),
+            Err(e) => Err(e),
+        });
+    }
+
+    /// Every measure back to what the app ships with. The file is untouched
+    /// until the next save.
+    fn reset_look(&mut self) {
+        self.look = Arc::new(Look::default());
+        self.look_gen += 1;
+        self.look_feedback = Some(Ok("Reset to defaults. Not saved yet.".to_string()));
+    }
+
+    /// Open the adjuster on the Settings page, as the page's own button
+    /// does. For a launch that goes straight to it.
+    pub fn open_adjuster(&mut self) {
+        self.page = Page::Settings;
+        self.adjust = Some(ui::adjust::Adjust::new());
     }
 
     /// Load the RADIO.TOML at `radio_path`, recording a human-readable result
@@ -2612,6 +2713,9 @@ impl eframe::App for MyApp {
         // out of the style rather than being handed them.
         self.apply_ui_style(&ctx);
         let screen = ctx.input(|i| i.viewport_rect());
+        // The look the pages measure themselves against, put up for this
+        // frame. With the adjuster open they also record where they land.
+        ui::publish(&ctx, self.look.clone(), self.adjust.is_some());
 
         match self.page {
             Page::Menu => self.menu_page(&ctx, screen),
@@ -2639,11 +2743,15 @@ impl eframe::App for MyApp {
         if self.gps_rx.is_none() && matches!(self.page, Page::Map) {
             self.manual_gps_bar(&ctx, screen);
         }
+
+        // Last, over everything, so every probe of the frame is in before the
+        // picker searches them.
+        self.adjust_ui(&ctx, screen);
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ble::{BleUpdate, Inbox, Interrupt, Reporter, Wanted};
     use std::sync::mpsc::channel;
@@ -2652,7 +2760,7 @@ mod tests {
     /// channel and pushes events back by hand. That is the whole of the BLE
     /// contract from the UI's side, so the buttons can be driven without a
     /// radio.
-    fn test_app() -> (MyApp, Receiver<BleRequest>, Sender<BleUpdate>) {
+    pub(crate) fn test_app() -> (MyApp, Receiver<BleRequest>, Sender<BleUpdate>) {
         let (event_tx, event_rx) = channel();
         let (cmd_tx, cmd_rx) = channel();
         // A cache directory under the system temp dir is what keeps the

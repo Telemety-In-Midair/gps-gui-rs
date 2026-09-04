@@ -75,6 +75,15 @@ the other's list is short, so edit both.
 - `src/marker.rs` - a walkers `Plugin` that draws the track polyline and the
   current-position marker.
 
+## Look sheet
+
+Every size and spacing on the pages is a fraction - of the screen, of the text
+height, of the toolbar icon - kept in `gps-gui.look` beside the config rather
+than in the code. Nothing in it is a point count. The adjuster (Settings,
+"Adjust the look", or `cargo run -- --adjust`) picks a thing on any page and
+moves the measures behind it live, then writes the sheet back in place. See
+`docs/ui.md` for the format.
+
 ## Offline maps
 
 HTTP tiles are cached to `.cache/`, so areas you have already viewed load

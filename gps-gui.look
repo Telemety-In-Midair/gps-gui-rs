@@ -1,0 +1,203 @@
+# The look of gps-gui-rs: every size and spacing, each a fraction of something
+# that scales with the screen or the text. Nothing here is a point count.
+#
+#   5%      of the smaller screen side      1.5em    of the body text height
+#   50%w    of the screen width             0.7icon  of the toolbar icon side
+#   34%h    of the screen height            0.25x    a plain ratio (see the note)
+#
+# A measure may be held in a range: `50%w min 8em max 22em`. A name alone on
+# a line opens a block; `page.gap.item` and `item` under `gap` under `page`
+# are the same key. A missing key keeps its default.
+
+page
+    # Between a page's body and the screen edge.
+    margin  2.5%
+    gap
+        # The vertical rhythm of a page, in text heights. A hair: between a
+        # control and the note under it.
+        hair     0.25em
+        # Between a title and the line explaining it.
+        tight    0.4em
+        # Between two controls.
+        item     0.5em
+        # Between two blocks of controls.
+        block    0.75em
+        # Before a section title.
+        section  1em
+
+icon
+    # Side of a toolbar icon. A fingertip is the floor and about two
+    # fingertips the ceiling whatever this says: those are physical, not a
+    # look.
+    size  5%
+
+bar
+    margin
+        # Inner side margin of a bar spanning the screen: the map's controls
+        # at the top and its status read-out at the bottom.
+        x  2%
+        # Inner top and bottom margin of those bars.
+        y  1%
+    button
+        pad
+            # Side padding around the glyph in a toolbar button. Doubles as
+            # the space that keeps the buttons apart.
+            x  0.7icon
+            # Top and bottom padding around the glyph in a toolbar button.
+            y  0.45icon
+    # Between two buttons in the controls bar.
+    gap  0.15icon
+
+corner
+    # Inset of the floating corner toggle from the screen edge.
+    margin  3%
+    # Padding around the corner toggle's glyph. Tighter than the toolbar's:
+    # alone over the page, wide padding reads as a slab.
+    pad     0.2icon
+
+field
+    pad
+        # Side padding inside a text input. The vertical padding is whatever
+        # brings the field up to the height of the button beside it.
+        x  0.3em
+
+control
+    pad
+        # Side padding inside a text button. Everything under control is
+        # measured off the body font size.
+        x  0.6em
+        # Top and bottom padding inside a text button.
+        y  0.3em
+    spacing
+        # Between two controls on a row.
+        x  0.55em
+        # Between two rows of controls.
+        y  0.35em
+    # The height every button, checkbox, dropdown and number box is laid out
+    # at. A fingertip is the floor.
+    height     2.6em
+    # The narrowest a number box or a color swatch is drawn.
+    width      3.2em
+    check
+        # The checkbox and radio glyph.
+        size  1.2em
+        # The mark inside it.
+        mark  0.7em
+    # Indentation of a nested group.
+    indent     1.4em
+    # Width of a dropdown.
+    combo      8em
+    # Width of a scroll bar. Floored in code at a width a finger can catch.
+    scrollbar  0.55em
+
+menu
+    row
+        # Height of a button on the menu page. Off the icon rather than the
+        # text: these are touch targets first.
+        height  1.3icon
+        # Width of a menu button.
+        width   5icon
+        # Between two menu buttons.
+        gap     0.3icon
+    # Text size on a menu button, which its glyph is sized to as well.
+    text  0.45icon
+
+map
+    popup
+        pad
+            # Side padding of a button in the map's popups.
+            x  0.35icon
+            # Top and bottom padding of a button in the map's popups.
+            y  0.25icon
+    center
+        # Between two entries of the center button's marker list.
+        gap    0.12icon
+        # The narrowest that list is drawn.
+        width  3.5icon
+    # How far below the controls bar the center menu hangs.
+    under_bar       1.8icon
+    # How far below the controls bar the region-select hint hangs.
+    hint_under_bar  1.6icon
+    # How far above a marker its info bubble floats.
+    marker_lift     0.35icon
+    # The smallest drag that counts as a region box rather than a tap. Also
+    # how far a held finger may wander and still count as a hold.
+    drag_min        2.5%
+
+status
+    graph
+        # Width of the status bar's signal graph.
+        width   28%w
+        # Height of that graph, in text heights so it stays in proportion with
+        # the read-out beside it.
+        height  1.7em
+    bar
+        # Space between two bars of the graph, as a ratio of the slot each bar
+        # gets.
+        gap  0.25x
+        # The shortest a bar is drawn, as a ratio of the graph height, so a
+        # barely heard node still shows.
+        min  0.05x
+
+plot
+    # Height of the Logging page's graph. Off the screen rather than the text:
+    # it is a picture, and keeps its shape when the text is scaled.
+    height  34%h
+    pad
+        # Room inside the graph frame for the value axis labels, in text
+        # heights: that side of it is text.
+        left    3.4em
+        # Room under the graph for the time axis.
+        bottom  1.6em
+        # Room above the graph.
+        top     0.6em
+        # Room to the right of the graph.
+        right   1.2em
+    # Radius of a scatter dot.
+    dot     0.16em
+    # Width of a plotted line.
+    line    0.12em
+
+points
+    # The Points page's search box, leaving room for the Clear button beside
+    # it.
+    search  60%w min 8em max 22em
+    list
+        # The shortest the points list may be squeezed to. Below this the page
+        # would show filters over nothing.
+        min  4em
+
+settings
+    # The config path field on the Settings page.
+    path    50%w min 8em max 22em
+    # The text-size slider. Off the screen rather than the text: its own label
+    # grows while it is dragged, and a width in text heights would walk out
+    # from under the finger.
+    slider  45%w
+
+logging
+    # The log path field on the Logging page.
+    path       50%w min 8em max 22em
+    # The reference coordinate field on the Logging page.
+    reference  45%w min 8em max 22em
+
+radio
+    # The file path field on the Radio page.
+    path        50%w min 8em max 22em
+    # The set and cancel glyphs beside a radio setting being edited, as a
+    # ratio of the control height.
+    glyph       0.55x
+    # A radio setting's text input while it is being edited.
+    enum_field  12em
+    # The widest the send-to-board confirmation grows.
+    confirm     18em
+
+beacon
+    # A board name input on the Beacon page.
+    name    7em
+    # A number input on the Beacon page: an interval, a window, a timeout.
+    number  5em
+
+manual
+    # The desktop position entry field.
+    field  50%w min 8em max 22em

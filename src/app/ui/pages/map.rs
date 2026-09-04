@@ -15,8 +15,7 @@ use crate::app::ui::icons;
 use crate::app::ui::mapdraw::{default_position, rotate_pos};
 use crate::app::ui::text::map as text;
 use crate::app::ui::theme::{
-    bar_margin, corner_margin, gap, icon_size_for, icon_size_for_row, BUTTON_PAD_X_FRAC,
-    BUTTON_PAD_Y_FRAC, CONTROLS_GAP_FRAC, GAP_ITEM,
+    bar_margin, corner_margin, gap, icon_size, icon_size_for_row, probe, px, Key,
 };
 use crate::app::ui::widgets::{button, floating, icon_button, icon_button_pulse};
 use crate::app::{ease_heading, ping_reason, MarkerKind, MyApp, RegionSelect, ROTATE_TAU};
@@ -31,32 +30,30 @@ const MAX_REGION_TILES: u64 = 10_000;
 /// Rough average size of a cached OSM tile, for the download estimate.
 const TILE_SIZE_ESTIMATE_KB: u64 = 15;
 
-/// Smallest box drag that counts as a region selection rather than a tap, as a
-/// fraction of the smaller screen dimension.
-const MIN_DRAG_FRAC: f32 = 0.025;
-
 /// Zoom levels past the current view a region download offers, and the highest
 /// it will ever reach.
 const REGION_ZOOM_HEADROOM: u8 = 2;
 const REGION_ZOOM_MAX: u8 = 17;
 
-/// Popup positions and paddings, as fractions of the icon size (itself a
-/// fraction of the screen), so a popup stays a touch target on a phone and
-/// does not look lost on a desktop.
-const POPUP_PAD_X_FRAC: f32 = 0.35;
-const POPUP_PAD_Y_FRAC: f32 = 0.25;
-const CENTER_MENU_GAP_FRAC: f32 = 0.12;
-const CENTER_MENU_WIDTH_FRAC: f32 = 3.5;
-/// How far below the controls bar the center menu and the select hint hang.
-const UNDER_BAR_FRAC: f32 = 1.8;
-const HINT_UNDER_BAR_FRAC: f32 = 1.6;
-/// How far above the marker its info bubble floats.
-const MARKER_INFO_LIFT_FRAC: f32 = 0.35;
+/// What shapes the bar's button row, for the adjuster.
+const TOOLBAR_KEYS: [Key; 4] = [
+    Key::IconSize,
+    Key::BarButtonPadX,
+    Key::BarButtonPadY,
+    Key::BarGap,
+];
 
 /// How close a double-click must land to a marker to select it: one icon side,
 /// so the reach is the same as a toolbar button's touch target.
-fn marker_hit_radius(screen: egui::Rect) -> f32 {
-    icon_size_for(screen)
+fn marker_hit_radius(ctx: &egui::Context) -> f32 {
+    icon_size(ctx)
+}
+
+/// The padding of a button in one of the map's popups, which are measured off
+/// the icon so a popup stays a touch target on a phone and does not look lost
+/// on a desktop.
+fn popup_padding(ctx: &egui::Context) -> egui::Vec2 {
+    egui::vec2(px(ctx, Key::MapPopupPadX), px(ctx, Key::MapPopupPadY))
 }
 
 impl MyApp {
@@ -147,13 +144,13 @@ impl MyApp {
         // priority over the (interactive) map behind them. The fill spans the
         // status-bar area; the top inset pushes the buttons clear of it.
         let top = self.top_inset(ctx);
-        egui::Area::new(egui::Id::new("controls"))
+        let (margin_x, margin_y) = bar_margin(ctx);
+        let bar = egui::Area::new(egui::Id::new("controls"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::Pos2::ZERO)
             .movable(false)
             .constrain(false)
             .show(ctx, |ui| {
-                let (margin_x, margin_y) = bar_margin(screen);
                 egui::Frame::NONE
                     .fill(ui.visuals().panel_fill)
                     .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
@@ -164,9 +161,15 @@ impl MyApp {
                         // past the right edge by the margin.
                         ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
                         ui.add_space(top);
-                        self.controls(ui, screen);
+                        self.controls(ui);
                     });
             });
+        probe(
+            ctx,
+            bar.response.rect,
+            "Controls bar",
+            &[Key::BarMarginX, Key::BarMarginY],
+        );
 
         // The signal read-out along the bottom, when it is turned on. Drawn
         // before the transient popups so a confirmation still lands on top of
@@ -185,12 +188,13 @@ impl MyApp {
     /// Every button whose glyph changes shows the state the press switches
     /// *to*, which is what a toolbar icon without a label has to do to be
     /// readable.
-    fn controls(&mut self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn controls(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         // Taken off the icon rather than left on the style's text-derived
         // spacing, so enlarging the page text does not shrink the toolbar.
         // Derived from the *uncapped* icon size, which is the ceiling
         // `icon_size_for_row` starts from, so the two are not circular.
-        let spacing = icon_size_for(screen) * CONTROLS_GAP_FRAC;
+        let spacing = px(&ctx, Key::BarGap);
         ui.spacing_mut().item_spacing.x = spacing;
         // Which of the optional buttons are in the row this frame. Decided up
         // front, before anything is laid out, because the button count is what
@@ -203,9 +207,14 @@ impl MyApp {
         // No button may take more than a 1/buttons share of the bar, padding and
         // spacing included, so a full row always fits the screen instead of
         // running off the right edge when the set grows.
-        let icon = icon_size_for_row(screen, ui.available_width(), spacing, buttons);
-        ui.spacing_mut().button_padding =
-            egui::vec2(icon * BUTTON_PAD_X_FRAC, icon * BUTTON_PAD_Y_FRAC);
+        let icon = icon_size_for_row(&ctx, ui.available_width(), spacing, buttons);
+        // The padding follows the row's icon rather than the usual one, so a
+        // row squeezed to fit keeps its proportions.
+        let squeeze = icon / icon_size(&ctx);
+        ui.spacing_mut().button_padding = egui::vec2(
+            px(&ctx, Key::BarButtonPadX) * squeeze,
+            px(&ctx, Key::BarButtonPadY) * squeeze,
+        );
         // egui lays a horizontal row out left-to-right and can't center it in a
         // single pass: its `main_align` is ignored and the row just fills the
         // width of any centering parent. So pad the left by half the leftover
@@ -256,6 +265,7 @@ impl MyApp {
             // Remember the row's own width (the inner group, excluding the pad)
             // so the next frame can center it.
             self.controls_width = row.response.rect.width();
+            probe(&ctx, row.response.rect, "Toolbar buttons", &TOOLBAR_KEYS);
         });
     }
 
@@ -366,8 +376,10 @@ impl MyApp {
             return;
         }
 
-        let icon = icon_size_for(screen);
         let top = self.top_inset(ctx);
+        let padding = popup_padding(ctx);
+        let entry_gap = px(ctx, Key::MapCenterGap);
+        let min_width = px(ctx, Key::MapCenterWidth);
         // Resolve each entry's name up front (a remote's comes from the config),
         // so the popup closure need not reach back into `self`.
         let labelled: Vec<(MarkerKind, Position, String)> = targets
@@ -376,19 +388,18 @@ impl MyApp {
             .collect();
         let mut chosen: Option<(MarkerKind, Position)> = None;
         let mut close = false;
-        floating(
+        let rect = floating(
             ctx,
             "center_menu",
             egui::Order::Foreground,
             // Just under the controls bar the button sits in.
-            egui::Pos2::new(screen.center().x, top + icon * UNDER_BAR_FRAC),
+            egui::Pos2::new(screen.center().x, top + px(ctx, Key::MapUnderBar)),
             egui::Align2::CENTER_TOP,
             false,
             |ui| {
-                ui.spacing_mut().button_padding =
-                    egui::vec2(icon * POPUP_PAD_X_FRAC, icon * POPUP_PAD_Y_FRAC);
-                ui.spacing_mut().item_spacing.y = icon * CENTER_MENU_GAP_FRAC;
-                ui.set_min_width(icon * CENTER_MENU_WIDTH_FRAC);
+                ui.spacing_mut().button_padding = padding;
+                ui.spacing_mut().item_spacing.y = entry_gap;
+                ui.set_min_width(min_width);
                 ui.label(egui::RichText::new("Center on").strong());
                 for (kind, pos, label) in &labelled {
                     if ui.button(label).clicked() {
@@ -399,6 +410,18 @@ impl MyApp {
                     close = true;
                 }
             },
+        );
+        probe(
+            ctx,
+            rect,
+            "Center menu",
+            &[
+                Key::MapUnderBar,
+                Key::MapPopupPadX,
+                Key::MapPopupPadY,
+                Key::MapCenterGap,
+                Key::MapCenterWidth,
+            ],
         );
 
         if let Some((kind, pos)) = chosen {
@@ -451,15 +474,19 @@ impl MyApp {
 
         // On a double-click, pick the closest marker within the hit radius; a
         // miss clears the current selection.
-        let double = ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+        let double = ctx.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
         if double {
+            let reach = marker_hit_radius(ctx);
             if let Some(click) = ctx.input(|i| i.pointer.interact_pos()) {
                 self.selected_marker = markers
                     .iter()
                     .filter_map(|(kind, pos)| {
                         pos.as_ref().map(|p| (*kind, to_screen(*p).distance(click)))
                     })
-                    .filter(|(_, dist)| *dist <= marker_hit_radius(screen))
+                    .filter(|(_, dist)| *dist <= reach)
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .map(|(kind, _)| kind);
             }
@@ -508,15 +535,12 @@ impl MyApp {
             format!("No fix now: {}{when}", ping_reason(ping))
         });
 
-        floating(
+        let rect = floating(
             ctx,
             "marker_info",
             egui::Order::Foreground,
-            // Clear of the marker it points at, by about a third of an icon side.
-            egui::pos2(
-                anchor.x,
-                anchor.y - icon_size_for(screen) * MARKER_INFO_LIFT_FRAC,
-            ),
+            // Clear of the marker it points at.
+            egui::pos2(anchor.x, anchor.y - px(ctx, Key::MapMarkerLift)),
             egui::Align2::CENTER_BOTTOM,
             true,
             |ui| {
@@ -527,6 +551,7 @@ impl MyApp {
                 }
             },
         );
+        probe(ctx, rect, "Marker info", &[Key::MapMarkerLift]);
         // Keep the elapsed-time text live even without new fixes.
         ctx.request_repaint_after(Duration::from_secs(1));
     }
@@ -542,6 +567,8 @@ impl MyApp {
         let color = self.config.colors.track;
         let fill = color.gamma_multiply(0.15);
         let stroke = egui::Stroke::new(2.0, color);
+        // Taps and hairline drags are not a region.
+        let min_drag = px(ctx, Key::MapDragMin);
         let paint_box = |ui: &egui::Ui, rect: egui::Rect| {
             ui.painter().rect(
                 rect,
@@ -577,8 +604,6 @@ impl MyApp {
                     self.select = match (resp.drag_stopped(), start, current) {
                         (true, Some(s), Some(c)) => {
                             let rect = egui::Rect::from_two_pos(s, c);
-                            // Ignore taps and hairline drags.
-                            let min_drag = screen.size().min_elem() * MIN_DRAG_FRAC;
                             if rect.width() >= min_drag && rect.height() >= min_drag {
                                 // Same clip rect and position the map was
                                 // drawn with (selection forces north-up, so
@@ -628,16 +653,16 @@ impl MyApp {
         // Both panels are measured off the icon size, which is itself a
         // fraction of the screen: the hint clears the controls bar it sits
         // under, and the confirm panel's buttons stay a touch target.
-        let icon = icon_size_for(screen);
+        let padding = popup_padding(ctx);
         match self.select {
             RegionSelect::Inactive => {}
             RegionSelect::Picking { .. } => {
                 let mut cancel = false;
-                floating(
+                let rect = floating(
                     ctx,
                     "select_hint",
                     egui::Order::Foreground,
-                    egui::Pos2::new(screen.center().x, top + icon * HINT_UNDER_BAR_FRAC),
+                    egui::Pos2::new(screen.center().x, top + px(ctx, Key::MapHintUnderBar)),
                     egui::Align2::CENTER_TOP,
                     false,
                     |ui| {
@@ -649,6 +674,7 @@ impl MyApp {
                         });
                     },
                 );
+                probe(ctx, rect, "Select hint", &[Key::MapHintUnderBar]);
                 if cancel {
                     self.select = RegionSelect::Inactive;
                 }
@@ -658,7 +684,7 @@ impl MyApp {
                 let error_color = self.config.ui.error;
                 // Topo tiles stop at zoom 17; don't offer levels the server 404s.
                 let layer_max = self.layer.max_zoom();
-                floating(
+                let rect = floating(
                     ctx,
                     "select_confirm",
                     egui::Order::Foreground,
@@ -666,10 +692,9 @@ impl MyApp {
                     egui::Align2::CENTER_CENTER,
                     false,
                     |ui| {
-                        ui.spacing_mut().button_padding =
-                            egui::vec2(icon * POPUP_PAD_X_FRAC, icon * POPUP_PAD_Y_FRAC);
+                        ui.spacing_mut().button_padding = padding;
                         ui.label(egui::RichText::new(text::DOWNLOAD_TITLE).strong());
-                        gap(ui, GAP_ITEM);
+                        gap(ui, Key::GapItem);
                         ui.horizontal(|ui| {
                             ui.label("Max zoom:");
                             if button!(ui, "-", enabled: max_zoom > 1).clicked() {
@@ -688,7 +713,7 @@ impl MyApp {
                         if count > MAX_REGION_TILES {
                             ui.colored_label(error_color, text::TOO_MANY_TILES);
                         }
-                        gap(ui, GAP_ITEM);
+                        gap(ui, Key::GapItem);
                         ui.horizontal(|ui| {
                             let can_download =
                                 count <= MAX_REGION_TILES && self.cache_dir.is_some();
@@ -708,6 +733,12 @@ impl MyApp {
                             }
                         });
                     },
+                );
+                probe(
+                    ctx,
+                    rect,
+                    "Download confirm",
+                    &[Key::MapPopupPadX, Key::MapPopupPadY],
                 );
                 self.select = if close {
                     RegionSelect::Inactive
@@ -730,7 +761,7 @@ impl MyApp {
         let bottom = self.bottom_overlay_inset(ctx);
         // Inset from the corner by the same fraction the floating page toggle
         // uses, so the two read as the same distance from the edge.
-        let margin = corner_margin(screen);
+        let margin = corner_margin(ctx);
         floating(
             ctx,
             "download_progress",

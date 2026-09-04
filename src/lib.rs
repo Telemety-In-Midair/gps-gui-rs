@@ -9,6 +9,9 @@ pub mod config;
 pub mod export;
 pub mod gps;
 pub mod logging;
+// The look sheet: every size in the UI as a fraction, read from a text file
+// the in-app adjuster writes back. Pure data, so it tests without a window.
+pub mod look;
 pub mod marker;
 pub mod offline;
 pub mod points;

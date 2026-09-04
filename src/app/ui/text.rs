@@ -48,6 +48,18 @@ pub(crate) mod settings {
          heights, so they grow with it; the map's icons and overlays keep their own sizes.";
     pub(crate) const TEXT_SCALE_RESET_HOVER: &str = "Back to the default text size";
 
+    pub(crate) const LOOK: &str =
+        "Every size and spacing on the pages, as fractions of the screen and the text, in a \
+         sheet of its own beside the config. The adjuster edits it live: pick a thing on any \
+         page and move the measures behind it.";
+    pub(crate) const LOOK_SAVE_HOVER: &str =
+        "Write the changed measures into the sheet above, generating it if it is not there";
+    pub(crate) const LOOK_RESET_HOVER: &str =
+        "Every measure back to what the app ships with. Only in the app until you save";
+    pub(crate) const ADJUST_HOVER: &str =
+        "Float the adjuster over the pages: pick a thing, drag its measures, save";
+    pub(crate) const ADJUST_OPEN: &str = "Already open. Its Done button closes it";
+
     pub(crate) const PAGE_COLORS: &str =
         "The few places off the map that carry meaning by color; the rest follows the theme.";
     pub(crate) const THEME_COLORS: &str =
@@ -197,12 +209,8 @@ pub(crate) mod beacon {
                 "Board: stored. Awake for this wake check only - it goes back down when the \
                  window ends."
             }
-            midair_proto::ble::Mode::Idle => {
-                "Board: idle. Reachable, GPS in backup, radio asleep."
-            }
-            midair_proto::ble::Mode::Tracking => {
-                "Board: tracking. GPS, beacon and logging up."
-            }
+            midair_proto::ble::Mode::Idle => "Board: idle. Reachable, GPS in backup, radio asleep.",
+            midair_proto::ble::Mode::Tracking => "Board: tracking. GPS, beacon and logging up.",
         }
     }
 
@@ -441,7 +449,25 @@ pub(crate) mod map {
 
     pub(crate) const SELECT_HINT: &str = "Drag a box over the region to download";
     pub(crate) const DOWNLOAD_TITLE: &str = "Download region for offline use";
-    pub(crate) const TOO_MANY_TILES: &str =
-        "Too many tiles: shrink the box or lower the max zoom.";
+    pub(crate) const TOO_MANY_TILES: &str = "Too many tiles: shrink the box or lower the max zoom.";
     pub(crate) const NO_UPDATE: &str = "No update yet";
+}
+
+/// The adjuster.
+pub(crate) mod adjust {
+    pub(crate) const PICK_HOVER: &str =
+        "Arm the picker: the next tap picks the smallest thing under it. Hold, or right-click, \
+         for everything under the finger, the page included";
+    pub(crate) const PICKING: &str = "Tap a thing to pick it. Hold for a list.";
+    pub(crate) const NOTHING_PICKED: &str =
+        "Nothing picked yet. Pick something to see the measures that shape it.";
+    pub(crate) const UNDER_FINGER: &str = "Under the finger, smallest first";
+    pub(crate) const RESET_HOVER: &str = "This measure back to its default";
+    pub(crate) const SAVE_HOVER: &str =
+        "Write the changed measures into the look sheet, generating it if it is not there";
+    pub(crate) const RELOAD_HOVER: &str = "Read the look sheet back, dropping unsaved changes";
+    pub(crate) const DEFAULTS_HOVER: &str =
+        "Every measure back to what the app ships with. Only in the app until you save";
+    pub(crate) const DONE_HOVER: &str =
+        "Close the adjuster. Unsaved changes stay until the app is restarted";
 }

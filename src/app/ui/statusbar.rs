@@ -13,15 +13,10 @@
 use std::time::{Duration, SystemTime};
 
 use crate::app::ui::text::statusbar as text;
-use crate::app::ui::theme::{bar_margin, em};
+use crate::app::ui::theme::{bar_margin, em, probe, px, Key};
 use crate::app::{MyApp, NodeStatus, RssiSample, RSSI_HISTORY};
 use crate::config::{remote_color, STATUS_CYCLE_MIN};
 use crate::points::age_text;
-
-/// The graph's size: a fraction of the screen width, and a height in text
-/// heights so it stays in proportion with the read-out beside it.
-const GRAPH_W_FRAC: f32 = 0.28;
-const GRAPH_H_EM: f32 = 1.7;
 
 /// The dBm range the bars are drawn against.
 ///
@@ -34,13 +29,13 @@ const GRAPH_H_EM: f32 = 1.7;
 const RSSI_FLOOR_DBM: f32 = -130.0;
 const RSSI_CEIL_DBM: f32 = -30.0;
 
-/// Space between two bars, as a fraction of the slot each one gets.
-const BAR_GAP_FRAC: f32 = 0.25;
-
-/// The shortest a bar may be drawn, as a fraction of the graph height. A
-/// reception at the very floor still gets a sliver, so a barely-heard node
-/// reads as one that was heard rather than as an empty slot.
-const BAR_MIN_FRAC: f32 = 0.05;
+/// What shapes the graph, for the adjuster.
+const GRAPH_KEYS: [Key; 4] = [
+    Key::StatusGraphWidth,
+    Key::StatusGraphHeight,
+    Key::StatusBarGap,
+    Key::StatusBarMin,
+];
 
 /// How often the bar is redrawn while it is up, so the "heard N ago" count
 /// stays honest without pinning the frame rate.
@@ -70,8 +65,14 @@ fn cycle_slot(now: f64, dwell: f32, count: usize) -> (usize, Option<f32>) {
 /// The slots are always [`RSSI_HISTORY`] wide whatever has arrived, so the
 /// bars fill the graph from the left and then slide through it rather than
 /// re-spacing themselves on every reception.
-fn rssi_graph(ui: &mut egui::Ui, size: egui::Vec2, samples: &[RssiSample]) {
+///
+/// `gap` is the space between two bars as a ratio of the slot each one gets;
+/// `min` is the shortest a bar is drawn as a ratio of the graph height, so a
+/// reception at the very floor still gets a sliver and a barely-heard node
+/// reads as one that was heard rather than as an empty slot.
+fn rssi_graph(ui: &mut egui::Ui, size: egui::Vec2, samples: &[RssiSample], gap: f32, min: f32) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    probe(ui.ctx(), rect, "Signal graph", &GRAPH_KEYS);
     let visuals = ui.visuals();
     let painter = ui.painter_at(rect);
     painter.rect(
@@ -82,11 +83,11 @@ fn rssi_graph(ui: &mut egui::Ui, size: egui::Vec2, samples: &[RssiSample]) {
         egui::StrokeKind::Inside,
     );
     let slot = rect.width() / RSSI_HISTORY as f32;
-    let gap = slot * BAR_GAP_FRAC;
+    let gap = slot * gap;
     let span = RSSI_CEIL_DBM - RSSI_FLOOR_DBM;
     for (i, sample) in samples.iter().take(RSSI_HISTORY).enumerate() {
         let frac = ((f32::from(sample.dbm) - RSSI_FLOOR_DBM) / span).clamp(0.0, 1.0);
-        let height = (rect.height() * frac).max(rect.height() * BAR_MIN_FRAC);
+        let height = (rect.height() * frac).max(rect.height() * min);
         let left = rect.left() + slot * i as f32 + gap / 2.0;
         let bar = egui::Rect::from_min_max(
             egui::pos2(left, rect.bottom() - height),
@@ -110,7 +111,7 @@ impl MyApp {
             return;
         }
         let bottom = self.bottom_inset(ctx);
-        let (margin_x, margin_y) = bar_margin(screen);
+        let (margin_x, margin_y) = bar_margin(ctx);
         let area = egui::Area::new(egui::Id::new("map_status_bar"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(screen.left(), screen.bottom()))
@@ -131,14 +132,20 @@ impl MyApp {
                     })
                     .show(ui, |ui| {
                         ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
-                        self.status_bar_row(ui, screen);
+                        self.status_bar_row(ui);
                     });
             });
+        probe(
+            ctx,
+            area.response.rect,
+            "Status bar",
+            &[Key::BarMarginX, Key::BarMarginY],
+        );
         self.status_bar_height = area.response.rect.height();
     }
 
     /// The bar's one row: the graph, then the node the cycle is currently on.
-    fn status_bar_row(&self, ui: &mut egui::Ui, screen: egui::Rect) {
+    fn status_bar_row(&self, ui: &mut egui::Ui) {
         let em = em(ui);
         let samples = self.rssi_samples();
         let nodes = self.status_bar_nodes();
@@ -149,8 +156,16 @@ impl MyApp {
         );
 
         ui.horizontal_wrapped(|ui| {
-            let width = (screen.width() * GRAPH_W_FRAC).max(em);
-            rssi_graph(ui, egui::vec2(width, em * GRAPH_H_EM), &samples);
+            let ctx = ui.ctx().clone();
+            let width = px(&ctx, Key::StatusGraphWidth).max(em);
+            let height = px(&ctx, Key::StatusGraphHeight);
+            rssi_graph(
+                ui,
+                egui::vec2(width, height),
+                &samples,
+                px(&ctx, Key::StatusBarGap),
+                px(&ctx, Key::StatusBarMin),
+            );
             match nodes
                 .get(slot)
                 .and_then(|&addr| self.status_bar_node(addr).map(|status| (addr, status)))

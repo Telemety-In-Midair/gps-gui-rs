@@ -12,7 +12,7 @@ use std::time::Duration;
 use midair_proto::{ble, session};
 
 use crate::app::ui::text::beacon as text;
-use crate::app::ui::theme::{em, gap, GAP_BLOCK, GAP_HAIR, GAP_ITEM, GAP_TIGHT};
+use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{
     button, check, content_page, feedback_label, heading, hint, row, section, text_field,
 };
@@ -25,12 +25,6 @@ use crate::ble::ConfigWrite;
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const SCAN_TICK: Duration = Duration::from_millis(500);
 
-/// Widths in text heights, so a box holds roughly the same number of
-/// characters whatever the font scale is: a board's nickname, and a number of
-/// milliseconds or seconds.
-const NAME_EM: f32 = 7.0;
-const NUMBER_EM: f32 = 5.0;
-
 impl MyApp {
     pub(crate) fn beacon_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
@@ -40,23 +34,23 @@ impl MyApp {
 
                 // Which board first, then what to do about the link to it.
                 section!(ui, "Device");
-                gap(ui, GAP_TIGHT);
+                gap(ui, Key::GapTight);
                 self.device_picker_ui(ui);
 
                 section!(ui, sep "Link");
-                gap(ui, GAP_TIGHT);
+                gap(ui, Key::GapTight);
                 self.ble_link_ui(ui);
 
                 section!(ui, sep "Connection");
-                gap(ui, GAP_TIGHT);
+                gap(ui, Key::GapTight);
                 self.connection_ui(ui);
 
                 section!(ui, sep "Board name", text::BOARD_NAME_INTRO);
-                gap(ui, GAP_TIGHT);
+                gap(ui, Key::GapTight);
                 self.board_name_ui(ui);
 
                 section!(ui, sep "Board power and sleep", text::BOARD_INTRO);
-                gap(ui, GAP_ITEM);
+                gap(ui, Key::GapItem);
                 self.board_power_ui(ui);
             });
         });
@@ -90,7 +84,7 @@ impl MyApp {
                 ui.spinner();
             }
         });
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
 
         let rows = self.device_rows();
         // Named boards are remembered, so an empty list means nothing has ever
@@ -116,7 +110,6 @@ impl MyApp {
             self.select_device(None);
         }
 
-        let name_width = em(ui) * NAME_EM;
         for device in rows {
             ui.horizontal_wrapped(|ui| {
                 if ui.radio(device.selected, "").clicked() && !device.selected {
@@ -126,7 +119,7 @@ impl MyApp {
                 // forgets the board, and that must not happen mid-edit just
                 // because the box was cleared before retyping.
                 let name = self.name_edit(&device.mac);
-                if text_field(ui, name, "name this board", name_width).lost_focus() {
+                if text_field(ui, name, "name this board", Key::BeaconName).lost_focus() {
                     self.commit_name(&device.mac);
                 }
                 // A name stored on the board is what every page calls it,
@@ -157,7 +150,7 @@ impl MyApp {
             });
         }
 
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
         hint!(ui, text::NAMES_NOTE);
         // The signal readings move by themselves while a scan runs.
         if scanning {
@@ -202,7 +195,7 @@ impl MyApp {
             }
         });
 
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
         // Which board these buttons act on. With several boards around, the
         // link state means little without knowing whose it is.
         ui.label(format!("Board: {}", self.selected_device_label()));
@@ -229,14 +222,14 @@ impl MyApp {
         // connected board never sleeps, so a sleep interval that "does
         // nothing" is usually just the app holding the link open.
         if let (true, Some(s)) = (connected, self.board_settings) {
-            gap(ui, GAP_HAIR);
+            gap(ui, Key::GapHair);
             match s.sleep_interval_s {
                 0 => hint!(ui, text::SLEEP_DISABLED),
                 secs => hint!(ui, text::will_sleep(secs, s.adv_window_s)),
             };
         }
         if !connected && !idle {
-            gap(ui, GAP_HAIR);
+            gap(ui, Key::GapHair);
             hint!(ui, text::ONLY_ON_WINDOW);
             // The elapsed count is the only thing here that moves by itself; a
             // one-second tick keeps it honest without pinning the frame rate.
@@ -257,17 +250,16 @@ impl MyApp {
             "Connect automatically at startup",
             hover: text::AUTO_CONNECT_HOVER,
         );
-        gap(ui, GAP_TIGHT);
+        gap(ui, Key::GapTight);
         if button!(ui, "Save to config file", hover: text::SAVE_HOVER).clicked() {
             self.save_config();
         }
         feedback_label(ui, self.config.ui, &self.config_feedback);
 
-        gap(ui, GAP_ITEM);
+        gap(ui, Key::GapItem);
         let ready = self.ble_connected && !self.ble_ack_pending;
-        let width = em(ui) * NUMBER_EM;
         row(ui, "Notify interval (ms):", |ui| {
-            text_field(ui, &mut self.ble_interval_text, "", width);
+            text_field(ui, &mut self.ble_interval_text, "", Key::BeaconNumber);
             if button!(ui, "Apply", enabled: ready).clicked() {
                 self.apply_notify_interval();
             }
@@ -294,10 +286,14 @@ impl MyApp {
         }
         let busy = self.ble_ack_pending;
         let named = self.board_own_name().is_some();
-        let width = em(ui) * NAME_EM;
         row(ui, "Name:", |ui| {
-            text_field(ui, &mut self.board_name_text, "name this board", width)
-                .on_hover_text(text::board_name_hover(ble::NAME_LABEL_MAX));
+            text_field(
+                ui,
+                &mut self.board_name_text,
+                "name this board",
+                Key::BeaconName,
+            )
+            .on_hover_text(text::board_name_hover(ble::NAME_LABEL_MAX));
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_board_name();
             }
@@ -375,7 +371,7 @@ impl MyApp {
         }
         ui.label(text::mode_state(s.mode));
 
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.add_enabled_ui(!busy, |ui| {
             for (mut on, id, label, hover) in [
                 (
@@ -397,15 +393,14 @@ impl MyApp {
             }
         });
 
-        let width = em(ui) * NUMBER_EM;
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.strong("Wake check");
         hint!(
             ui,
             text::wake_check(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
         );
         row(ui, "Every (s):", |ui| {
-            text_field(ui, &mut self.sleep_interval_text, "", width);
+            text_field(ui, &mut self.sleep_interval_text, "", Key::BeaconNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_sleep_interval(None);
             }
@@ -425,15 +420,12 @@ impl MyApp {
             secs => format!("Board: waking every {}.", secs_text(secs)),
         });
 
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.strong("Advertising window");
-        hint!(
-            ui,
-            text::adv_window(ble::ESP_ADV_MIN_S, ble::ESP_ADV_MAX_S)
-        );
+        hint!(ui, text::adv_window(ble::ESP_ADV_MIN_S, ble::ESP_ADV_MAX_S));
         hint!(ui, text::adv_window_note(session::LINGER_S as u32));
         row(ui, "Window (s):", |ui| {
-            text_field(ui, &mut self.adv_window_text, "", width);
+            text_field(ui, &mut self.adv_window_text, "", Key::BeaconNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_adv_window();
             }
@@ -446,11 +438,11 @@ impl MyApp {
             secs_text(s.adv_window_s)
         ));
 
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.strong("BLE off period");
         hint!(ui, text::ble_off(ble::BLE_OFF_MIN_S, ble::BLE_OFF_MAX_S));
         row(ui, "Down for (s):", |ui| {
-            text_field(ui, &mut self.ble_off_text, "", width);
+            text_field(ui, &mut self.ble_off_text, "", Key::BeaconNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_ble_off(None);
             }
@@ -476,14 +468,14 @@ impl MyApp {
             ),
         });
 
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.strong("Idle timeout");
         hint!(
             ui,
             text::idle_timeout(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S)
         );
         row(ui, "Idle for (s):", |ui| {
-            text_field(ui, &mut self.idle_timeout_text, "", width);
+            text_field(ui, &mut self.idle_timeout_text, "", Key::BeaconNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_idle_timeout();
             }
@@ -507,7 +499,7 @@ impl MyApp {
         // Separated from the settings above because it is not one. Every
         // other control on this page changes what the board will do; this
         // one makes it do something, once, and then the link goes away.
-        gap(ui, GAP_BLOCK);
+        gap(ui, Key::GapBlock);
         ui.strong("Sleep now");
         hint!(
             ui,
@@ -515,7 +507,7 @@ impl MyApp {
         );
         hint!(ui, small text::SLEEP_NOW_MODE_NOTE);
         row(ui, "For (s):", |ui| {
-            text_field(ui, &mut self.sleep_now_text, "", width)
+            text_field(ui, &mut self.sleep_now_text, "", Key::BeaconNumber)
                 .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
             if button!(ui, "Sleep now", enabled: !busy, hover: text::SLEEP_NOW_HOVER).clicked() {
                 self.apply_sleep_now();
