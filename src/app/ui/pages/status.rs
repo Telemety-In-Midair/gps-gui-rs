@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use midair_proto::hop::{STRATUM_GPS, STRATUM_MAX};
 use midair_proto::link::{TELEM_FLAG_CFG_LOADED, TELEM_FLAG_GPS_FIX, TELEM_FLAG_SD_OK};
 
 use crate::app::ui::text::status as text;
@@ -17,6 +18,17 @@ use crate::app::{secs_text, BleIntent, MyApp};
 /// refreshed. They move by themselves, so a tick keeps them honest without
 /// pinning the frame rate.
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
+
+/// Where the board's hop clock comes from, in words. Stratum 0 is its own
+/// GPS; the ceiling is a clock nothing has set, which is a board that has
+/// not heard the network yet.
+fn hop_clock_text(stratum: u8) -> String {
+    match stratum {
+        STRATUM_GPS => "clock from the board's GPS".to_string(),
+        STRATUM_MAX => "not synced yet (own clock)".to_string(),
+        s => format!("synced, stratum {s}"),
+    }
+}
 
 impl MyApp {
     pub(crate) fn status_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
@@ -68,6 +80,13 @@ impl MyApp {
                     ));
                 }
                 ui.label(format!("RX: {}   TX: {}", t.rx_count, t.tx_count));
+                if let Some(stratum) = t.hop_stratum() {
+                    ui.label(format!(
+                        "Hopping: channel {}, {}",
+                        t.hop_channel,
+                        hop_clock_text(stratum)
+                    ));
+                }
 
                 // Board housekeeping.
                 section!(ui, "Board");

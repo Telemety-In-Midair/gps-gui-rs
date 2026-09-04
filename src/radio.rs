@@ -31,20 +31,27 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use midair_proto::hop;
 use midair_proto::lora;
 use midair_proto::radiocfg::RadioConfig;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-/// The 902-928 MHz frequency-hopping rule caps channel dwell at 400 ms per
-/// 20 s, which is the same thing as a 2% duty cycle.
-const DWELL_MS: f32 = 400.0;
-const DUTY_LIMIT: f32 = 0.02;
+/// The 902-928 MHz frequency-hopping rule caps how long one visit may
+/// occupy a channel: 400 ms, within any 20 s. A hopping node visits each
+/// channel once a cycle, so this is the ceiling on one transmission and
+/// says nothing about how often the node transmits.
+const HOP_VISIT_MS: f32 = 400.0;
 
-/// The band the dwell limit applies to, in Hz.
+/// The band the hopping rule applies to, in Hz.
 const US_BAND_HZ: std::ops::RangeInclusive<u32> = 902_000_000..=928_000_000;
 
+/// The one bandwidth the 902-928 MHz band lets sit on a single channel with
+/// no limit at all: a signal this wide counts as digital modulation rather
+/// than as something that has to hop.
+const WIDE_SINGLE_KHZ: u16 = 500;
+
 /// What one beacon at a given config costs in airtime, and whether that fits
-/// inside the US band's dwell limit.
+/// the hop slot and the US band's rule for one transmission.
 ///
 /// Worked out from the config rather than measured, so the Radio page can show
 /// it while the settings are still being edited. Everything the page prints is
@@ -52,27 +59,39 @@ const US_BAND_HZ: std::ops::RangeInclusive<u32> = 902_000_000..=928_000_000;
 pub struct Airtime {
     /// Time on air for one beacon, in milliseconds.
     pub toa_ms: f32,
-    /// Length of the frame that time is for, header included.
+    /// Length of the frame that time is for, header and sync word included.
     pub payload_len: usize,
     /// Seconds between beacons, or 0 when the beacon is switched off.
     pub interval_s: u16,
     /// Airtime as a percentage of the beacon interval. `None` with the beacon
     /// off, there being no periodic airtime to be a fraction of.
     pub duty_pct: Option<f32>,
-    /// The regulatory budget for one transmission, when the configured
-    /// frequency is in the 902-928 MHz band. `None` out of band, where this
-    /// rule says nothing.
+    /// Whether the configured frequency is in the 902-928 MHz band, the one
+    /// whose rules this model knows.
+    pub in_band: bool,
+    /// The regulatory budget for one transmission, when in band and the band
+    /// puts one on this configuration. `None` out of band, and for the 500 kHz
+    /// single channel the band allows without limit.
     pub limit: Option<AirtimeLimit>,
+    /// The hop slot the frame has to fit, when hopping is on.
+    pub hop: Option<HopFit>,
 }
 
-/// The dwell budget one transmission has to fit inside, and which of the two
-/// rules is the binding one.
+/// The budget one transmission has to fit inside, and the rule that sets it.
 pub struct AirtimeLimit {
     /// The budget itself, in milliseconds.
     pub budget_ms: f32,
-    /// Whether the 400 ms channel dwell ceiling is what sets the budget, as
-    /// opposed to the 2% duty cycle over the beacon interval.
-    pub dwell_bound: bool,
+    pub rule: LimitRule,
+}
+
+/// Which rule of the 902-928 MHz band bounds one transmission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitRule {
+    /// Hopping: one visit may occupy a channel for at most 400 ms.
+    HopVisit,
+    /// A single channel narrower than 500 kHz, which the band does not
+    /// allow at all: the budget is what hopping would hold it to.
+    NeedsHopping,
 }
 
 impl AirtimeLimit {
@@ -83,36 +102,74 @@ impl AirtimeLimit {
     }
 }
 
+/// The hop plan as it bears on one frame: how long a slot is, how much of
+/// it a frame may use, and how much this one does.
+pub struct HopFit {
+    pub channels: u8,
+    pub step_khz: u16,
+    pub dwell_ms: u16,
+    /// Lowest and highest carrier in the plan, MHz.
+    pub span_mhz: (f32, f32),
+    /// The slot less its guards: what a frame has to fit in, ms.
+    pub window_ms: f32,
+    /// The frame's share of the window, percent.
+    pub window_pct: f32,
+}
+
+impl HopFit {
+    /// How far a transmission of `toa_ms` overruns the window, or `None` when
+    /// it fits.
+    pub fn overrun_ms(&self, toa_ms: f32) -> Option<f32> {
+        (toa_ms > self.window_ms).then_some(toa_ms - self.window_ms)
+    }
+}
+
 /// Work out the airtime one beacon costs at `cfg`.
 ///
-/// One beacon's budget is 2% of the interval, never above the 400 ms dwell
-/// ceiling: at an interval below 20 s more than one beacon lands in a 20 s
-/// window, so the per-beacon share tightens (200 ms at the 10 s default),
-/// while a single transmission can never top the ceiling either. With the
-/// beacon off there is no interval to take a share of, so only the ceiling is
-/// left to test against.
+/// In the 902-928 MHz band the rule depends on the plan. Hopping, one
+/// transmission may hold a channel for 400 ms and the interval is free. On a
+/// single channel, only a 500 kHz signal is allowed at all, and then without
+/// limit; anything narrower has to hop, so its budget is reported as the one
+/// hopping would give it, alongside a rule that says why.
 pub fn airtime(cfg: &RadioConfig) -> Airtime {
     let toa_ms = cfg.beacon_airtime_us() as f32 / 1000.0;
     let interval_s = cfg.beacon_interval_s;
     let duty_pct =
         (interval_s > 0).then(|| toa_ms / (interval_s as f32 * 1000.0) * 100.0);
-    let limit = US_BAND_HZ.contains(&cfg.frequency_hz).then(|| {
-        let budget_ms = if interval_s == 0 {
-            DWELL_MS
-        } else {
-            (DUTY_LIMIT * interval_s as f32 * 1000.0).min(DWELL_MS)
-        };
-        AirtimeLimit {
-            budget_ms,
-            dwell_bound: budget_ms >= DWELL_MS,
+    let in_band = US_BAND_HZ.contains(&cfg.frequency_hz);
+    let plan = hop::Plan::from_config(cfg);
+    let hop = plan.map(|plan| {
+        let (lo, hi) = plan.span_hz();
+        let window_ms = plan.window_ms() as f32;
+        HopFit {
+            channels: plan.channels,
+            step_khz: plan.step_khz,
+            dwell_ms: plan.dwell_ms,
+            span_mhz: (lo as f32 / 1e6, hi as f32 / 1e6),
+            window_ms,
+            window_pct: if window_ms > 0.0 { toa_ms / window_ms * 100.0 } else { f32::INFINITY },
         }
     });
+    let limit = match (in_band, plan.is_some(), cfg.bandwidth_khz) {
+        (false, _, _) => None,
+        (true, true, _) => Some(AirtimeLimit {
+            budget_ms: HOP_VISIT_MS,
+            rule: LimitRule::HopVisit,
+        }),
+        (true, false, bw) if bw >= WIDE_SINGLE_KHZ => None,
+        (true, false, _) => Some(AirtimeLimit {
+            budget_ms: HOP_VISIT_MS,
+            rule: LimitRule::NeedsHopping,
+        }),
+    };
     Airtime {
         toa_ms,
-        payload_len: lora::HEADER_LEN + lora::position_msg_len(cfg.beacon_fields),
+        payload_len: cfg.frame_overhead() + lora::position_msg_len(cfg.beacon_fields),
         interval_s,
         duty_pct,
+        in_band,
         limit,
+        hop,
     }
 }
 
@@ -515,6 +572,9 @@ fn config_value(cfg: &RadioConfig, key: &str) -> Option<EditVal> {
         "coding_rate" => EditVal::Int(cfg.coding_rate as i64),
         "power_dbm" => EditVal::Int(cfg.power_dbm as i64),
         "rx_boost" => EditVal::Bool(cfg.rx_boost),
+        "hop_channels" => EditVal::Int(cfg.hop_channels as i64),
+        "hop_step_khz" => EditVal::Int(cfg.hop_step_khz as i64),
+        "hop_dwell_ms" => EditVal::Int(cfg.hop_dwell_ms as i64),
         "dcdc_enabled" => EditVal::Bool(cfg.dcdc_enabled),
         // The two RF-path keys. Both describe how the module's antenna
         // switch is wired rather than anything tunable, and the reference
@@ -764,45 +824,80 @@ power_mode = \"full\"
         assert_eq!(back.tcxo_volts, TcxoVolts::V3_3);
     }
 
-    /// The airtime panel's two limits: which one binds, and what the beacon
-    /// interval does to the budget.
-    ///
-    /// At the 10 s default the 2% duty cycle is the tighter of the two (200 ms
-    /// against the 400 ms ceiling), and only past a 20 s interval does the
-    /// ceiling take over. Reading the wrong one out would understate the
-    /// budget by a factor of two at the setting the firmware ships with.
+    /// The shipped config hops, so the band's rule is 400 ms per channel
+    /// visit whatever the interval, and the default beacon fits both that
+    /// and the slot window with room to spare.
     #[test]
-    fn the_tighter_of_the_dwell_and_duty_limits_binds() {
+    fn hopping_limits_one_visit_and_frees_the_interval() {
         let mut cfg = RadioConfig::default();
-
-        cfg.beacon_interval_s = 10;
-        let limit = airtime(&cfg).limit.expect("915 MHz is in band");
-        // 2% of 10 s. Compared loosely because 0.02 has no exact `f32`, which
-        // is invisible at the one decimal the panel prints.
-        assert!((limit.budget_ms - 200.0).abs() < 0.01);
-        assert!(!limit.dwell_bound);
-
-        // Past 20 s the 2% share exceeds the ceiling, which then binds.
-        cfg.beacon_interval_s = 60;
-        let limit = airtime(&cfg).limit.expect("915 MHz is in band");
-        assert_eq!(limit.budget_ms, 400.0);
-        assert!(limit.dwell_bound);
-
-        // With the beacon off there is no interval to take a share of, so only
-        // the ceiling is left to test one transmission against.
-        cfg.beacon_interval_s = 0;
+        for interval in [1u16, 10, 60, 0] {
+            cfg.beacon_interval_s = interval;
+            let est = airtime(&cfg);
+            assert!(est.in_band);
+            let limit = est.limit.expect("915 MHz is in band");
+            assert_eq!(limit.budget_ms, 400.0);
+            assert_eq!(limit.rule, LimitRule::HopVisit);
+            assert_eq!(est.duty_pct.is_none(), interval == 0);
+        }
         let est = airtime(&cfg);
-        assert!(est.duty_pct.is_none());
-        assert_eq!(est.limit.expect("still in band").budget_ms, 400.0);
+        let fit = est.hop.expect("hopping is on");
+        assert_eq!((fit.channels, fit.step_khz, fit.dwell_ms), (50, 500, 1000));
+        assert_eq!(fit.window_ms, 800.0);
+        assert_eq!(fit.overrun_ms(est.toa_ms), None);
+        assert!(fit.window_pct > 30.0 && fit.window_pct < 40.0, "{}", fit.window_pct);
+        assert!((fit.span_mhz.0 - 902.75).abs() < 0.001);
+        assert!((fit.span_mhz.1 - 927.25).abs() < 0.001);
+        // The frame counted is the one that goes out: header, sync word,
+        // position.
+        assert_eq!(est.payload_len, lora::HEADER_SYNC_LEN + 10);
     }
 
-    /// Out of the 902-928 MHz band the dwell rule says nothing, so the panel
-    /// must not print a verdict it has no basis for.
+    /// A frame longer than the slot window is reported as an overrun of the
+    /// window, with the slot it would need visible in the numbers.
     #[test]
-    fn out_of_band_has_no_dwell_limit() {
+    fn a_frame_that_outgrows_the_slot_overruns_the_window() {
+        let mut cfg = RadioConfig::default();
+        cfg.bandwidth_khz = 125; // the default beacon is ~1.15 s here
+        let est = airtime(&cfg);
+        let fit = est.hop.expect("hopping is on");
+        assert!(fit.overrun_ms(est.toa_ms).is_some());
+        // And it is over the band's per-visit cap as well.
+        assert!(est.limit.unwrap().overrun_ms(est.toa_ms).is_some());
+        cfg.hop_dwell_ms = 2_000;
+        let est = airtime(&cfg);
+        assert_eq!(est.hop.unwrap().overrun_ms(est.toa_ms), None);
+    }
+
+    /// Hopping off, the band's answer depends on the bandwidth: 500 kHz may
+    /// sit on one channel without limit, anything narrower may not sit
+    /// there at all.
+    #[test]
+    fn single_channel_is_free_at_500_khz_and_needs_hopping_below() {
+        let mut cfg = RadioConfig::default();
+        cfg.hop_channels = 0;
+        let est = airtime(&cfg);
+        assert!(est.in_band);
+        assert!(est.hop.is_none());
+        assert!(est.limit.is_none());
+        assert_eq!(est.payload_len, lora::HEADER_LEN + 10);
+
+        cfg.bandwidth_khz = 250;
+        let limit = airtime(&cfg).limit.expect("narrow single channel");
+        assert_eq!(limit.rule, LimitRule::NeedsHopping);
+        assert_eq!(limit.budget_ms, 400.0);
+    }
+
+    /// Out of the 902-928 MHz band the rules say nothing, so the panel
+    /// must not print a verdict it has no basis for. The hop plan is still
+    /// reported - it is a fact about the config, not about the band.
+    #[test]
+    fn out_of_band_has_no_limit() {
         let mut cfg = RadioConfig::default();
         cfg.frequency_hz = 868_000_000;
-        assert!(airtime(&cfg).limit.is_none());
+        let est = airtime(&cfg);
+        assert!(!est.in_band);
+        assert!(est.limit.is_none());
+        assert!(est.hop.is_some());
         // The band ends are inclusive; a config sitting on one is in band.
         cfg.frequency_hz = 902_000_000;
         assert!(airtime(&cfg).limit.is_some());
@@ -816,7 +911,7 @@ power_mode = \"full\"
     fn an_overrun_says_how_far_over() {
         let limit = AirtimeLimit {
             budget_ms: 200.0,
-            dwell_bound: false,
+            rule: LimitRule::HopVisit,
         };
         assert_eq!(limit.overrun_ms(150.0), None);
         assert_eq!(limit.overrun_ms(200.0), None);
@@ -834,7 +929,7 @@ power_mode = \"full\"
         assert_eq!(est.interval_s, 10);
         assert_eq!(
             est.payload_len,
-            lora::HEADER_LEN + lora::position_msg_len(cfg.beacon_fields)
+            cfg.frame_overhead() + lora::position_msg_len(cfg.beacon_fields)
         );
         let duty = est.duty_pct.expect("the beacon is on");
         let expected = est.toa_ms / (10.0 * 1000.0) * 100.0;

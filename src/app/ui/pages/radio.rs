@@ -204,9 +204,9 @@ impl MyApp {
     }
 
     /// The airtime estimate: exact time-on-air for one beacon at the settings
-    /// currently in the editor, the duty cycle the beacon interval sets, and
-    /// whether one transmission stays under the dwell limit the US
-    /// 902-928 MHz band imposes.
+    /// currently in the editor, the duty cycle the beacon interval sets,
+    /// whether the frame fits a hop slot, and whether one transmission stays
+    /// under what the US 902-928 MHz band allows for this plan.
     ///
     /// The values are read from the editor the same way a push reads them - the
     /// wire bytes parsed back into a `RadioConfig` - so the estimate tracks
@@ -247,9 +247,42 @@ impl MyApp {
             }
         }
 
-        // The dwell rule only means anything in-band, so out of band there is
+        // The hop plan, and whether the frame fits one slot of it.
+        if let Some(fit) = &est.hop {
+            ui.label(format!(
+                "Hopping: {} channels x {} kHz ({:.2}-{:.2} MHz), {} ms per channel",
+                fit.channels, fit.step_khz, fit.span_mhz.0, fit.span_mhz.1, fit.dwell_ms,
+            ));
+            match fit.overrun_ms(est.toa_ms) {
+                None => {
+                    ui.colored_label(
+                        colors.ok,
+                        format!(
+                            "Fits the {:.0} ms slot window ({:.0}% of it)",
+                            fit.window_ms, fit.window_pct
+                        ),
+                    );
+                }
+                Some(over) => {
+                    ui.colored_label(
+                        colors.error,
+                        format!("Over the {:.0} ms slot window by {over:.0} ms", fit.window_ms),
+                    );
+                    hint!(ui, text::HOP_OVERRUN);
+                }
+            }
+            hint!(ui, text::HOP_INTERVAL);
+        }
+
+        // The band rules only mean anything in-band, so out of band there is
         // nothing to report.
+        if !est.in_band {
+            return;
+        }
         let Some(limit) = &est.limit else {
+            // In band with no limit: the one single-channel modulation the
+            // band allows without one.
+            hint!(ui, text::WIDE_SINGLE);
             return;
         };
         let (verdict, color) = match limit.overrun_ms(est.toa_ms) {
@@ -266,16 +299,15 @@ impl MyApp {
             ),
         };
         ui.colored_label(color, verdict);
-        // Say which of the two limits is binding, so the number is not a bare
-        // figure the reader has to reverse-engineer.
-        if limit.dwell_bound {
-            hint!(ui, "Limit: 400 ms channel dwell per 20 s.");
-        } else {
-            hint!(
-                ui,
-                "Limit: 2% duty cycle over the {} s interval.",
-                est.interval_s
-            );
+        // Say which rule is binding, so the number is not a bare figure the
+        // reader has to reverse-engineer.
+        match limit.rule {
+            radio::LimitRule::HopVisit => {
+                hint!(ui, text::HOP_LIMIT);
+            }
+            radio::LimitRule::NeedsHopping => {
+                ui.colored_label(colors.error, text::NEEDS_HOPPING);
+            }
         }
     }
 

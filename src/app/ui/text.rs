@@ -341,6 +341,22 @@ pub(crate) mod radio {
 
     /// The beacon is off, so there is no periodic airtime to report.
     pub(crate) const BEACON_OFF: &str = "Beacon disabled (interval 0): no periodic airtime.";
+
+    pub(crate) const HOP_OVERRUN: &str =
+        "A frame longer than the window still goes out, but it holds one channel past the \
+         hop. Lengthen hop_dwell_ms, widen the bandwidth or send fewer fields.";
+    pub(crate) const HOP_INTERVAL: &str =
+        "Hopping, a node transmits at most once per channel visit, so the beacon interval \
+         can go down to one slot.";
+    pub(crate) const HOP_LIMIT: &str =
+        "Limit: 400 ms on one channel per visit (902-928 MHz hopping rule). The interval is \
+         not limited.";
+    pub(crate) const NEEDS_HOPPING: &str =
+        "Narrower than 500 kHz on a single channel is not allowed in 902-928 MHz: set \
+         hop_channels, or use bandwidth_khz = 500.";
+    pub(crate) const WIDE_SINGLE: &str =
+        "500 kHz on one channel counts as digital modulation in 902-928 MHz: no dwell or \
+         duty limit, but the band's only single-channel option.";
 }
 
 /// The Logging page: the CSV recorder and its graph.
