@@ -61,11 +61,19 @@ pub struct Airtime {
     pub toa_ms: f32,
     /// Length of the frame that time is for, header and sync word included.
     pub payload_len: usize,
-    /// Seconds between beacons, or 0 when the beacon is switched off.
+    /// Seconds between beacons, or 0 when the node is silenced.
     pub interval_s: u16,
     /// Airtime as a percentage of the beacon interval. `None` with the beacon
     /// off, there being no periodic airtime to be a fraction of.
     pub duty_pct: Option<f32>,
+    /// Time on air for one no-fix ping, in milliseconds.
+    pub ping_ms: f32,
+    /// Seconds between pings while there is no fix; 0 when pings are off,
+    /// which a silenced node also is.
+    pub ping_interval_s: u16,
+    /// The ping's airtime as a percentage of its interval, `None` with pings
+    /// off.
+    pub ping_duty_pct: Option<f32>,
     /// Whether the configured frequency is in the 902-928 MHz band, the one
     /// whose rules this model knows.
     pub in_band: bool,
@@ -136,6 +144,11 @@ pub fn airtime(cfg: &RadioConfig) -> Airtime {
     let interval_s = cfg.beacon_interval_s;
     let duty_pct =
         (interval_s > 0).then(|| toa_ms / (interval_s as f32 * 1000.0) * 100.0);
+    let ping_ms = cfg.ping_airtime_us() as f32 / 1000.0;
+    // A beacon interval of 0 silences the node, pings included.
+    let ping_interval_s = if interval_s == 0 { 0 } else { cfg.ping_interval_s };
+    let ping_duty_pct =
+        (ping_interval_s > 0).then(|| ping_ms / (ping_interval_s as f32 * 1000.0) * 100.0);
     let in_band = US_BAND_HZ.contains(&cfg.frequency_hz);
     let plan = hop::Plan::from_config(cfg);
     let hop = plan.map(|plan| {
@@ -167,6 +180,9 @@ pub fn airtime(cfg: &RadioConfig) -> Airtime {
         payload_len: cfg.frame_overhead() + lora::position_msg_len(cfg.beacon_fields),
         interval_s,
         duty_pct,
+        ping_ms,
+        ping_interval_s,
+        ping_duty_pct,
         in_band,
         limit,
         hop,
@@ -589,6 +605,7 @@ fn config_value(cfg: &RadioConfig, key: &str) -> Option<EditVal> {
         "max_hops" => EditVal::Int(cfg.max_hops as i64),
         "dedup_ttl_s" => EditVal::Int(cfg.dedup_ttl_s as i64),
         "interval_s" | "beacon_interval_s" => EditVal::Int(cfg.beacon_interval_s as i64),
+        "ping_interval_s" => EditVal::Int(cfg.ping_interval_s as i64),
         "fields" | "beacon_fields" => EditVal::Str(fields_to_string(cfg.beacon_fields)),
         "sd_enabled" => EditVal::Bool(cfg.sd_enabled),
         "verbose" => EditVal::Bool(cfg.verbose),
@@ -934,5 +951,31 @@ power_mode = \"full\"
         let duty = est.duty_pct.expect("the beacon is on");
         let expected = est.toa_ms / (10.0 * 1000.0) * 100.0;
         assert!((duty - expected).abs() < f32::EPSILON);
+    }
+
+    /// The ping has its own interval and its own, smaller, airtime; turning
+    /// the beacon off silences the ping too, and the ping can be turned off
+    /// on its own.
+    #[test]
+    fn the_ping_is_priced_on_its_own_interval() {
+        let mut cfg = RadioConfig::default();
+        let est = airtime(&cfg);
+        assert_eq!((est.interval_s, est.ping_interval_s), (1, 5));
+        assert!(est.ping_ms < est.toa_ms);
+        let ping_duty = est.ping_duty_pct.expect("pings are on");
+        assert!((ping_duty - est.ping_ms / 5000.0 * 100.0).abs() < f32::EPSILON);
+
+        cfg.ping_interval_s = 0;
+        let est = airtime(&cfg);
+        assert_eq!(est.ping_interval_s, 0);
+        assert!(est.ping_duty_pct.is_none());
+        assert!(est.duty_pct.is_some());
+
+        cfg.ping_interval_s = 5;
+        cfg.beacon_interval_s = 0;
+        let est = airtime(&cfg);
+        assert!(est.duty_pct.is_none());
+        assert_eq!(est.ping_interval_s, 0);
+        assert!(est.ping_duty_pct.is_none());
     }
 }

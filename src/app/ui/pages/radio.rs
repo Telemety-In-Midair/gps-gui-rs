@@ -246,6 +246,18 @@ impl MyApp {
                 hint!(ui, text::BEACON_OFF);
             }
         }
+        match est.ping_duty_pct {
+            Some(duty) => {
+                ui.label(format!(
+                    "No-fix ping: {:.1} ms every {} s  ->  duty cycle {duty:.2}%",
+                    est.ping_ms, est.ping_interval_s,
+                ));
+            }
+            None if est.duty_pct.is_some() => {
+                hint!(ui, text::PING_OFF);
+            }
+            None => {}
+        }
 
         // The hop plan, and whether the frame fits one slot of it.
         if let Some(fit) = &est.hop {

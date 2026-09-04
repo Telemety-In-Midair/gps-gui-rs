@@ -340,7 +340,10 @@ pub(crate) mod radio {
     pub(crate) const NO_BACKUPS: &str = "No backups yet. Saving keeps the previous version here.";
 
     /// The beacon is off, so there is no periodic airtime to report.
-    pub(crate) const BEACON_OFF: &str = "Beacon disabled (interval 0): no periodic airtime.";
+    pub(crate) const BEACON_OFF: &str =
+        "Beacon disabled (interval 0): the node is silent, pings included.";
+    pub(crate) const PING_OFF: &str =
+        "No-fix ping disabled (ping_interval_s 0): a node without a fix is silent.";
 
     pub(crate) const HOP_OVERRUN: &str =
         "A frame longer than the window still goes out, but it holds one channel past the \
