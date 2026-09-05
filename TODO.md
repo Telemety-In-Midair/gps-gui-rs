@@ -152,3 +152,16 @@ through MediaStore (`src/export.rs`, no dex shim needed).
 
 - BLE scan should always show time scanning seconds. Seconds should show even when minutes show.
 - Make a transparency slider for this and the maps top bars backgrounds.
+
+- Make beacons single tap not double.
+- Add key for beacon color.
+
+- On mobile: needs to get automatic place to save/load radio config. Also path copy button.
+
+- ~~Load radio settings from board not working?~~
+Android only, and nothing to do with the Radio page. The three connect-time
+reads (settings, radio config, name) were issued back to back, and Android
+refuses a GATT read while another is outstanding - so only the settings one
+ever answered, `board_radio_config` stayed empty and the button stayed grey.
+The reads now go one at a time, waiting for each value. Desktop already
+awaited each read and was never affected. Not yet confirmed on a device.

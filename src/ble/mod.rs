@@ -750,6 +750,47 @@ fn node_ping_event(bytes: &[u8]) -> Option<BleEvent> {
     }))
 }
 
+/// The event a characteristic value carries, whether it arrived as a change
+/// notification or as the answer to a read - both reach here on one path, so
+/// a value means the same thing however it was asked for.
+///
+/// The ack is the exception and stays with the pump: what one means depends on
+/// whether a bulk push is running. `None` for a value that reports nothing - a
+/// packet that does not decode, or a characteristic still holding the
+/// placeholder the board seeds it with.
+///
+/// Only the Android transport dispatches on a UUID as a string - the desktop
+/// one matches btleplug's `Uuid` values directly - so this is built for that
+/// one, and `test` is on the gate so the host can still cover it.
+#[cfg(any(target_os = "android", test))]
+fn value_event(uuid: &str, value: &[u8]) -> Option<BleEvent> {
+    if uuid.eq_ignore_ascii_case(packet::POSITION_UUID) {
+        return Some(BleEvent::Fix(PositionPacket::decode(value)?));
+    }
+    if uuid.eq_ignore_ascii_case(ble::TELEMETRY_UUID) {
+        return Some(BleEvent::Telemetry(Telemetry::decode(value)?));
+    }
+    if uuid.eq_ignore_ascii_case(ble::LOG_UUID) {
+        return Some(BleEvent::Log(String::from_utf8_lossy(value).into_owned()));
+    }
+    if uuid.eq_ignore_ascii_case(ble::REMOTE_UUID) {
+        return remote_event(value);
+    }
+    if uuid.eq_ignore_ascii_case(ble::NODE_PING_UUID) {
+        return node_ping_event(value);
+    }
+    if uuid.eq_ignore_ascii_case(ble::SETTINGS_UUID) {
+        return Some(settings_event(value));
+    }
+    if uuid.eq_ignore_ascii_case(ble::RADIO_CONFIG_UUID) {
+        return radio_config_event(value);
+    }
+    if uuid.eq_ignore_ascii_case(ble::NAME_UUID) {
+        return name_event(value);
+    }
+    None
+}
+
 /// The age field at `off`, or 0 when the board's blob is too short to carry
 /// one.
 fn age_of(bytes: &[u8], off: usize) -> u16 {
@@ -1374,5 +1415,39 @@ mod tests {
             settings_event(&newer),
             BleEvent::SettingsUnsupported
         ));
+    }
+
+    /// Android decodes a read's answer on the same path as a notification, so
+    /// this mapping is what decides whether the board's own settings ever
+    /// reach the pages that offer to load them.
+    #[test]
+    fn value_event_maps_a_characteristic_to_what_it_carries() {
+        let cfg = RadioConfig::default();
+        assert!(matches!(
+            value_event(ble::RADIO_CONFIG_UUID, &cfg.encode()),
+            Some(BleEvent::RadioConfig(c)) if c == cfg
+        ));
+        // Java hands the UUID back as a string, and nothing promises which
+        // case it is in.
+        assert!(value_event(&ble::RADIO_CONFIG_UUID.to_uppercase(), &cfg.encode()).is_some());
+        // The characteristic is empty until the board's radio has come up,
+        // which is "nothing reported yet", not a config of zeros.
+        assert!(value_event(ble::RADIO_CONFIG_UUID, &[]).is_none());
+
+        let settings = Settings::default();
+        assert!(matches!(
+            value_event(ble::SETTINGS_UUID, &settings.encode()),
+            Some(BleEvent::Settings(s)) if s == settings
+        ));
+        assert!(matches!(
+            value_event(ble::NAME_UUID, b"ws3gps-lab"),
+            Some(BleEvent::Name(n)) if n == "ws3gps-lab"
+        ));
+
+        // The ack is the pump's own business - what one means depends on
+        // whether a bulk push is running - and an unknown characteristic has
+        // nothing to say.
+        assert!(value_event(packet::ACK_UUID, &[0, 0, 0]).is_none());
+        assert!(value_event("00000000-0000-0000-0000-000000000000", &[1, 2, 3]).is_none());
     }
 }

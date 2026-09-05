@@ -18,15 +18,12 @@ use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 use jni::sys::jint;
 use jni::{JNIEnv, JavaVM, NativeMethod};
 
-use gps_proto::packet::{self, PositionPacket};
+use gps_proto::packet;
 use midair_proto::ble;
-use midair_proto::link::Telemetry;
 
 use super::{
-    name_event, node_ping_event, radio_config_event, remote_event, settings_event, Aborted,
-    BleEvent,
-    BleHandle, BleRequest, DiscoveredDevice, Ended, Inbox, Interrupt, PushStep, Reporter, Target,
-    Wanted, CMD_POLL, PUSH_ACK_TIMEOUT,
+    value_event, Aborted, BleEvent, BleHandle, BleRequest, DiscoveredDevice, Ended, Inbox,
+    Interrupt, PushStep, Reporter, Target, Wanted, CMD_POLL, PUSH_ACK_TIMEOUT,
 };
 
 /// The compiled dex with rs.gps.gui.BleBridge (see android/build-dex.sh).
@@ -36,6 +33,12 @@ const BRIDGE_CLASS: &str = "rs.gps.gui.BleBridge";
 /// ATT MTU to ask the board for once connected: the largest Android accepts,
 /// so the answer is whatever the board's own limit is (it caps at 251).
 const ATT_MTU_REQUEST: i32 = 517;
+
+/// How long a connect-time characteristic read is given to answer. A read the
+/// board refuses produces no callback at all (the shim reports only successful
+/// ones), so this is what ends the wait for one - and it has to end, because
+/// the next read cannot be issued until this one is done.
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Events pushed by the Java callbacks (Binder threads) to the worker.
 enum Cb {
@@ -469,11 +472,28 @@ fn connected(
 
     // Populate the board controls from the board itself rather than assuming
     // defaults for settings it holds in flash across power cycles. The shim
-    // routes the read value through the notify callback, so the pump below
-    // decodes it on the same path a change notification takes.
-    bridge.read_characteristic(packet::SERVICE_UUID, ble::SETTINGS_UUID);
-    bridge.read_characteristic(packet::SERVICE_UUID, ble::RADIO_CONFIG_UUID);
-    bridge.read_characteristic(packet::SERVICE_UUID, ble::NAME_UUID);
+    // routes the read value through the notify callback, so it decodes on the
+    // same path a change notification takes.
+    //
+    // One at a time. Android runs a single GATT operation per connection and
+    // refuses a read issued while another is outstanding - on the spot, by
+    // returning false - so firing all three off together delivers the first
+    // one's value and silently loses the other two. Anything that notifies
+    // while a read is in flight is reported here rather than dropped.
+    for chr in [ble::SETTINGS_UUID, ble::RADIO_CONFIG_UUID, ble::NAME_UUID] {
+        if !bridge.read_characteristic(packet::SERVICE_UUID, chr) {
+            continue;
+        }
+        let _ = wait_cb(cb_rx, report, inbox, target, READ_TIMEOUT, |cb| match cb {
+            Cb::Notify { uuid, value } => {
+                if let Some(e) = value_event(uuid, value) {
+                    report.send(e);
+                }
+                uuid.eq_ignore_ascii_case(chr)
+            }
+            _ => false,
+        })?;
+    }
 
     // Pump: notifications out, commands in, until disconnect.
     //
@@ -517,11 +537,7 @@ fn connected(
 
         match cb_rx.recv_timeout(Duration::from_millis(250)) {
             Ok(Cb::Notify { uuid, value }) => {
-                if uuid.eq_ignore_ascii_case(packet::POSITION_UUID) {
-                    if let Some(p) = PositionPacket::decode(&value) {
-                        report.send(BleEvent::Fix(p));
-                    }
-                } else if uuid.eq_ignore_ascii_case(packet::ACK_UUID) {
+                if uuid.eq_ignore_ascii_case(packet::ACK_UUID) {
                     if let Some(a) = packet::parse_ack(&value) {
                         if a.id == ble::ACK_ID_BULK {
                             // A bulk ack paces the running push; it is not a
@@ -558,30 +574,8 @@ fn connected(
                             report.send(BleEvent::Ack(a));
                         }
                     }
-                } else if uuid.eq_ignore_ascii_case(ble::TELEMETRY_UUID) {
-                    if let Some(t) = Telemetry::decode(&value) {
-                        report.send(BleEvent::Telemetry(t));
-                    }
-                } else if uuid.eq_ignore_ascii_case(ble::LOG_UUID) {
-                    report.send(BleEvent::Log(String::from_utf8_lossy(&value).into_owned()));
-                } else if uuid.eq_ignore_ascii_case(ble::REMOTE_UUID) {
-                    if let Some(e) = remote_event(&value) {
-                        report.send(e);
-                    }
-                } else if uuid.eq_ignore_ascii_case(ble::NODE_PING_UUID) {
-                    if let Some(e) = node_ping_event(&value) {
-                        report.send(e);
-                    }
-                } else if uuid.eq_ignore_ascii_case(ble::SETTINGS_UUID) {
-                    report.send(settings_event(&value));
-                } else if uuid.eq_ignore_ascii_case(ble::RADIO_CONFIG_UUID) {
-                    if let Some(e) = radio_config_event(&value) {
-                        report.send(e);
-                    }
-                } else if uuid.eq_ignore_ascii_case(ble::NAME_UUID) {
-                    if let Some(e) = name_event(&value) {
-                        report.send(e);
-                    }
+                } else if let Some(e) = value_event(&uuid, &value) {
+                    report.send(e);
                 }
             }
             Ok(Cb::ConnectionState { new_state: 0 }) => return Err("connection lost".into()),
