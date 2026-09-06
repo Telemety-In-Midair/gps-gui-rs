@@ -105,7 +105,7 @@ the Bluetooth page.
 Every size and spacing on the pages is a fraction - of the screen, of the text
 height, of the toolbar icon - kept in `gps-gui.look` beside the config rather
 than in the code. Nothing in it is a point count. The adjuster (Settings,
-"Adjust the look", or `cargo run -- --adjust`) picks a thing on any page and
+"Adjust", or `cargo run -- --adjust`) picks a thing on any page and
 moves the measures behind it live, then writes the sheet back in place. See
 `docs/ui.md` for the format.
 

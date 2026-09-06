@@ -23,7 +23,8 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
     macros (below).
   - `theme.rs` - every size and spacing in the app, as a named measure, plus
     the functions that turn one into points for the current screen.
-  - `text.rs` - the long-form prose and the hover texts, one module per page.
+  - `text.rs` - the hover texts and the lines a page says of its own, one
+    module per page.
   - `icons.rs` - the icon set, one function per glyph.
   - `menu.rs` - the two menu pages and the corner toggle that opens them.
   - `adjust.rs` - the adjuster: pick a thing on any page and move the
@@ -226,9 +227,9 @@ optional pieces, and the variadic one:
 
 | Macro | Writes |
 | --- | --- |
-| `hint!(ui, TEXT)` | dimmed prose under a heading or a control. A string literal is treated as a `format!` pattern, so `hint!(ui, "{n} points")` fills in; `hint!(ui, small ..)` is the smaller version. |
-| `heading!(ui, "Title"[, INTRO])` | the page title, and optionally a line saying what the page is for. No trailing gap - what follows decides its own leading space. |
-| `section!(ui[, sep] "Title"[, HINT])` | the space that sets a group apart, its title, and optionally a line explaining it. `sep` rules a line above the title as well. |
+| `hint!(ui, TEXT)` | a dimmed line under a control: a state, an error, a count. A string literal is treated as a `format!` pattern, so `hint!(ui, "{n} points")` fills in; `hint!(ui, small ..)` is the smaller version. |
+| `heading!(ui, "Title")` | the page title, and nothing under it. No trailing gap - what follows decides its own leading space. |
+| `section!(ui[, sep] "Title")` | the space that sets a group apart and its title. `sep` rules a line above the title as well. |
 | `button!(ui, "Label", enabled: c, hover: h, disabled: d)` | a text button; every piece after the label is optional but ordered. Evaluates to the `Response`, so a press is still `.clicked()`. |
 | `check!(ui, place, "Label", hover: h)` | a checkbox bound straight to the field it sets. |
 | `grid!(ui, "id", \|ui\| { "label" => control, .. })` | a two-column grid of label-and-control pairs, for the settings that really are a table. |
@@ -243,17 +244,27 @@ The colors that carry meaning are not in `theme.rs`: `feedback_label`,
 
 ## Prose (`text.rs`)
 
-Only the long form lives there: the paragraphs explaining a group of settings,
-and the hover texts saying what a control actually does. Short labels ("Save",
-"track", "Units:") stay next to the widget they name, where reading the page
-tells you what the page says.
+Only what is not a label lives there: the hover texts saying what a control
+does, and the few lines a page says of its own - a state, an error, a range.
+Short labels ("Save", "track", "Units:") stay next to the widget they name,
+where reading the page tells you what the page says. Copy that takes a value
+(`text::bluetooth::range(min, max)`) is a function, `format!` needing a
+literal pattern.
 
-The split is by length rather than by principle. A button reading "Save" is
-part of the layout; the three lines under it explaining what saving writes and
-where are a piece of writing, and having them inline is what turns a page of
-controls into a page of string literals with controls between them. Copy that
-takes a value (`text::beacon::wake_check(min, max)`) is a function, `format!`
-needing a literal pattern.
+The pages are concise on purpose, and the rules that keep them so:
+
+- **No line under a heading or a section title.** A title names its group;
+  what the group is *for* is documented here, not on the page. `heading!` and
+  `section!` have no hint arm, so it cannot creep back.
+- **A label says what the control does, in a few words.** "Position from the
+  node", not "Use the connected node's receiver"; "Defaults", not "Reset to
+  defaults". A label that needs a sentence gets a hover instead.
+- **A hover is a phrase**, and only where the label leaves a real question:
+  what a Disable sends, what a Save writes, the range a node clamps to. It is
+  invisible on a phone, so nothing a phone user needs is only in a hover.
+- **A visible line is a state, an error or a count**, never a restatement of
+  a control. The node's settings quote its value in their titles ("Wake
+  check: 5 min") rather than in a line under the row.
 
 ## Themes and type (`solarized.rs` + `fonts.rs`)
 
@@ -475,7 +486,7 @@ measured against. `Look::save` edits an existing sheet in place - only the
 values that differ are rewritten, so comments and alignment survive - and
 generates a documented one where there is none.
 
-The adjuster (Settings, "Adjust the look", or `cargo run -- --adjust` on
+The adjuster (Settings, "Adjust", or `cargo run -- --adjust` on
 desktop) floats over every page:
 
 - **Pick** arms the picker. The next tap picks the smallest thing under it; a
@@ -878,7 +889,7 @@ sending you back here for it, writing the same file and sharing the same
   picked. The key is stored trimmed and empty means the built-in one
   (`tiles::DEFAULT_ARCGIS_KEY`), so the generated file carries `arcgis_key =
   ""` the way it carries the theme overrides.
-- **Reset to defaults** drops `AppConfig` back to its built-in defaults in memory
+- **Defaults** drops `AppConfig` back to its built-in defaults in memory
   only; the file is untouched until the next Save, so a Load undoes it.
 - **The default path** (`default_config_path`) is the config file beside the tile
   cache, which on Android is the app's private data directory - the working
@@ -1093,10 +1104,10 @@ with it.
   It sits on this page rather than a power one because it is the third leg of
   the same duty cycle, and it is by far the largest: the controller is about
   71 mA of the board's 126, and nothing reduces that while it exists, so the
-  firmware destroys and rebuilds it. Both the hint and the "Board:" line say
-  what keeps running, because "BLE off" reads like the board going away and
-  it is not - the beacon, the GPS and the SD log all carry on through the
-  gap. The one thing lost is reachability.
+  firmware destroys and rebuilds it. The ack says what keeps running, because
+  "BLE off" reads like the board going away and it is not - the beacon, the
+  GPS and the SD log all carry on through the gap. The one thing lost is
+  reachability.
 
   The board's own value is not seeded into the box when it reads 0, unlike
   the wake-check interval: a 0 there is an unresolved default, while a 0 here
@@ -1106,17 +1117,18 @@ with it.
   for a window under the floor and the only sign it was changed is the ack. The
   advertising window had no arm at all and acked as the literal "Board applied:
   setting", which read as a write that did nothing in particular.
-- **Two window behaviors are said out loud on the page.** The board takes its
-  budget when a wake starts (`session::Window::new`), so a new window applies
-  at the *next* wake; and a disconnect replaces what is left of the budget with
-  `session::LINGER_S` so the app can come straight back. Both read as the board
-  ignoring the setting, the more so the shorter the window, so the page says
-  them rather than leaving them to be discovered.
-- **Text that quotes a board value reads it from the board.** The window used
-  to be a fixed 15 s and several strings said so; now that it is configurable
-  only the strings shown while connected quote `adv_window_s`, and the ones
-  shown while trying to connect describe the window without a number, because
-  at that point the app has no live value to quote.
+- **Two window behaviors read as the board ignoring the setting.** The board
+  takes its budget when a wake starts (`session::Window::new`), so a new
+  window applies at the *next* wake; and a disconnect replaces what is left of
+  the budget with `session::LINGER_S` so the app can come straight back. Both
+  show more the shorter the window is. The page does not say them - they are
+  here instead.
+- **Text that quotes a board value reads it from the board.** Each setting's
+  title quotes the value the board reported ("Advertising window: 5 s",
+  `secs_text(s.adv_window_s)`), and the input under it holds what is asked for
+  next; the two are separate on purpose, since the board clamps. While a
+  blank Sleep now resolves through `ble::resolve_sleep_now`, the blank preset
+  is labelled with that number rather than the page working it out.
 - **Every press is forceful, and the epoch is what makes it so.** `MyApp`
   numbers its requests (`ble_epoch`, `ble::Epoch`); the number goes out on the
   `BleRequest` and comes back on every `BleUpdate`. The worker compares what it
@@ -1188,7 +1200,7 @@ with it.
   Android connecting to "any node", the two buttons do the same thing; on
   Android with a node pinned, only "Connect to sleeping" can catch a window.
 
-## The Radio config page (`pages/radio.rs` + `radio.rs`)
+## The Radio page (`pages/radio.rs` + `radio.rs`)
 
 The Radio page loads the board's `RADIO.TOML` (the firmware's own config, not the
 app's) and edits it in place. The model lives in `src/radio.rs`; the page in
@@ -1212,7 +1224,7 @@ app's) and edits it in place. The model lives in `src/radio.rs`; the page in
   confirming unlocks the typed input with a check (set, writes the value into the
   document via `RadioDoc::apply`) and an x (cancel). Only one field is in flight
   at a time - the other pencils are disabled while editing.
-- **Generating a default.** With nothing loaded, "Generate default config"
+- **Generating a default.** With nothing loaded, "Generate default"
   (`MyApp::default_radio` -> `RadioDoc::default_at`) fills the editor from the
   firmware's own `RADIO.example.toml`, `include_str!`d from the sibling
   telemetry-in-midair-rs checkout this crate already builds against - so there is no second

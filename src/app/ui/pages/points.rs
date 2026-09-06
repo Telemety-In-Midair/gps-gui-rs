@@ -18,7 +18,7 @@ impl MyApp {
     pub(crate) fn points_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "points", screen, safe, |ui| {
-            heading!(ui, "GPS points");
+            heading!(ui, "Points");
             gap(ui, Key::GapBlock);
 
             ui.horizontal_wrapped(|ui| {

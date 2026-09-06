@@ -8,7 +8,7 @@
 //!
 //! Macros carry the declarations that a function cannot: the ones with
 //! optional pieces ([`button!`] with its enabled/hover/disabled trio,
-//! [`section!`] with or without a hint) and the variadic one ([`grid!`]).
+//! [`section!`] with or without a rule) and the variadic one ([`grid!`]).
 //! Everything else is a plain function, which reads better than a macro would.
 
 use std::hash::Hash;
@@ -405,8 +405,9 @@ pub(super) fn submitted(ui: &egui::Ui, resp: &egui::Response) -> bool {
     resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
 }
 
-/// Explanatory prose beneath a heading or a control: the same text as a label,
-/// dimmed so it reads as commentary rather than as another setting.
+/// A dimmed line under a control: what something is doing, or the one thing
+/// a control cannot say for itself. The same text as a label, dimmed so it
+/// reads as commentary rather than as another setting.
 ///
 /// Takes either a ready string (usually a `super::text` constant) or a
 /// `format!` pattern and its arguments - a string literal is always treated as
@@ -428,7 +429,8 @@ macro_rules! hint {
     };
 }
 
-/// A page's title, optionally followed by a line saying what the page is for.
+/// A page's title, and nothing under it: a heading names the page, and a
+/// line explaining it is what a page cannot spare the room for.
 ///
 /// No trailing gap: what comes next decides its own leading space, which for a
 /// [`section!`] is already part of the section.
@@ -436,36 +438,24 @@ macro_rules! heading {
     ($ui:expr, $title:expr $(,)?) => {
         $ui.heading($title)
     };
-    ($ui:expr, $title:expr, $hint:expr $(,)?) => {{
-        $ui.heading($title);
-        $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapTight);
-        $crate::app::ui::widgets::hint!($ui, $hint);
-    }};
 }
 
-/// A group of related controls: the space that sets it apart, its title, and
-/// optionally a line explaining the group.
+/// A group of related controls: the space that sets it apart, and its title.
+/// No line under the title explaining the group: a title that needs one is
+/// the wrong title, and the explanation belongs in the docs.
 ///
 /// `section!(ui, sep "Title")` rules a line above the title as well, for the
 /// pages whose groups are big enough that space alone stops separating them.
 macro_rules! section {
-    ($ui:expr, sep $title:expr $(, $hint:expr)? $(,)?) => {{
+    ($ui:expr, sep $title:expr $(,)?) => {{
         $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapSection);
         $ui.separator();
         $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapItem);
         $ui.strong($title);
-        $(
-            $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapTight);
-            $crate::app::ui::widgets::hint!($ui, $hint);
-        )?
     }};
-    ($ui:expr, $title:expr $(, $hint:expr)? $(,)?) => {{
+    ($ui:expr, $title:expr $(,)?) => {{
         $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapSection);
         $ui.strong($title);
-        $(
-            $crate::app::ui::theme::gap($ui, $crate::app::ui::theme::Key::GapTight);
-            $crate::app::ui::widgets::hint!($ui, $hint);
-        )?
     }};
 }
 

@@ -23,7 +23,7 @@ impl MyApp {
         let safe = self.safe_area(ctx);
         content_page(ctx, "logging", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                heading!(ui, "Logging", text::INTRO);
+                heading!(ui, "Logging");
                 gap(ui, Key::GapBlock);
                 self.log_controls_ui(ui);
                 gap(ui, Key::GapSection);
@@ -38,7 +38,7 @@ impl MyApp {
     fn log_controls_ui(&mut self, ui: &mut egui::Ui) {
         let recording = self.logger.is_recording();
 
-        ui.strong("Log file (CSV)");
+        ui.strong("Log file");
         gap(ui, Key::GapHair);
         ui.horizontal_wrapped(|ui| {
             // Locked while recording: the open file is what the path names,
@@ -57,14 +57,8 @@ impl MyApp {
         });
 
         gap(ui, Key::GapItem);
-        // An existing file is appended to, which is what makes a stop a pause
-        // rather than the end of a run - and is worth saying, since the usual
-        // meaning of picking a file to write is that it gets replaced.
-        hint!(ui, text::APPEND_NOTE);
-
-        gap(ui, Key::GapItem);
         ui.horizontal_wrapped(|ui| {
-            check!(ui, self.config.log.auto_start, "Start recording at launch");
+            check!(ui, self.config.log.auto_start, "Record at launch");
             if button!(ui, "Save settings", hover: text::SAVE_HOVER).clicked() {
                 // The path only becomes a setting when it is saved by hand: a
                 // generated timestamped name is for this run, and writing it
@@ -102,7 +96,7 @@ impl MyApp {
             } else {
                 text::EXPORT_HOVER_DESKTOP
             };
-            if button!(ui, "Export a copy", hover: hover).clicked() {
+            if button!(ui, "Export", hover: hover).clicked() {
                 self.export_log();
             }
             let clear = button!(
@@ -122,8 +116,6 @@ impl MyApp {
     /// The fixed coordinate the `dist_ref_m` column is measured against.
     fn log_reference_ui(&mut self, ui: &mut egui::Ui) {
         ui.strong("Reference point");
-        gap(ui, Key::GapHair);
-        hint!(ui, text::REFERENCE);
         gap(ui, Key::GapTight);
 
         // Every button here sets the same thing, so they all report through
@@ -151,13 +143,13 @@ impl MyApp {
                     }
                 }
             }
-            if button!(ui, "Use my position", enabled: self.current.is_some()).clicked() {
+            if button!(ui, "My position", enabled: self.current.is_some()).clicked() {
                 commit = self.current.map(|p| Some((p.y(), p.x())));
             }
             // The node, when there is one: setting the reference to where it
             // is standing is the usual way a range test starts.
             let beacon: Option<Position> = self.beacon;
-            if button!(ui, "Use node", enabled: beacon.is_some()).clicked() {
+            if button!(ui, "Node", enabled: beacon.is_some()).clicked() {
                 commit = beacon.map(|p| Some((p.y(), p.x())));
             }
             let has_ref = self.config.log.reference().is_some();

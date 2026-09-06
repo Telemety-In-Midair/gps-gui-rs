@@ -4,6 +4,14 @@ Items struck through in `TODO.md`, summarized. Newest first.
 
 ## 2026-09-06
 
+- **Concise menus.** Every page lost the line under its heading and under
+  each section title, and every line that restated a control: the node
+  settings' "Node: ..." echoes (the value now sits in the section title,
+  "Wake check: 5 min"), the mode description, the sleep and window notes on
+  the Link section, the append note on Logging, the RSSI and layer
+  explanations on Settings. Labels were cut to a few words ("Position from
+  the node", "Defaults", "Color key"); ranges and reasons moved to hovers or
+  to `docs/ui.md`. `heading!` and `section!` no longer take a hint.
 - **ArcGIS maps.** `[map] tiles = "arcgis"` on the Settings page ("Map
   tiles") draws Esri's streets and outdoor styles from the static basemap
   tiles service and satellite imagery from World Imagery, under a built-in

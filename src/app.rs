@@ -1614,7 +1614,7 @@ impl MyApp {
     pub(crate) fn ble_intent_text(&self) -> String {
         let waiting = elapsed_text(self.intent_since.elapsed().as_secs());
         match (self.ble_intent, self.ble_connected) {
-            (BleIntent::Idle, _) => "Not connecting. The node is free to sleep.".to_string(),
+            (BleIntent::Idle, _) => "Not connecting.".to_string(),
             (BleIntent::Scanning, _) => format!("Scanning for {waiting}"),
             // "Connected" is only claimed while the node is actually talking:
             // the platform can hold a dead link open for a long time, and this

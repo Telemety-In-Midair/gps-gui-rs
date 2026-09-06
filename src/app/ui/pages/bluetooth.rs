@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use midair_proto::{ble, session};
+use midair_proto::ble;
 
 use crate::app::ui::text::bluetooth as text;
 use crate::app::ui::theme::{gap, Key};
@@ -42,7 +42,7 @@ impl MyApp {
         let safe = self.safe_area(ctx);
         content_page(ctx, "bluetooth", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                heading!(ui, "Bluetooth", text::INTRO);
+                heading!(ui, "Bluetooth");
 
                 // Which node first, then what to do about the link to it.
                 section!(ui, "Node");
@@ -57,13 +57,13 @@ impl MyApp {
                 gap(ui, Key::GapTight);
                 self.connection_ui(ui);
 
-                section!(ui, sep "Node power and sleep", text::BOARD_INTRO);
+                section!(ui, sep "Node power and sleep");
                 gap(ui, Key::GapItem);
                 self.board_power_ui(ui);
 
                 // Last: the one thing here that is neither the link nor a
                 // power setting, and the least often changed.
-                section!(ui, sep "Node name", text::BOARD_NAME_INTRO);
+                section!(ui, sep "Node name");
                 gap(ui, Key::GapTight);
                 self.board_name_ui(ui);
             });
@@ -106,14 +106,7 @@ impl MyApp {
         // Named nodes are remembered, so an empty list means nothing has ever
         // been named and nothing is on the air right now.
         if rows.is_empty() {
-            hint!(
-                ui,
-                if scanning {
-                    text::NO_BOARDS_SCANNING
-                } else {
-                    text::NO_BOARDS_IDLE
-                }
-            );
+            hint!(ui, text::NO_BOARDS);
         }
 
         let any_selected = self.config.ble.mac.is_none();
@@ -135,7 +128,9 @@ impl MyApp {
                 // forgets the node, and that must not happen mid-edit just
                 // because the box was cleared before retyping.
                 let name = self.name_edit(&device.mac);
-                if text_field(ui, name, "name this node", Key::BluetoothName).lost_focus() {
+                let typed = text_field(ui, name, "name this node", Key::BluetoothName)
+                    .on_hover_text(text::NAME_HOVER);
+                if typed.lost_focus() {
                     self.commit_name(&device.mac);
                 }
                 // A name stored on the node is what every page calls it,
@@ -158,8 +153,6 @@ impl MyApp {
             });
         }
 
-        gap(ui, Key::GapTight);
-        hint!(ui, text::NAMES_NOTE);
         // The signal readings move by themselves while a scan runs.
         if scanning {
             ui.ctx().request_repaint_after(SCAN_TICK);
@@ -202,10 +195,10 @@ impl MyApp {
         });
 
         gap(ui, Key::GapTight);
-        // Which node these buttons act on. With several nodes around, the
-        // link state means little without knowing whose it is.
-        ui.label(format!("Node: {}", self.selected_device_label()));
         if connected {
+            // Which node the link is to: pinned to "any node", the picker
+            // above cannot say.
+            ui.label(format!("Node: {}", self.selected_device_label()));
             // A link that has gone quiet is not shown in the all-well color:
             // the text is doubting the connection, so the color must not vouch
             // for it. Its elapsed count also needs the one-second tick.
@@ -228,22 +221,9 @@ impl MyApp {
         // The worker's own commentary: scanning, connecting, why it retried.
         // Distinct from the line above, which is what was *asked* for.
         hint!(ui, "BLE: {}", self.ble_status);
-
-        // The single most useful thing to know while debugging sleep: a
-        // connected node never sleeps, so a sleep interval that "does
-        // nothing" is usually just the app holding the link open.
-        if let (true, Some(s)) = (connected, self.board_settings) {
-            gap(ui, Key::GapHair);
-            match s.sleep_interval_s {
-                0 => hint!(ui, text::SLEEP_DISABLED),
-                secs => hint!(ui, text::will_sleep(secs, s.adv_window_s)),
-            };
-        }
+        // The elapsed count is the only thing here that moves by itself; a
+        // one-second tick keeps it honest without pinning the frame rate.
         if !connected && !idle {
-            gap(ui, Key::GapHair);
-            hint!(ui, text::ONLY_ON_WINDOW);
-            // The elapsed count is the only thing here that moves by itself; a
-            // one-second tick keeps it honest without pinning the frame rate.
             ui.ctx().request_repaint_after(ELAPSED_TICK);
         }
     }
@@ -258,11 +238,11 @@ impl MyApp {
         check!(
             ui,
             self.config.ble.enabled,
-            "Connect automatically at startup",
+            "Connect at launch",
             hover: text::AUTO_CONNECT_HOVER,
         );
         gap(ui, Key::GapTight);
-        if button!(ui, "Save to settings file", hover: text::SAVE_HOVER).clicked() {
+        if button!(ui, "Save settings", hover: text::SAVE_HOVER).clicked() {
             self.save_config();
         }
         feedback_label(ui, self.config.ui, &self.config_feedback);
@@ -338,7 +318,7 @@ impl MyApp {
         });
         ui.label(match (self.board_own_name(), &self.board_name) {
             (Some(label), _) => format!("Called {label}."),
-            (None, Some(advertised)) => format!("Unnamed, advertising as {advertised}."),
+            (None, Some(advertised)) => format!("Unnamed ({advertised})."),
             (None, None) => text::BOARD_NO_NAME.to_string(),
         });
         self.ack_line_ui(ui);
@@ -357,7 +337,6 @@ impl MyApp {
         }
         if self.settings_unsupported {
             ui.colored_label(self.config.ui.error, text::BOARD_TOO_NEW);
-            ui.label(text::BOARD_TOO_NEW_MORE);
             return;
         }
         let Some(s) = self.board_settings else {
@@ -378,7 +357,6 @@ impl MyApp {
         // every other control here - so a press that the node refuses, or
         // that has not landed yet, leaves the highlight where it was.
         ui.strong("Mode");
-        hint!(ui, text::MODE_INTRO);
         let mut pick = None;
         ui.horizontal_wrapped(|ui| {
             for (mode, label, hover) in [
@@ -401,7 +379,6 @@ impl MyApp {
         if let Some(mode) = pick {
             self.apply_mode(mode);
         }
-        ui.label(text::mode_state(s.mode));
         self.ack_line_ui(ui);
 
         gap(ui, Key::GapBlock);
@@ -426,15 +403,13 @@ impl MyApp {
             }
         });
 
-        // Stored: the wake cadence and its window.
+        // Stored: the wake cadence and its window. Each title below quotes
+        // the node's own value, the row under it is what is asked for next,
+        // and the range the node clamps to is the row's hover.
         gap(ui, Key::GapBlock);
-        ui.strong("Wake check");
-        hint!(
-            ui,
-            text::wake_check(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
-        );
+        ui.strong(format!("Wake check: {}", secs_text(s.sleep_interval_s)));
         let presets = secs_presets(&WAKE_CHECK_S);
-        row(ui, "Every:", |ui| {
+        ui.horizontal_wrapped(|ui| {
             preset_text(
                 ui,
                 "wake_check",
@@ -455,18 +430,20 @@ impl MyApp {
             if disable.clicked() {
                 self.apply_sleep_interval(Some(0));
             }
-        });
-        ui.label(match s.sleep_interval_s {
-            0 => "Node: sleep disabled.".to_string(),
-            secs => format!("Node: waking every {}.", secs_text(secs)),
-        });
+        })
+        .response
+        .on_hover_text(text::range(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S));
 
         gap(ui, Key::GapBlock);
-        ui.strong("Advertising window");
-        hint!(ui, text::adv_window(ble::ESP_ADV_MIN_S, ble::ESP_ADV_MAX_S));
-        hint!(ui, small text::adv_window_note(session::LINGER_S as u32));
+        ui.strong(format!(
+            "Advertising window: {}",
+            secs_text(s.adv_window_s)
+        ));
         let presets = secs_presets(&ADV_WINDOW_S);
-        row(ui, "Window:", |ui| {
+        // No Disable here, unlike the wake check: a zero-length window would
+        // leave a sleeping node unreachable by anything short of a physical
+        // reset, so the node clamps 0 up to the floor rather than storing it.
+        ui.horizontal_wrapped(|ui| {
             preset_text(
                 ui,
                 "adv_window",
@@ -477,24 +454,15 @@ impl MyApp {
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_adv_window();
             }
-        });
-        // No Disable here, unlike the wake check: a zero-length window would
-        // leave a sleeping node unreachable by anything short of a physical
-        // reset, so the node clamps 0 up to the floor rather than storing it.
-        ui.label(format!(
-            "Node: advertising {} per wake check.",
-            secs_text(s.adv_window_s)
-        ));
+        })
+        .response
+        .on_hover_text(text::range(ble::ESP_ADV_MIN_S, ble::ESP_ADV_MAX_S));
 
         // Idle: how long it lasts, if it ends at all.
         gap(ui, Key::GapBlock);
-        ui.strong("Idle timeout");
-        hint!(
-            ui,
-            text::idle_timeout(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S)
-        );
+        ui.strong(format!("Idle timeout: {}", secs_text(s.idle_timeout_s)));
         let presets = secs_presets(&IDLE_TIMEOUT_S);
-        row(ui, "Idle for:", |ui| {
+        ui.horizontal_wrapped(|ui| {
             preset_text(
                 ui,
                 "idle_timeout",
@@ -517,19 +485,20 @@ impl MyApp {
             if disable.clicked() {
                 self.apply_idle_timeout(Some(0));
             }
-        });
-        ui.label(match (s.idle_timeout_s, s.sleep_interval_s) {
-            (0, _) => "Node: stays idle until told otherwise.".to_string(),
-            (_, 0) => "Node: idle timeout set, but with no wake check it stays reachable.".to_string(),
-            (secs, _) => format!("Node: idle {} before it stores itself.", secs_text(secs)),
-        });
+        })
+        .response
+        .on_hover_text(text::range(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S));
+        // A timeout with no wake check ends in nothing - the node stays
+        // reachable - which is the one case worth a line.
+        if s.idle_timeout_s > 0 && s.sleep_interval_s == 0 {
+            hint!(ui, text::IDLE_NEEDS_WAKE);
+        }
 
         // Tracking: the modem duty cycle, both halves.
         gap(ui, Key::GapBlock);
-        ui.strong("BLE on period");
-        hint!(ui, text::ble_on(ble::BLE_ON_MIN_S, ble::BLE_ON_MAX_S));
+        ui.strong(format!("BLE on period: {}", secs_text(s.ble_on_s)));
         let presets = secs_presets(&BLE_ON_S);
-        row(ui, "Up for:", |ui| {
+        ui.horizontal_wrapped(|ui| {
             preset_text(
                 ui,
                 "ble_on",
@@ -540,17 +509,14 @@ impl MyApp {
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_ble_on();
             }
-        });
-        ui.label(format!(
-            "Node: BLE up {} between off periods.",
-            secs_text(s.ble_on_s)
-        ));
+        })
+        .response
+        .on_hover_text(text::range(ble::BLE_ON_MIN_S, ble::BLE_ON_MAX_S));
 
         gap(ui, Key::GapBlock);
-        ui.strong("BLE off period");
-        hint!(ui, text::ble_off(ble::BLE_OFF_MIN_S, ble::BLE_OFF_MAX_S));
+        ui.strong(format!("BLE off period: {}", secs_text(s.ble_off_s)));
         let presets = secs_presets(&BLE_OFF_S);
-        row(ui, "Down for:", |ui| {
+        ui.horizontal_wrapped(|ui| {
             preset_text(
                 ui,
                 "ble_off",
@@ -574,28 +540,23 @@ impl MyApp {
             if disable.clicked() {
                 self.apply_ble_off(Some(0));
             }
-        });
-        ui.label(match s.ble_off_s {
-            0 => "Node: BLE always up.".to_string(),
-            secs => format!(
-                "Node: BLE down {} between on periods, still beaconing.",
-                secs_text(secs)
-            ),
-        });
+        })
+        .response
+        .on_hover_text(text::range(ble::BLE_OFF_MIN_S, ble::BLE_OFF_MAX_S));
 
         // Separated from the settings above because it is not one. Every
         // other control on this page changes what the node will do; this
         // one makes it do something, once, and then the link goes away.
         gap(ui, Key::GapBlock);
         ui.strong("Sleep now");
-        hint!(
-            ui,
-            text::sleep_now(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
-        );
-        hint!(ui, small text::SLEEP_NOW_MODE_NOTE);
-        let mut presets = vec![(String::new(), "wake check".to_string())];
+        // The blank entry is labelled with what a blank box will actually
+        // do, worked out with the firmware's own resolver rather than
+        // restated here - the node is the authority on this number as much
+        // as on the settings above.
+        let blank = ble::resolve_sleep_now(0, s.sleep_interval_s);
+        let mut presets = vec![(String::new(), text::sleep_now_blank(blank))];
         presets.extend(secs_presets(&SLEEP_NOW_S));
-        row(ui, "For:", |ui| {
+        ui.horizontal_wrapped(|ui| {
             preset_text(
                 ui,
                 "sleep_now",
@@ -606,16 +567,8 @@ impl MyApp {
             if button!(ui, "Sleep now", enabled: !busy, hover: text::SLEEP_NOW_HOVER).clicked() {
                 self.apply_sleep_now();
             }
-        });
-        // What a blank box will actually do, worked out with the firmware's
-        // own resolver rather than restated here - the node is the
-        // authority on this number as much as on the settings above.
-        if self.sleep_now_text.trim().is_empty() {
-            ui.label(format!(
-                "Blank: sleeps for {}.",
-                secs_text(ble::resolve_sleep_now(0, s.sleep_interval_s))
-            ))
-            .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
-        }
+        })
+        .response
+        .on_hover_text(text::range(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S));
     }
 }

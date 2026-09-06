@@ -58,7 +58,7 @@ impl MyApp {
         let safe = self.safe_area(ctx);
         content_page(ctx, "radio", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                heading!(ui, "Radio config", text::INTRO);
+                heading!(ui, "Radio");
                 gap(ui, Key::GapBlock);
 
                 ui.label("File:");
@@ -78,8 +78,7 @@ impl MyApp {
                     // With no file to load (a fresh SD card), start from the
                     // firmware defaults instead. It fills the editor only; Save
                     // is what writes the file.
-                    if button!(ui, "Generate default config", hover: text::GENERATE_HOVER).clicked()
-                    {
+                    if button!(ui, "Generate default", hover: text::GENERATE_HOVER).clicked() {
                         self.default_radio();
                     }
                 }
@@ -222,13 +221,13 @@ impl MyApp {
         ui.separator();
 
         ui.label(format!(
-            "Time on air: {:.1} ms per beacon (SF{}, BW{} kHz, CR 4/{}, {}-byte frame)",
+            "Time on air: {:.1} ms (SF{}, BW{} kHz, CR 4/{}, {} bytes)",
             est.toa_ms, cfg.spreading_factor, cfg.bandwidth_khz, cfg.coding_rate, est.payload_len,
         ));
         match est.duty_pct {
             Some(duty) => {
                 ui.label(format!(
-                    "Beacon interval: {} s  ->  duty cycle {duty:.2}%",
+                    "Beacon: every {} s, duty {duty:.2}%",
                     est.interval_s,
                 ));
             }
@@ -239,7 +238,7 @@ impl MyApp {
         match est.ping_duty_pct {
             Some(duty) => {
                 ui.label(format!(
-                    "No-fix ping: {:.1} ms every {} s  ->  duty cycle {duty:.2}%",
+                    "No-fix ping: {:.1} ms every {} s, duty {duty:.2}%",
                     est.ping_ms, est.ping_interval_s,
                 ));
             }
@@ -260,7 +259,7 @@ impl MyApp {
                     ui.colored_label(
                         colors.ok,
                         format!(
-                            "Fits the {:.0} ms slot window ({:.0}% of it)",
+                            "Fits the {:.0} ms slot ({:.0}%)",
                             fit.window_ms, fit.window_pct
                         ),
                     );
@@ -268,15 +267,11 @@ impl MyApp {
                 Some(over) => {
                     ui.colored_label(
                         colors.error,
-                        format!(
-                            "Over the {:.0} ms slot window by {over:.0} ms",
-                            fit.window_ms
-                        ),
+                        format!("Over the {:.0} ms slot by {over:.0} ms", fit.window_ms),
                     );
                     hint!(ui, text::HOP_OVERRUN);
                 }
             }
-            hint!(ui, text::HOP_INTERVAL);
         }
 
         // The band rules only mean anything in-band, so out of band there is
@@ -284,10 +279,9 @@ impl MyApp {
         if !est.in_band {
             return;
         }
+        // In band with no limit is the one single-channel modulation the
+        // band allows without one, and there is nothing to report.
         let Some(limit) = &est.limit else {
-            // In band with no limit: the one single-channel modulation the
-            // band allows without one.
-            hint!(ui, text::WIDE_SINGLE);
             return;
         };
         let (verdict, color) = match limit.overrun_ms(est.toa_ms) {
@@ -304,15 +298,9 @@ impl MyApp {
             ),
         };
         ui.colored_label(color, verdict);
-        // Say which rule is binding, so the number is not a bare figure the
-        // reader has to reverse-engineer.
-        match limit.rule {
-            radio::LimitRule::HopVisit => {
-                hint!(ui, text::HOP_LIMIT);
-            }
-            radio::LimitRule::NeedsHopping => {
-                ui.colored_label(colors.error, text::NEEDS_HOPPING);
-            }
+        // A plan the band does not allow at all is said, with the way out.
+        if limit.rule == radio::LimitRule::NeedsHopping {
+            ui.colored_label(colors.error, text::NEEDS_HOPPING);
         }
     }
 
@@ -466,7 +454,7 @@ impl MyApp {
                             if let Some(doc) = self.radio.as_mut() {
                                 let res = doc.restore(b);
                                 self.radio_feedback = Some(match res {
-                                    Ok(()) => Ok(format!("Restored {name} (unsaved - press Save)")),
+                                    Ok(()) => Ok(format!("Restored {name}, unsaved")),
                                     Err(e) => Err(e),
                                 });
                             }

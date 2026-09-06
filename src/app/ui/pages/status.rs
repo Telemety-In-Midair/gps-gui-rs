@@ -24,9 +24,9 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
 /// not heard the network yet.
 fn hop_clock_text(stratum: u8) -> String {
     match stratum {
-        STRATUM_GPS => "clock from its GPS".to_string(),
-        STRATUM_MAX => "not synced yet".to_string(),
-        s => format!("synced, stratum {s}"),
+        STRATUM_GPS => "GPS clock".to_string(),
+        STRATUM_MAX => "not synced".to_string(),
+        s => format!("stratum {s}"),
     }
 }
 
@@ -100,13 +100,8 @@ impl MyApp {
         } else {
             ui.label(self.ble_intent_text());
         }
-        hint!(ui, "BLE: {}", self.ble_status);
         if let Some(s) = self.board_settings.filter(|_| self.ble_connected) {
             ui.label(format!("Mode: {}", s.mode.as_str()));
-            match s.sleep_interval_s {
-                0 => hint!(ui, "Sleep: disabled."),
-                secs => hint!(ui, "Sleep: every {} once disconnected.", crate::app::secs_text(secs)),
-            };
         }
         if self.ble_intent != BleIntent::Idle
             && (!self.ble_connected || self.board_silence().is_some())

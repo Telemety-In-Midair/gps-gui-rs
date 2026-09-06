@@ -14,8 +14,8 @@ use crate::app::ui::adjust::Adjust;
 use crate::app::ui::text::settings as text;
 use crate::app::ui::theme::{gap, probe, px, Key};
 use crate::app::ui::widgets::{
-    button, check, content_page, drag, feedback_label, grid, heading, hint, preset_pick, row,
-    section, submitted, text_field,
+    busy_dots, button, check, content_page, drag, feedback_label, grid, heading, hint,
+    preset_pick, row, section, submitted, text_field,
 };
 use crate::app::{MyApp, Page, RegionSelect};
 use crate::config::{
@@ -96,7 +96,11 @@ fn theme_color(
 ) {
     ui.horizontal(|ui| {
         let mut on = value.is_some();
-        if ui.checkbox(&mut on, label).changed() {
+        if ui
+            .checkbox(&mut on, label)
+            .on_hover_text(text::THEME_COLOR_HOVER)
+            .changed()
+        {
             *value = on.then_some(theme);
         }
         let mut color = value.unwrap_or(theme);
@@ -112,10 +116,10 @@ impl MyApp {
         let safe = self.safe_area(ctx);
         content_page(ctx, "settings", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                heading!(ui, "Settings", text::INTRO);
+                heading!(ui, "Settings");
                 gap(ui, Key::GapBlock);
 
-                ui.label("Settings file (TOML):");
+                ui.label("File:");
                 ui.horizontal_wrapped(|ui| {
                     let resp = text_field(
                         ui,
@@ -134,7 +138,7 @@ impl MyApp {
                     if button!(ui, "Save", hover: text::SAVE_HOVER).clicked() {
                         self.save_config();
                     }
-                    if button!(ui, "Reset to defaults", hover: text::RESET_HOVER).clicked() {
+                    if button!(ui, "Defaults", hover: text::RESET_HOVER).clicked() {
                         self.reset_config();
                     }
                 });
@@ -161,7 +165,7 @@ impl MyApp {
     /// from - its own, the connected node's, or both with the node's
     /// winning.
     fn phone_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Phone", text::PHONE);
+        section!(ui, "Phone");
         gap(ui, Key::GapTight);
         row(ui, "Name:", |ui| {
             let resp = text_field(ui, &mut self.config.phone.name, "Phone", Key::BluetoothName);
@@ -173,19 +177,19 @@ impl MyApp {
         check!(
             ui,
             self.config.phone.location,
-            "Use the phone's receiver",
+            "Position from the phone",
             hover: text::PHONE_LOCATION_HOVER,
         );
         check!(
             ui,
             self.config.ble.location,
-            "Use the connected node's receiver",
+            "Position from the node",
             hover: text::NODE_LOCATION_HOVER,
         );
     }
 
     fn text_size_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Text size", text::TEXT_SCALE);
+        section!(ui, "Text size");
         gap(ui, Key::GapTight);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().slider_width = px(ui.ctx(), Key::SettingsSlider);
@@ -217,7 +221,7 @@ impl MyApp {
     /// The look sheet: every size and spacing on the pages, and the adjuster
     /// that edits it live.
     fn look_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Look", text::LOOK);
+        section!(ui, "Look");
         gap(ui, Key::GapTight);
         ui.horizontal_wrapped(|ui| {
             let resp = text_field(
@@ -234,16 +238,16 @@ impl MyApp {
         });
         gap(ui, Key::GapItem);
         ui.horizontal_wrapped(|ui| {
-            if button!(ui, "Save", hover: text::LOOK_SAVE_HOVER).clicked() {
+            if button!(ui, "Save", hover: text::SAVE_HOVER).clicked() {
                 self.save_look();
             }
-            if button!(ui, "Reset to defaults", hover: text::LOOK_RESET_HOVER).clicked() {
+            if button!(ui, "Defaults", hover: text::RESET_HOVER).clicked() {
                 self.reset_look();
             }
             let open = self.adjust.is_some();
             let adjust = button!(
                 ui,
-                "Adjust the look",
+                "Adjust",
                 enabled: !open,
                 hover: text::ADJUST_HOVER,
                 disabled: text::ADJUST_OPEN,
@@ -260,7 +264,7 @@ impl MyApp {
     /// colors" are laid over whichever one this picks, so the order on the page
     /// is the order they are applied in.
     fn theme_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Theme", text::THEME);
+        section!(ui, "Theme");
         gap(ui, Key::GapTight);
         ui.horizontal_wrapped(|ui| {
             for choice in ThemeChoice::ALL {
@@ -279,7 +283,7 @@ impl MyApp {
             "marker outline" => ui.color_edit_button_srgba(&mut self.config.colors.outline),
         });
 
-        section!(ui, "Page colors", text::PAGE_COLORS);
+        section!(ui, "Page colors");
         grid!(ui, "cfg_ui_colors", |ui| {
             "ok" => ui.color_edit_button_srgba(&mut self.config.ui.ok),
             "error" => ui.color_edit_button_srgba(&mut self.config.ui.error),
@@ -294,16 +298,14 @@ impl MyApp {
         let bg = ui.visuals().panel_fill;
         let button = ui.visuals().widgets.inactive.weak_bg_fill;
         let fg = ui.visuals().text_color();
-        theme_color(ui, "Set the background", &mut self.config.ui.background, bg);
-        theme_color(ui, "Set the buttons", &mut self.config.ui.button, button);
-        theme_color(ui, "Set the text", &mut self.config.ui.text, fg);
-        gap(ui, Key::GapHair);
-        hint!(ui, text::THEME_COLORS);
+        theme_color(ui, "Background", &mut self.config.ui.background, bg);
+        theme_color(ui, "Buttons", &mut self.config.ui.button, button);
+        theme_color(ui, "Text", &mut self.config.ui.text, fg);
     }
 
     /// What the map draws over the tiles, and how big.
     fn overlays_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Overlay sizes (points)");
+        section!(ui, "Overlay sizes");
         let s = &mut self.config.sizes;
         grid!(ui, "cfg_sizes", |ui| {
             "you" => f32_pick(ui, "size_marker", &mut s.marker, &MARKER_SIZES, "", SIZE_SPEED, SIZE_RANGE),
@@ -317,25 +319,25 @@ impl MyApp {
         check!(
             ui,
             self.config.track.show_path,
-            "Show your path",
+            "Your path",
             hover: text::CENTRAL_PATH_HOVER,
         );
         check!(
             ui,
             self.config.ble.show_on_map,
-            "Show the connected node",
+            "Connected node",
             hover: text::BOARD_ON_MAP_HOVER,
         );
         // The path is part of what the switch above takes off the map, so
         // its own box has nothing to say while the node is hidden.
         let board_drawn = self.config.ble.show_on_map;
         ui.add_enabled_ui(board_drawn, |ui| {
-            check!(ui, self.config.ble.show_path, "Show the connected node's path");
+            check!(ui, self.config.ble.show_path, "Connected node's path");
         });
         check!(
             ui,
             self.config.lora.show_path,
-            "Show remote node paths",
+            "Remote node paths",
             hover: text::REMOTE_PATHS_HOVER,
         );
         row(ui, "Remote node pulse:", |ui| {
@@ -362,16 +364,8 @@ impl MyApp {
         .on_hover_text(text::PULSE_HOVER);
 
         gap(ui, Key::GapHair);
-        check!(
-            ui,
-            self.config.distance.show,
-            "Show the distance on the line to the node"
-        );
-        check!(
-            ui,
-            self.config.distance.dotted,
-            "Draw the distance line dotted"
-        );
+        check!(ui, self.config.distance.show, "Distance label");
+        check!(ui, self.config.distance.dotted, "Dotted distance line");
         row(ui, "Units:", |ui| {
             for (units, label) in [
                 (DistanceUnits::Metric, "km/m"),
@@ -387,7 +381,7 @@ impl MyApp {
     /// is only shown while it is picked, an OpenStreetMap map having no use
     /// for one.
     fn map_tiles_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Map tiles", text::MAP_TILES);
+        section!(ui, "Map tiles");
         gap(ui, Key::GapTight);
         ui.horizontal_wrapped(|ui| {
             for provider in TileProvider::ALL {
@@ -396,7 +390,6 @@ impl MyApp {
         });
         if self.config.map.tiles == TileProvider::ArcGis {
             gap(ui, Key::GapHair);
-            hint!(ui, text::ARCGIS_LAYERS);
             row(ui, "API key:", |ui| {
                 text_field(
                     ui,
@@ -404,16 +397,14 @@ impl MyApp {
                     "built-in key",
                     Key::SettingsArcGisKey,
                 );
-            })
-            .response
-            .on_hover_text(text::ARCGIS_KEY_HOVER);
+            });
         }
     }
 
     /// The two bars over the map: how see-through they are, and the key
     /// under the top one.
     fn map_bars_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Map bars", text::MAP_BARS);
+        section!(ui, "Map bars");
         gap(ui, Key::GapTight);
         row(ui, "Opacity:", |ui| {
             ui.spacing_mut().slider_width = px(ui.ctx(), Key::SettingsSlider);
@@ -423,23 +414,13 @@ impl MyApp {
                     .fixed_decimals(2),
             );
             probe(ui.ctx(), slider.rect, "Slider", &[Key::SettingsSlider]);
-            slider.on_hover_text(text::BAR_OPACITY_HOVER);
         });
-        check!(
-            ui,
-            self.config.map.show_key,
-            "Show the color key",
-            hover: text::KEY_HOVER,
-        );
+        check!(ui, self.config.map.show_key, "Color key");
     }
 
     fn compass_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Compass", text::COMPASS);
-        check!(
-            ui,
-            self.config.compass.marker_arrow,
-            "Point the marker arrow with the compass"
-        );
+        section!(ui, "Compass");
+        check!(ui, self.config.compass.marker_arrow, "Marker arrow");
         let on = self.config.compass.marker_arrow;
         row(ui, "Rate:", |ui| {
             ui.add_enabled_ui(on, |ui| {
@@ -461,16 +442,11 @@ impl MyApp {
     /// The map's bottom status bar: whether it is drawn, how long each node
     /// holds it, and the span its bars are drawn against.
     fn status_bar_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Map status bar", text::STATUS_BAR);
-        check!(
-            ui,
-            self.config.status_bar.show,
-            "Show the status bar",
-            hover: text::STATUS_BAR_SHOW_HOVER,
-        );
+        section!(ui, "Map status bar");
+        check!(ui, self.config.status_bar.show, "Show");
         let on = self.config.status_bar.show;
         ui.add_enabled_ui(on, |ui| {
-            row(ui, "Seconds per node:", |ui| {
+            row(ui, "Per node:", |ui| {
                 f32_pick(
                     ui,
                     "cycle_secs",
@@ -484,10 +460,9 @@ impl MyApp {
             .response
             .on_hover_text(text::STATUS_CYCLE_HOVER);
             gap(ui, Key::GapHair);
-            hint!(ui, text::RSSI_RANGE);
             let bar = &mut self.config.status_bar;
             grid!(ui, "cfg_rssi", |ui| {
-                "top" => {
+                "full at" => {
                     let labels: Vec<(i16, String)> =
                         RSSI_TOPS.iter().map(|&v| (v, format!("{v} dBm"))).collect();
                     let labelled: Vec<(i16, &str)> =
@@ -496,7 +471,7 @@ impl MyApp {
                         drag(ui, v, 1.0, RSSI_DBM_MIN..=RSSI_DBM_MAX);
                     })
                 },
-                "bottom" => {
+                "empty at" => {
                     let labels: Vec<(i16, String)> =
                         RSSI_BOTTOMS.iter().map(|&v| (v, format!("{v} dBm"))).collect();
                     let labelled: Vec<(i16, &str)> =
@@ -511,7 +486,7 @@ impl MyApp {
 
     fn track_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Track recording");
-        row(ui, "Minimum move between points:", |ui| {
+        row(ui, "Min move:", |ui| {
             let labels: Vec<(f64, String)> = MIN_DISTANCES
                 .iter()
                 .map(|&v| (v, format!("{} m", num(v))))
@@ -535,14 +510,14 @@ impl MyApp {
         let points = self.recorded_points();
         let discard = button!(
             ui,
-            "Discard recorded points",
+            "Discard points",
             enabled: points > 0,
             hover: text::DISCARD_HOVER,
         );
         if discard.clicked() {
             self.discard_tracks();
         }
-        hint!(ui, "{points} points recorded");
+        hint!(ui, "{points} recorded");
     }
 
     /// Starting a region download. Only when tiles are cached to disk; it
@@ -568,7 +543,10 @@ impl MyApp {
             };
         }
         if downloading {
-            ui.label(text::DOWNLOAD_BUSY);
+            ui.colored_label(
+                self.config.ui.busy,
+                format!("{}{}", text::DOWNLOAD_BUSY, busy_dots(ui.ctx())),
+            );
         }
     }
 }
