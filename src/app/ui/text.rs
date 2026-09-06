@@ -100,8 +100,8 @@ pub(crate) mod statusbar {
     pub(crate) const NO_NODES: &str = "No nodes heard";
 }
 
-/// The Beacon page: the BLE link, and the board's own power settings.
-pub(crate) mod beacon {
+/// The Bluetooth page: the BLE link, and the board's own power settings.
+pub(crate) mod bluetooth {
     use crate::app::secs_text;
 
     pub(crate) const INTRO: &str = "The BLE link to a GPS beacon.";
@@ -302,7 +302,7 @@ pub(crate) mod radio {
         "Send this config to the connected board. It applies immediately and is written to the \
          SD card, which is the only place it survives a reboot.";
     pub(crate) const SEND_NEEDS_CONFIG: &str = "Load or generate a config first";
-    pub(crate) const SEND_NEEDS_LINK: &str = "Connect to the board first (Beacon page)";
+    pub(crate) const SEND_NEEDS_LINK: &str = "Connect to the board first (Bluetooth page)";
     pub(crate) const SEND_WAITING: &str = "Waiting for the board to answer";
 
     pub(crate) const FETCH_HOVER: &str =
@@ -311,7 +311,7 @@ pub(crate) mod radio {
     pub(crate) const FETCH_TOO_NEW: &str =
         "The board's config format is newer than this app can read";
     pub(crate) const FETCH_NEEDS_LINK: &str =
-        "Connect on the Beacon page; the board's settings load once its radio has come up";
+        "Connect on the Bluetooth page; the board's settings load once its radio has come up";
 
     pub(crate) const EMPTY: &str =
         "Load a RADIO.TOML to view and edit the radio, mesh, beacon and GPS settings.";

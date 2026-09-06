@@ -2,7 +2,7 @@
 //! records, and the config file itself.
 //!
 //! The beacon and the board's own settings are a separate page
-//! ([`MyApp::beacon_page`]); the split is by who owns the setting, since only
+//! ([`MyApp::bluetooth_page`]); the split is by who owns the setting, since only
 //! the ones here are the app's to keep.
 //!
 //! Every widget is bound straight to the live [`crate::config::AppConfig`], so

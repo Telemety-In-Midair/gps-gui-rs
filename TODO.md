@@ -150,8 +150,6 @@ all settings (most) should be dropdowns.
 
 - On mobile: needs to get automatic place to save/load radio config. Also path copy button.
 
-- Make extras menu. Reduce normal menu count
-
 - Make status more separate, needs to be clear what is what. User vs node location.
 
 - Get rid of temporary BLE names under scan for board.

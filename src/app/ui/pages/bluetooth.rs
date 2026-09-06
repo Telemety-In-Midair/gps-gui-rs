@@ -1,4 +1,4 @@
-//! The Beacon page: the BLE link to the board, the app-side settings that
+//! The Bluetooth page: the BLE link to the board, the app-side settings that
 //! decide how it connects, and the board's own power and sleep settings.
 //!
 //! Split from [`MyApp::settings_page`] by who owns each setting. The two
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use midair_proto::{ble, session};
 
-use crate::app::ui::text::beacon as text;
+use crate::app::ui::text::bluetooth as text;
 use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{
     button, check, content_page, feedback_label, heading, hint, row, section, text_field,
@@ -26,11 +26,11 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const SCAN_TICK: Duration = Duration::from_millis(500);
 
 impl MyApp {
-    pub(crate) fn beacon_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+    pub(crate) fn bluetooth_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
-        content_page(ctx, "beacon", screen, safe, |ui| {
+        content_page(ctx, "bluetooth", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                heading!(ui, "Beacon", text::INTRO);
+                heading!(ui, "Bluetooth", text::INTRO);
 
                 // Which board first, then what to do about the link to it.
                 section!(ui, "Device");
@@ -119,7 +119,7 @@ impl MyApp {
                 // forgets the board, and that must not happen mid-edit just
                 // because the box was cleared before retyping.
                 let name = self.name_edit(&device.mac);
-                if text_field(ui, name, "name this board", Key::BeaconName).lost_focus() {
+                if text_field(ui, name, "name this board", Key::BluetoothName).lost_focus() {
                     self.commit_name(&device.mac);
                 }
                 // A name stored on the board is what every page calls it,
@@ -259,7 +259,7 @@ impl MyApp {
         gap(ui, Key::GapItem);
         let ready = self.ble_connected && !self.ble_ack_pending;
         row(ui, "Notify interval (ms):", |ui| {
-            text_field(ui, &mut self.ble_interval_text, "", Key::BeaconNumber);
+            text_field(ui, &mut self.ble_interval_text, "", Key::BluetoothNumber);
             if button!(ui, "Apply", enabled: ready).clicked() {
                 self.apply_notify_interval();
             }
@@ -291,7 +291,7 @@ impl MyApp {
                 ui,
                 &mut self.board_name_text,
                 "name this board",
-                Key::BeaconName,
+                Key::BluetoothName,
             )
             .on_hover_text(text::board_name_hover(ble::NAME_LABEL_MAX));
             if button!(ui, "Apply", enabled: !busy).clicked() {
@@ -400,7 +400,7 @@ impl MyApp {
             text::wake_check(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
         );
         row(ui, "Every (s):", |ui| {
-            text_field(ui, &mut self.sleep_interval_text, "", Key::BeaconNumber);
+            text_field(ui, &mut self.sleep_interval_text, "", Key::BluetoothNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_sleep_interval(None);
             }
@@ -425,7 +425,7 @@ impl MyApp {
         hint!(ui, text::adv_window(ble::ESP_ADV_MIN_S, ble::ESP_ADV_MAX_S));
         hint!(ui, text::adv_window_note(session::LINGER_S as u32));
         row(ui, "Window (s):", |ui| {
-            text_field(ui, &mut self.adv_window_text, "", Key::BeaconNumber);
+            text_field(ui, &mut self.adv_window_text, "", Key::BluetoothNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_adv_window();
             }
@@ -442,7 +442,7 @@ impl MyApp {
         ui.strong("BLE off period");
         hint!(ui, text::ble_off(ble::BLE_OFF_MIN_S, ble::BLE_OFF_MAX_S));
         row(ui, "Down for (s):", |ui| {
-            text_field(ui, &mut self.ble_off_text, "", Key::BeaconNumber);
+            text_field(ui, &mut self.ble_off_text, "", Key::BluetoothNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_ble_off(None);
             }
@@ -475,7 +475,7 @@ impl MyApp {
             text::idle_timeout(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S)
         );
         row(ui, "Idle for (s):", |ui| {
-            text_field(ui, &mut self.idle_timeout_text, "", Key::BeaconNumber);
+            text_field(ui, &mut self.idle_timeout_text, "", Key::BluetoothNumber);
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_idle_timeout();
             }
@@ -507,7 +507,7 @@ impl MyApp {
         );
         hint!(ui, small text::SLEEP_NOW_MODE_NOTE);
         row(ui, "For (s):", |ui| {
-            text_field(ui, &mut self.sleep_now_text, "", Key::BeaconNumber)
+            text_field(ui, &mut self.sleep_now_text, "", Key::BluetoothNumber)
                 .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
             if button!(ui, "Sleep now", enabled: !busy, hover: text::SLEEP_NOW_HOVER).clicked() {
                 self.apply_sleep_now();

@@ -6,7 +6,7 @@
 //! and the two pieces of drawing big enough to be their own thing - the map
 //! and the log graph - in [`super::mapdraw`] and [`super::plot`].
 
-mod beacon;
+mod bluetooth;
 mod logging;
 mod manual;
 mod map;

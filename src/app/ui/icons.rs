@@ -14,8 +14,12 @@
 //!
 //! Adding a glyph means adding the file and one function here.
 
-pub(super) fn beacon() -> egui::ImageSource<'static> {
-    egui::include_image!("../../../assets/icons/beacon.svg")
+pub(super) fn back() -> egui::ImageSource<'static> {
+    egui::include_image!("../../../assets/icons/back.svg")
+}
+
+pub(super) fn bluetooth() -> egui::ImageSource<'static> {
+    egui::include_image!("../../../assets/icons/bluetooth.svg")
 }
 
 pub(super) fn center() -> egui::ImageSource<'static> {
@@ -48,6 +52,10 @@ pub(super) fn map() -> egui::ImageSource<'static> {
 
 pub(super) fn menu() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/menu.svg")
+}
+
+pub(super) fn more() -> egui::ImageSource<'static> {
+    egui::include_image!("../../../assets/icons/more.svg")
 }
 
 pub(super) fn north() -> egui::ImageSource<'static> {

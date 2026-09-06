@@ -25,7 +25,7 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
     the functions that turn one into points for the current screen.
   - `text.rs` - the long-form prose and the hover texts, one module per page.
   - `icons.rs` - the icon set, one function per glyph.
-  - `menu.rs` - the menu page and the corner toggle that opens it.
+  - `menu.rs` - the two menu pages and the corner toggle that opens them.
   - `adjust.rs` - the adjuster: pick a thing on any page and move the
     measures behind it, live, then write them to the look sheet.
   - `mapdraw.rs`, `plot.rs`, `statusbar.rs` - the hand-painted pictures, kept
@@ -478,32 +478,65 @@ under the finger.
 
 ## Pages and navigation
 
-`Page` (in `app.rs`) is the enum of screens. `page_items()` in `menu.rs` lists
-every page with its label and icon, in menu order, and drives the menu page.
-`Page::Menu` is *not* in that list - it is the page doing the listing - and it
-is reached only from the menu button. `MyApp::menu_from` remembers the page it
-was opened from, which is both the entry marked as current and where leaving
-without picking one goes.
+`Page` (in `app.rs`) is the enum of screens. Two of its variants are the menu
+itself rather than a destination: `Page::Menu` and `Page::More`. Both are drawn
+by `menu_list` in `menu.rs` from a list of rows, and a row is a `(Page, label,
+icon)` triple whether it goes to a destination or to the other menu page.
 
-- `menu_page` - the menu as a page of its own: one large button per entry,
-  centered on an empty screen, measured in fractions of the icon size
-  (the `ROW_*_FRAC` set in `menu.rs`) because the buttons are touch targets
-  first. The column is
-  centered vertically by hand - the page is an `Area`, which has no height to
-  align against, so the free space is worked out from the screen instead.
-- `page_menu` - the button that opens the menu page and closes it again. On the
-  map it sits inline at the right end of the controls bar; the glyph crossfades
-  between the hamburger and an X.
+```mermaid
+flowchart TD
+    From["the page you were on<br/>(MyApp::menu_from)"]
+    Menu["Page::Menu<br/>Map, Status, Bluetooth, More"]
+    More["Page::More<br/>Points, Logging, Settings, Radio, Back"]
+    Dest["the page picked"]
+
+    From -->|hamburger| Menu
+    Menu -->|More row| More
+    More -->|Back row| Menu
+    Menu -->|any other row| Dest
+    More -->|any other row| Dest
+    Menu -->|X| From
+    More -->|X| From
+```
+
+- `main_items()` - Map, Status, Bluetooth, then **More**. The pages worth a tap
+  while moving, and the way to the rest. A touch target is large and a phone
+  screen is short, so one list of every page runs out of screen before it runs
+  out of pages; this is why there are two.
+- `more_items()` - Points, Logging, Settings, Radio. `back_item()` is the row
+  after them, and is kept out of that list because `more_items()` is also what
+  the main menu's More row is *marked against*: `menu_marks` marks More
+  whenever the page behind the menu is one More holds, so the menu still says
+  where you are one level down.
+
+`Page::Menu` is in neither list - it is the page doing the listing, reached from
+the menu button and from the More page's Back row. `MyApp::menu_from` remembers
+the page the menu was opened from, which is both the entry marked as current
+and where leaving without picking one goes; it is never a menu page itself.
+
+- `menu_page` / `more_page` - the two lists, each `menu_list` with its own
+  `Area` id. One large button per entry, centered on an empty screen, measured
+  off the icon (`type.menu.row.*`) because the buttons are touch targets first.
+  The column is centered vertically by hand - the page is an `Area`, which has
+  no height to align against, so the free space is worked out from the screen
+  instead.
+- `page_menu` - the button that opens the menu and closes it again. On the map
+  it sits inline at the right end of the controls bar; the glyph crossfades
+  between the hamburger and an X. From *either* menu page it leaves the menu
+  altogether rather than stepping back through it: the X says "done here", and
+  the More page's Back row is there for the other reading.
 - `page_toggle` - a floating copy of that button in the top-right corner, drawn
-  on every page *except* the map (the map uses the inline one); on the menu
-  page it is the X that dismisses it. It pads its glyph with `TOGGLE_PAD_FRAC`,
-  not the toolbar's `BUTTON_PAD_*_FRAC`: in the bar that padding doubles as the
+  on every page *except* the map (the map uses the inline one); on a menu page
+  it is the X that dismisses it. It pads its glyph with `type.corner.pad`, not
+  the toolbar's `type.bar.button.pad.*`: in the bar that padding doubles as the
   spacing between buttons and sits on the bar's own fill, while here it would
   draw a slab three times the glyph over the page text.
 
 To add a page: add a `Page` variant, a `match` arm in `MyApp::ui`, a file under
 `app/ui/pages/` with its renderer `impl MyApp` method (and a `mod` line in
-`pages/mod.rs`), and an entry in `page_items()`.
+`pages/mod.rs`), and an entry in `main_items()` or `more_items()`. The `home`
+match in `menu.rs`'s tests stops compiling until the last of those is decided,
+because a page on neither list cannot be reached at all.
 
 ## Safe-area insets
 
@@ -694,7 +727,7 @@ The app's own TOML settings are edited here, not just loaded. Every widget binds
 straight to the live `AppConfig` on `MyApp`, so a change shows on the map at
 once; the file is only touched by the buttons.
 
-**The split with the Beacon page is by who owns the setting**, not by subject.
+**The split with the Bluetooth page is by who owns the setting**, not by subject.
 Settings holds what the app owns and can save: the config file itself, the text
 size of the pages, the marker colors and overlay sizes, what the map draws
 (including the beacon path and the distance read-out), the compass rate behind
@@ -767,7 +800,7 @@ sending you back here for it, writing the same file and sharing the same
   why discarding them is its own button under "Track recording" (it clears the
   phone, beacon and every remote track). `mac` is an `Option<String>` where
   `None` means "any board"; it is no longer typed by hand but chosen in the
-  Beacon page's device picker.
+  Bluetooth page's device picker.
 - `[ble] show_on_map` takes the connected board off the map altogether: its
   marker, heartbeat, path, the distance line and label, and its place among the
   tracking and center targets. Everything the map draws or points at for the
@@ -790,7 +823,7 @@ sending you back here for it, writing the same file and sharing the same
   connected board (`forget_board_state`) drops the live remote positions but
   keeps their tracks, the same bargain the connected board's own path strikes.
 
-## The Beacon page (`pages/beacon.rs` + `ble/`)
+## The Bluetooth page (`pages/bluetooth.rs` + `ble/`)
 
 Everything about the beacon that is not drawing: which board to talk to
 (`device_picker_ui`), the link to it (`ble_link_ui`), the connection settings,
@@ -847,7 +880,7 @@ shape.
 
 ### Board power and sleep (`board_power_ui`)
 
-The bottom section of the Beacon page drives the Wio-S3's own sleep switches
+The bottom section of the Bluetooth page drives the Wio-S3's own sleep switches
 and deep sleep. Unlike everything above it, **none of it is app state**: the
 board holds these in flash and is the authority on them.
 

@@ -379,13 +379,16 @@ pub struct SafeArea {
     pub bottom: f32,
 }
 
-/// Which screen is shown. The menu page switches between them.
-#[derive(Clone, Copy, PartialEq)]
+/// Which screen is shown. The menu pages switch between them.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Page {
-    /// The page menu itself: one large button per page, and the only way to
-    /// reach the others. Not a destination in its own right, so it is left out
-    /// of the list it draws.
+    /// The main menu page: one large button per entry, and the only way to
+    /// reach anything else. Not a destination in its own right, so it is left
+    /// out of the list it draws.
     Menu,
+    /// The menu's second page, holding the entries that did not earn a place
+    /// on the first. Navigation like [`Page::Menu`], not a destination.
+    More,
     /// The interactive map with the position marker and track.
     Map,
     /// Searchable list of all recorded GPS points.
@@ -393,8 +396,9 @@ pub enum Page {
     /// The current position and beacon distance, plus board health for the
     /// Wio-S3 board (BLE/GPS/LoRa).
     Status,
-    /// The BLE beacon: the link, and the board's own power and sleep settings.
-    Beacon,
+    /// The BLE link to the board, and the board's own power and sleep
+    /// settings.
+    Bluetooth,
     /// The app's own settings, from the TOML config file (marker colors,
     /// overlay sizes, distance read-out, track recording, offline maps).
     Settings,
@@ -711,10 +715,10 @@ pub struct MyApp {
     /// so it is a picture of what the board is hearing rather than of any one
     /// node.
     rssi_history: VecDeque<RssiSample>,
-    /// Last BLE status line, for the Beacon page.
+    /// Last BLE status line, for the Bluetooth page.
     ble_status: String,
     ble_connected: bool,
-    /// Notify-interval input on the Beacon page.
+    /// Notify-interval input on the Bluetooth page.
     ble_interval_text: String,
     /// Result of the last config write: device ack (green) or error (red).
     ble_ack: Option<Result<String, String>>,
@@ -732,7 +736,7 @@ pub struct MyApp {
     /// notified on a rename. Absent until it answers, and on firmware that
     /// predates board names.
     board_name: Option<String>,
-    /// Board-name input on the Beacon page: the label to store on the board,
+    /// Board-name input on the Bluetooth page: the label to store on the board,
     /// seeded from the first name the board reports in a session.
     board_name_text: String,
     /// The board's settings layout is newer than this build can decode, so
@@ -766,25 +770,25 @@ pub struct MyApp {
     /// link, so a quiet stretch here is the earliest sign that "connected" may
     /// no longer be true; see [`MyApp::board_silence`].
     board_heard: Option<Instant>,
-    /// Wake-check interval input (seconds) on the Beacon page.
+    /// Wake-check interval input (seconds) on the Bluetooth page.
     sleep_interval_text: String,
-    /// Advertising-window input (seconds) on the Beacon page.
+    /// Advertising-window input (seconds) on the Bluetooth page.
     adv_window_text: String,
-    /// BLE off-period input (seconds) on the Beacon page.
+    /// BLE off-period input (seconds) on the Bluetooth page.
     ///
     /// The board's largest power lever: its BLE controller draws about 71 mA
     /// of the 126 it draws in total, and nothing reduces that while the
     /// controller exists - so the firmware destroys it between advertising
     /// windows and the board sits near 60 mA in the gap.
     ble_off_text: String,
-    /// Idle-timeout input (seconds) on the Beacon page: how long the board
+    /// Idle-timeout input (seconds) on the Bluetooth page: how long the board
     /// stays reachable-but-not-tracking before it stores itself.
     ///
     /// The setting that makes idle affordable. It is the expensive state -
     /// BLE dominates it, and the firmware cannot reduce that while the
     /// controller exists - so it is meant to be minutes, not days.
     idle_timeout_text: String,
-    /// "Sleep now" duration input (seconds) on the Beacon page. Blank means
+    /// "Sleep now" duration input (seconds) on the Bluetooth page. Blank means
     /// "use the board's wake-check interval", which is what the firmware
     /// reads a zero as.
     sleep_now_text: String,
@@ -1794,7 +1798,7 @@ impl MyApp {
             self.radio_feedback = Some(Err(if self.radio_config_unsupported {
                 "The board's config format is newer than this app can read.".to_string()
             } else {
-                "No config from the board yet. Connect on the Beacon page and \
+                "No config from the board yet. Connect on the Bluetooth page and \
                  wait for it to report (the GPS/LoRa rail must be on).".to_string()
             }));
             return;
@@ -2742,10 +2746,11 @@ impl eframe::App for MyApp {
 
         match self.page {
             Page::Menu => self.menu_page(&ctx, screen),
+            Page::More => self.more_page(&ctx, screen),
             Page::Map => self.map_page(&ctx, screen),
             Page::Points => self.points_page(&ctx, screen),
             Page::Status => self.status_page(&ctx, screen),
-            Page::Beacon => self.beacon_page(&ctx, screen),
+            Page::Bluetooth => self.bluetooth_page(&ctx, screen),
             Page::Settings => self.settings_page(&ctx, screen),
             Page::Radio => self.radio_page(&ctx, screen),
             Page::Logging => self.logging_page(&ctx, screen),

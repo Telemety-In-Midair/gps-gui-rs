@@ -103,8 +103,8 @@ type
         scrollbar  0.55em
     menu
         row
-            # Height of a button on the menu page. Off the icon rather than
-            # the text: these are touch targets first.
+            # Height of a button on a menu page. Off the icon rather than the
+            # text: these are touch targets first.
             height  1.3icon
             # Width of a menu button.
             width   5icon
@@ -242,13 +242,13 @@ id
         confirm
             # The widest the send-to-board confirmation grows.
             width  18em
-    beacon
+    bluetooth
         name
-            # A board name input on the Beacon page.
+            # A board name input on the Bluetooth page.
             # inherits class.name.width
             width  inherit
         number
-            # A number input on the Beacon page: an interval, a window, a
+            # A number input on the Bluetooth page: an interval, a window, a
             # timeout.
             # inherits class.number.width
             width  inherit

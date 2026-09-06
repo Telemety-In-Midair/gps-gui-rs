@@ -4,6 +4,13 @@ Items struck through in `TODO.md`, summarized. Newest first.
 
 ## 2026-09-06
 
+- **Make extras menu. Reduce normal menu count.** The menu is two pages now.
+  The main one holds Map, Status, Bluetooth and More; More holds Points,
+  Logging, Settings and Radio, with a Back row after them. Both are drawn by
+  `menu_list` from a list of `(Page, label, icon)` rows, so a row to another
+  menu page is no different from a row to a destination. The X in the corner
+  leaves the menu from either page. Beacon was renamed Bluetooth throughout
+  (page, icon, text module, docs); its glyph was already the Bluetooth rune.
 - **Unify the sizes / CSS-like type, class and id.** The look sheet now
   cascades: `type` a kind of thing, `class` a variant of it, `id` one element
   on one page, most specific first. Every `Key` declares its parent, `Look`

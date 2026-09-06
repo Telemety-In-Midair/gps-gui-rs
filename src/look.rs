@@ -498,7 +498,7 @@ keys! {
     ControlScrollbar: "type.control.scrollbar" = "0.55em", _,
         "Width of a scroll bar. Floored in code at a width a finger can catch.";
     MenuRowHeight: "type.menu.row.height" = "1.3icon", _,
-        "Height of a button on the menu page. Off the icon rather than the text: \
+        "Height of a button on a menu page. Off the icon rather than the text: \
         these are touch targets first.";
     MenuRowWidth: "type.menu.row.width" = "5icon", _,
         "Width of a menu button.";
@@ -595,10 +595,10 @@ keys! {
         "A radio setting's text input while it is being edited.";
     RadioConfirm: "id.radio.confirm.width" = "18em", _,
         "The widest the send-to-board confirmation grows.";
-    BeaconName: "id.beacon.name.width" = inherit, NameWidth,
-        "A board name input on the Beacon page.";
-    BeaconNumber: "id.beacon.number.width" = inherit, NumberWidth,
-        "A number input on the Beacon page: an interval, a window, a timeout.";
+    BluetoothName: "id.bluetooth.name.width" = inherit, NameWidth,
+        "A board name input on the Bluetooth page.";
+    BluetoothNumber: "id.bluetooth.number.width" = inherit, NumberWidth,
+        "A number input on the Bluetooth page: an interval, a window, a timeout.";
     ManualField: "id.manual.field.width" = inherit, PathWidth,
         "The desktop position entry field.";
     AdjustOutline: "id.adjust.outline" = "0.12em", _,
@@ -671,9 +671,12 @@ const RENAMED: &[(&str, Key)] = &[
     ("radio.glyph", Key::RadioGlyph),
     ("radio.enum_field", Key::RadioEnumField),
     ("radio.confirm", Key::RadioConfirm),
-    ("beacon.name", Key::BeaconName),
-    ("beacon.number", Key::BeaconNumber),
+    ("beacon.name", Key::BluetoothName),
+    ("beacon.number", Key::BluetoothNumber),
     ("manual.field", Key::ManualField),
+    // The Beacon page became the Bluetooth page, so its id block did too.
+    ("id.beacon.name.width", Key::BluetoothName),
+    ("id.beacon.number.width", Key::BluetoothNumber),
 ];
 
 impl Key {
@@ -1500,11 +1503,11 @@ mod tests {
         look.set(Key::PageMargin, m("4%"));
         look.set(Key::GapHair, m("0.3em"));
         look.set(Key::BarMarginX, m("3%"));
-        look.set(Key::BeaconName, m("9em"));
+        look.set(Key::BluetoothName, m("9em"));
         let out = look
-            .edit_sheet(text, &[Key::PageMargin, Key::GapHair, Key::BarMarginX, Key::BeaconName])
+            .edit_sheet(text, &[Key::PageMargin, Key::GapHair, Key::BarMarginX, Key::BluetoothName])
             .unwrap();
-        let expected = "# my sheet\ntype\n    page.margin    4%   # roomy\n    gap\n        item 0.5em\n        hair  0.3em\n\n    bar.gap 0.15icon\n    bar.margin.x  3%\nid.beacon.name.width  9em\n";
+        let expected = "# my sheet\ntype\n    page.margin    4%   # roomy\n    gap\n        item 0.5em\n        hair  0.3em\n\n    bar.gap 0.15icon\n    bar.margin.x  3%\nid.bluetooth.name.width  9em\n";
         assert_eq!(out, expected);
         // And what was written reads back as what was meant.
         let (back, warnings) = Look::from_sheet(&out).unwrap();
@@ -1512,7 +1515,7 @@ mod tests {
         assert_eq!(back.get(Key::PageMargin), m("4%"));
         assert_eq!(back.get(Key::GapHair), m("0.3em"));
         assert_eq!(back.get(Key::BarMarginX), m("3%"));
-        assert_eq!(back.get(Key::BeaconName), m("9em"));
+        assert_eq!(back.get(Key::BluetoothName), m("9em"));
     }
 
     #[test]
