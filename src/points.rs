@@ -1,18 +1,74 @@
 //! Recorded GPS points: which source produced them and when. Powers both the
 //! map tracks and the searchable points list page.
 
+use std::fmt;
 use std::time::SystemTime;
 
 use walkers::Position;
 
+use crate::config::normalize_mac;
+
+/// A node reached over BLE, by its address: the identity a recorded track
+/// is filed under, so two nodes connected to in one session keep two
+/// tracks rather than one path that jumps between them.
+///
+/// Six bytes in the order a scanner prints them. `Copy`, so a point stays
+/// `Copy`; the printed form is rebuilt on demand.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct BoardId([u8; 6]);
+
+impl BoardId {
+    /// A node whose address never arrived - firmware that predates the
+    /// address event. Its track is still kept, under this.
+    pub const UNKNOWN: BoardId = BoardId([0; 6]);
+
+    /// The id for a printed address, in any spelling `normalize_mac`
+    /// takes. `None` for anything that is not six hex bytes.
+    pub fn parse(mac: &str) -> Option<BoardId> {
+        let mut bytes = [0u8; 6];
+        let mut n = 0;
+        for part in normalize_mac(mac).split(':') {
+            if n == 6 {
+                return None;
+            }
+            bytes[n] = u8::from_str_radix(part, 16).ok()?;
+            n += 1;
+        }
+        (n == 6).then_some(BoardId(bytes))
+    }
+
+    /// Whether this is a real address rather than [`BoardId::UNKNOWN`].
+    pub fn is_known(self) -> bool {
+        self != BoardId::UNKNOWN
+    }
+
+    /// The address as `normalize_mac` spells it, which is the key the
+    /// config's names are filed under.
+    pub fn mac(self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for BoardId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let b = self.0;
+        write!(
+            f,
+            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            b[0], b[1], b[2], b[3], b[4], b[5]
+        )
+    }
+}
+
 /// Where a recorded point came from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PointSource {
-    /// The phone's own GNSS (a simulated loop on desktop).
+    /// The phone's own GNSS, or a position typed on desktop.
     Phone,
-    /// The connected board's own GPS (Wio-S3 / esp32c3 beacon).
-    Esp,
-    /// A remote node heard over LoRa and relayed by the connected board,
+    /// A node's own GPS, read over BLE while connected to it. Each node is
+    /// its own track.
+    Board(BoardId),
+    /// A remote node heard over LoRa and relayed by the connected node,
     /// keyed by its LoRa address (1-255). Each address is its own track.
     Remote(u8),
 }
@@ -20,15 +76,13 @@ pub enum PointSource {
 impl PointSource {
     /// The generic name of the source, before any name is applied to it.
     ///
-    /// The phone is the BLE central of the link the board sits on the far end
-    /// of, which is the name it goes by everywhere else in the system. The
-    /// connected board's own name and a remote node's nickname live where the
-    /// config and the link are in reach, so the pages resolve those through
-    /// the app and fall back to these.
+    /// The phone's name, the connected node's own name and a remote node's
+    /// nickname live where the config and the link are in reach, so the
+    /// pages resolve those through the app and fall back to these.
     pub fn label(self) -> String {
         match self {
-            PointSource::Phone => "Central".to_string(),
-            PointSource::Esp => "Beacon".to_string(),
+            PointSource::Phone => "Phone".to_string(),
+            PointSource::Board(_) => "Node".to_string(),
             PointSource::Remote(addr) => format!("Node {addr}"),
         }
     }
@@ -114,13 +168,13 @@ mod tests {
 
     #[test]
     fn search_matches_source_and_coordinates() {
-        let p = point(PointSource::Esp);
+        let p = point(PointSource::Board(BoardId::UNKNOWN));
         let label = p.source.label();
         assert!(p.matches(&label, ""));
-        assert!(p.matches(&label, "beacon"));
+        assert!(p.matches(&label, "node"));
         assert!(p.matches(&label, "51.477"));
         assert!(p.matches(&label, "-0.0015"));
-        assert!(!p.matches(&label, "central"));
+        assert!(!p.matches(&label, "phone"));
         assert!(!p.matches(&label, "52."));
     }
 
@@ -128,16 +182,35 @@ mod tests {
     fn source_search_ignores_label_case() {
         // The query arrives lowercased; a capitalized label still matches.
         let p = point(PointSource::Phone);
-        assert!(p.matches(&p.source.label(), "central"));
+        assert!(p.matches(&p.source.label(), "phone"));
     }
 
-    /// The label searched is the one the page prints, so a board named on
-    /// the board is found by that name and not by the generic one.
+    /// The label searched is the one the page prints, so a node named on
+    /// the node is found by that name and not by the generic one.
     #[test]
     fn search_uses_the_label_the_page_resolved() {
-        let p = point(PointSource::Esp);
+        let p = point(PointSource::Board(BoardId::UNKNOWN));
         assert!(p.matches("sky-1", "sky"));
-        assert!(!p.matches("sky-1", "beacon"));
+        assert!(!p.matches("sky-1", "node"));
+    }
+
+    /// A node's id is its address in any spelling, printed back the one way
+    /// the config files names under.
+    #[test]
+    fn board_ids_parse_and_print_canonically() {
+        let id = BoardId::parse("aa-bb-cc-dd-ee-01").expect("an address");
+        assert_eq!(id.to_string(), "AA:BB:CC:DD:EE:01");
+        assert_eq!(BoardId::parse("AA:BB:CC:DD:EE:01"), Some(id));
+        assert!(id.is_known());
+        assert!(!BoardId::UNKNOWN.is_known());
+        assert_eq!(BoardId::parse("AA:BB"), None);
+        assert_eq!(BoardId::parse("AA:BB:CC:DD:EE:01:02"), None);
+        assert_eq!(BoardId::parse("not a mac"), None);
+        // Two nodes are two sources, and the same node is one.
+        assert_ne!(
+            PointSource::Board(id),
+            PointSource::Board(BoardId::parse("AA:BB:CC:DD:EE:02").unwrap())
+        );
     }
 
     #[test]

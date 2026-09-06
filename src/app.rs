@@ -17,14 +17,15 @@ use crate::ble::{
     board_label, BleCommand, BleEvent, BleHandle, BleRequest, ConfigWrite, Epoch, NodePing,
     RadioConfig, Settings, Telemetry,
 };
+use crate::clipboard::Copier;
 use crate::compass::{self, CompassHandle};
 use crate::config::{normalize_mac, AppConfig};
 use crate::export::Saver;
-use crate::gps::GpsFix;
+use crate::gps::{GpsFix, GpsHandle};
 use crate::logging::{self, LogAxis, LogRow, LogSource, LogStat, Logger};
 use crate::look::{Key, Look, Measure};
 use crate::offline::{self, DownloadProgress};
-use crate::points::{PointSource, TrackPoint};
+use crate::points::{BoardId, PointSource, TrackPoint};
 use crate::radio::{self, EditVal, RadioDoc};
 use crate::tiles::{MapLayer, OpenTopoMap};
 
@@ -42,10 +43,11 @@ fn setting_name(id: u8) -> &'static str {
         ble::CFG_ESP_SLEEP_S => "wake-check interval",
         ble::CFG_ESP_ADV_WINDOW_S => "advertising window",
         ble::CFG_BLE_OFF_S => "BLE off period",
+        ble::CFG_BLE_ON_S => "BLE on period",
         ble::CFG_SLEEP_NOW => "sleep now",
         ble::CFG_MODE => "mode",
         ble::CFG_IDLE_TIMEOUT_S => "idle timeout",
-        ble::CFG_NAME => "board name",
+        ble::CFG_NAME => "node name",
         _ => "setting",
     }
 }
@@ -65,28 +67,34 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
     match ack.status {
         packet::ACK_OK => Ok(match ack.id {
             packet::CFG_UPDATE_INTERVAL_MS => {
-                format!("Board applied: notify interval {applied} ms")
+                format!("Node applied: notify interval {applied} ms")
             }
-            ble::CFG_ESP_SLEEP_S if applied == 0 => "Board applied: sleep disabled".to_string(),
+            ble::CFG_ESP_SLEEP_S if applied == 0 => "Node applied: sleep disabled".to_string(),
             ble::CFG_ESP_SLEEP_S => {
-                format!("Board applied: wake check every {}", secs_text(applied))
+                format!("Node applied: wake check every {}", secs_text(applied))
             }
             ble::CFG_ESP_ADV_WINDOW_S => {
                 format!(
-                    "Board applied: advertising {} per wake",
+                    "Node applied: advertising {} per wake check",
                     secs_text(applied)
                 )
             }
             // Worth spelling out what keeps running, because "BLE off"
-            // reads like the board going away and it is not: only the
+            // reads like the node going away and it is not: only the
             // controller stops. The beacon, the GPS and the SD log carry
-            // on, so the board is still tracking - just not reachable.
+            // on, so the node is still tracking - just not reachable.
             ble::CFG_BLE_OFF_S if applied == 0 => {
-                "Board applied: BLE stays up between windows".to_string()
+                "Node applied: BLE stays up between windows".to_string()
             }
             ble::CFG_BLE_OFF_S => {
                 format!(
-                    "Board applied: BLE down {} between windows (still beaconing)",
+                    "Node applied: BLE down {} between windows (still beaconing)",
+                    secs_text(applied)
+                )
+            }
+            ble::CFG_BLE_ON_S => {
+                format!(
+                    "Node applied: BLE up {} between off periods",
                     secs_text(applied)
                 )
             }
@@ -97,32 +105,38 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             // later.
             ble::CFG_SLEEP_NOW => {
                 format!(
-                    "Board sleeping for {} - it will disconnect now",
+                    "Node sleeping for {} - it will disconnect now",
                     secs_text(applied)
                 )
             }
             // The mode acks with the byte it stored, so this reports what
-            // the board is now rather than what it was asked to be. Stored
+            // the node is now rather than what it was asked to be. Stored
             // is the one that ends the link, and it says so for the same
             // reason `CFG_SLEEP_NOW` does: the disconnect that follows is
             // the command working.
             ble::CFG_MODE => match ble::Mode::from_wire(applied as u8) {
                 Some(ble::Mode::Stored) => {
-                    "Board storing itself - it will disconnect now".to_string()
+                    "Node storing itself - it will disconnect now".to_string()
                 }
                 Some(ble::Mode::Idle) => {
-                    "Board idle: reachable, GPS in backup, radio down".to_string()
+                    "Node idle: reachable, GPS in backup, radio down".to_string()
                 }
                 Some(ble::Mode::Tracking) => {
-                    "Board tracking: GPS, beacon and logging up".to_string()
+                    "Node tracking: GPS, beacon and logging up".to_string()
                 }
-                // A mode this build does not know, which is a board newer
+                Some(ble::Mode::Listening) => {
+                    "Node listening: GPS and receiver up, nothing sent".to_string()
+                }
+                // A mode this build does not know, which is a node newer
                 // than the app rather than a failure.
-                None => format!("Board applied: mode {applied}"),
+                None => format!("Node applied: mode {applied}"),
             },
+            ble::CFG_IDLE_TIMEOUT_S if applied == 0 => {
+                "Node applied: idle never stores itself".to_string()
+            }
             ble::CFG_IDLE_TIMEOUT_S => {
                 format!(
-                    "Board applied: idle for {} before it stores itself",
+                    "Node applied: idle for {} before it stores itself",
                     secs_text(applied)
                 )
             }
@@ -130,23 +144,23 @@ fn ack_message(ack: &Ack) -> Result<String, String> {
             // itself comes back on its own characteristic, and the pages
             // pick it up from there.
             ble::CFG_NAME if applied == 0 => {
-                "Board applied: name cleared, it goes by its address again".to_string()
+                "Node applied: name cleared, it goes by its address again".to_string()
             }
-            ble::CFG_NAME => "Board applied: name stored".to_string(),
-            _ => format!("Board applied: {name}"),
+            ble::CFG_NAME => "Node applied: name stored".to_string(),
+            _ => format!("Node applied: {name}"),
         }),
         packet::ACK_UNKNOWN_ID => Err(format!(
-            "Board rejected: it does not know the {name} setting"
+            "Node rejected: it does not know the {name} setting"
         )),
-        packet::ACK_BAD_VALUE => Err(format!("Board rejected: bad value for {name}")),
+        packet::ACK_BAD_VALUE => Err(format!("Node rejected: bad value for {name}")),
         // The two-MCU board had two more statuses here, for a setting the BLE
         // half could not get across the UART link to the radio half. One MCU
         // applies a setting where it decided it, so the only answers left are
         // the ones above and this one.
         ble::ACK_BAD_STATE => Err(format!(
-            "Board rejected {name}: not valid in its current state"
+            "Node rejected {name}: not valid in its current state"
         )),
-        s => Err(format!("Board rejected {name}: status {s:#04x}")),
+        s => Err(format!("Node rejected {name}: status {s:#04x}")),
     }
 }
 
@@ -206,19 +220,14 @@ struct Seen {
 pub(crate) struct DeviceRow {
     /// Normalized MAC; the identity, and the key into the nickname table.
     pub mac: String,
-    /// Signal strength from the running scan, absent for a board that is only
+    /// Signal strength from the running scan, absent for a node that is only
     /// known from the config or has not been heard from recently.
     pub rssi: Option<i16>,
-    /// What the board calls itself, from the last advertisement seen for it.
-    /// Absent for a board known only from the config, and on firmware that
-    /// predates board names.
-    ///
-    /// Shown beside the MAC in place of nothing: for a board nobody has
-    /// named it is the address again, and the nickname box is the label.
-    pub advertised: Option<String>,
-    /// The name stored on the board, when it has one (see
-    /// [`crate::ble::board_label`]). This is the board's label wherever one
-    /// is picked, over the nickname, so the row shows it as such.
+    /// The name stored on the node, when it has one (see
+    /// [`crate::ble::board_label`]). This is the node's label wherever one
+    /// is picked, over the nickname, so the row shows it as such. The
+    /// address-derived name an unnamed node advertises under is not carried:
+    /// it says nothing the address beside it does not.
     pub own_name: Option<String>,
     /// This board is the pinned one, so it is what Connect will go to.
     pub selected: bool,
@@ -233,6 +242,19 @@ pub(crate) fn secs_text(s: u32) -> String {
         s if s < 3600 => format!("{:.0} min", s as f32 / 60.0),
         s if s % 3600 == 0 => format!("{} h", s / 3600),
         s => format!("{:.1} h", s as f32 / 3600.0),
+    }
+}
+
+/// An elapsed time in seconds, always down to the second ("45 s", "1 min
+/// 30 s", "2 h 5 min 3 s"). For the counts that run while something is
+/// waited for: a scan at "2 min" for a long time reads as stuck, and the
+/// seconds ticking are what say it is not.
+pub(crate) fn elapsed_text(s: u64) -> String {
+    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+    match (h, m) {
+        (0, 0) => format!("{sec} s"),
+        (0, m) => format!("{m} min {sec} s"),
+        (h, m) => format!("{h} h {m} min {sec} s"),
     }
 }
 
@@ -285,25 +307,55 @@ pub(crate) const ROTATE_TAU: f32 = 0.12;
 /// between readings and a tighter constant would just step visibly.
 pub(crate) const ARROW_TAU: f32 = 0.25;
 
-/// Config file loaded at startup and written back by the Settings page, unless
-/// another path is typed there.
-const DEFAULT_CONFIG_NAME: &str = "gps-config.toml";
+/// Settings file loaded at startup and written back by the Settings page,
+/// unless another path is typed there.
+const DEFAULT_CONFIG_NAME: &str = "app-settings.toml";
 
-/// Where the config file lives unless the Settings page is pointed elsewhere:
-/// beside the tile cache, which on Android is the app's private data directory
-/// (the working directory there is not writable, so a bare filename could be
-/// read but never saved). On desktop the cache is a relative directory, which
-/// leaves the plain filename in the working directory.
+/// What the settings file was called before. A file under this name is
+/// renamed to the new one once, at startup, so a phone keeps its settings
+/// across the rename rather than starting over beside a file it no longer
+/// reads.
+const OLD_CONFIG_NAME: &str = "gps-config.toml";
+
+/// Where the settings file lives unless the Settings page is pointed
+/// elsewhere: beside the tile cache, which on Android is the app's private
+/// data directory (the working directory there is not writable, so a bare
+/// filename could be read but never saved). On desktop the cache is a
+/// relative directory, which leaves the plain filename in the working
+/// directory.
 fn default_config_path(cache_dir: Option<&std::path::Path>) -> String {
     beside_cache(cache_dir, DEFAULT_CONFIG_NAME)
 }
 
+/// Rename a settings file left under the old name to `path`, when nothing
+/// is at `path` yet. Says whether it did.
+fn migrate_old_config(path: &str) -> bool {
+    let new = std::path::Path::new(path);
+    if new.exists() {
+        return false;
+    }
+    let old = match new.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(OLD_CONFIG_NAME),
+        _ => PathBuf::from(OLD_CONFIG_NAME),
+    };
+    old.exists() && std::fs::rename(&old, new).is_ok()
+}
+
 /// The look sheet loaded at startup and written back by the adjuster. Kept
-/// beside the config, for the same reason the config is where it is.
+/// beside the settings, for the same reason they are where they are.
 const DEFAULT_LOOK_NAME: &str = "gps-gui.look";
 
 fn default_look_path(cache_dir: Option<&std::path::Path>) -> String {
     beside_cache(cache_dir, DEFAULT_LOOK_NAME)
+}
+
+/// The radio config the Radio page opens on, in the same directory: the one
+/// place both platforms can write, so a config saved on the phone lands
+/// somewhere it can be loaded from again.
+const DEFAULT_RADIO_NAME: &str = "RADIO.toml";
+
+fn default_radio_path(cache_dir: Option<&std::path::Path>) -> String {
+    beside_cache(cache_dir, DEFAULT_RADIO_NAME)
 }
 
 /// `name` in the directory holding the tile cache, or bare when the cache is
@@ -450,7 +502,8 @@ pub enum RegionSelect {
 pub enum PointFilter {
     All,
     Phone,
-    Esp,
+    /// Any node connected to over BLE, whichever it was.
+    Board,
     /// Any remote LoRa node, whatever its address.
     Remote,
 }
@@ -460,10 +513,24 @@ impl PointFilter {
         match self {
             PointFilter::All => true,
             PointFilter::Phone => source == PointSource::Phone,
-            PointFilter::Esp => source == PointSource::Esp,
+            PointFilter::Board => matches!(source, PointSource::Board(_)),
             PointFilter::Remote => matches!(source, PointSource::Remote(_)),
         }
     }
+}
+
+/// What the current position came from. Which of the three is in use
+/// decides what the map calls "you", whether the connected node is a
+/// second marker or the same one, and what the Status page says the
+/// position is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LocationSource {
+    /// This device's own receiver (`[phone] location`).
+    Phone,
+    /// The connected node's receiver, over BLE (`[ble] location`).
+    Node,
+    /// Typed into the desktop position bar.
+    Manual,
 }
 
 /// A map marker the user can double-click/tap to inspect.
@@ -483,8 +550,8 @@ impl MarkerKind {
     /// this is the fallback that names a node by its address.
     fn label(self) -> String {
         match self {
-            MarkerKind::You => "You".to_string(),
-            MarkerKind::Beacon => "Beacon".to_string(),
+            MarkerKind::You => crate::config::DEFAULT_PHONE_NAME.to_string(),
+            MarkerKind::Beacon => "Node".to_string(),
             MarkerKind::Remote(addr) => format!("Node {addr}"),
         }
     }
@@ -650,9 +717,10 @@ pub struct MyApp {
     /// Which tile layer is currently drawn.
     layer: MapLayer,
     map_memory: MapMemory,
-    /// Live GPS fixes, when a source is wired up (Android GNSS). `None` on
-    /// desktop, where the manual position bar is shown instead.
-    gps_rx: Option<Receiver<GpsFix>>,
+    /// The phone's own GPS source, when the platform has one (Android).
+    /// `None` on desktop, where the manual position bar is shown instead.
+    /// Its receiver runs only while `[phone] location` says so.
+    gps: Option<GpsHandle>,
     /// Device-facing compass, when the platform has one (Android only). The
     /// sensor behind it is powered only while heading-up needs it.
     compass: Option<CompassHandle>,
@@ -664,6 +732,8 @@ pub struct MyApp {
     current: Option<Position>,
     /// When the current position was last updated, for the marker info popup.
     current_time: Option<SystemTime>,
+    /// Where `current` came from; `None` with no position yet.
+    current_source: Option<LocationSource>,
     /// Course over ground from the GPS fix.
     heading: Option<f32>,
     /// Ground speed from the GPS fix, in meters per second. `None` until a
@@ -705,8 +775,15 @@ pub struct MyApp {
     beacon_time: Option<SystemTime>,
     /// The last full packet from the beacon (satellites, speed, ...).
     beacon_packet: Option<PositionPacket>,
-    /// Every beacon position recorded, for the path drawing and points list.
-    beacon_track: Vec<TrackPoint>,
+    /// The address of the node the link is up to, once it has said. What
+    /// its track is filed under, and the key its name is written to the
+    /// config by.
+    board_id: Option<BoardId>,
+    /// Every position each node reported while connected to, one track per
+    /// node, for the path drawing and the points list. Per node rather than
+    /// one list, so switching nodes ends a path instead of joining it to the
+    /// next node's.
+    board_tracks: BTreeMap<BoardId, Vec<TrackPoint>>,
     /// Remote LoRa nodes relayed by the connected board, keyed by address. Each
     /// draws as its own colored path and marker, and lists as its own source.
     remotes: BTreeMap<u8, RemoteNode>,
@@ -781,6 +858,10 @@ pub struct MyApp {
     /// controller exists - so the firmware destroys it between advertising
     /// windows and the board sits near 60 mA in the gap.
     ble_off_text: String,
+    /// BLE on-period input (seconds) on the Bluetooth page: the on-half of
+    /// that duty cycle, its own number now rather than the wake check's
+    /// advertising window.
+    ble_on_text: String,
     /// Idle-timeout input (seconds) on the Bluetooth page: how long the board
     /// stays reachable-but-not-tracking before it stores itself.
     ///
@@ -871,6 +952,13 @@ pub struct MyApp {
     /// can't center a horizontal row in a single layout pass). `0.0` until the
     /// first frame has measured it.
     controls_width: f32,
+    /// Height the map's controls bar took last frame, so what hangs under it
+    /// (the key, the center menu) can clear it.
+    controls_height: f32,
+    /// Whether the map's controls bar is unfolded. The tab in the corner
+    /// folds it away, and the zoom column and the key go with it. Session
+    /// state: a map cleared for a look is not a setting.
+    map_bar_open: bool,
     /// Height the map's bottom status bar took last frame, so the other
     /// bottom-anchored overlay can sit above it. `0.0` while the bar is off,
     /// which is also what leaves that overlay where it was.
@@ -897,10 +985,13 @@ pub struct MyApp {
     /// `None` on desktop, where the log path is already reachable and the
     /// export writes the copy itself.
     export: Option<Saver>,
+    /// Puts text on the clipboard through the platform. `None` on desktop,
+    /// where egui's own clipboard does it.
+    copier: Option<Copier>,
 }
 
 impl MyApp {
-    /// `gps_rx` is the live GPS fix stream, or `None` when no source is wired
+    /// `gps` is the phone's own GPS source, or `None` when no source is wired
     /// up (desktop) - the UI then shows a manual position entry bar instead.
     /// `cache_dir` is where tiles are cached to disk (`None` to disable). Desktop
     /// passes a local `.cache`; Android passes its writable data directory.
@@ -909,14 +1000,17 @@ impl MyApp {
     /// `ble` is the worker connected to the GPS board.
     /// `export` puts a file where the user can reach it (`None` on desktop,
     /// where the log is written to a reachable path to begin with).
+    /// `copier` puts text on the clipboard (`None` on desktop, where egui does).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: egui::Context,
-        gps_rx: Option<Receiver<GpsFix>>,
+        gps: Option<GpsHandle>,
         cache_dir: Option<PathBuf>,
         compass: Option<CompassHandle>,
         insets: Option<Box<dyn Fn() -> [f32; 4]>>,
         ble: BleHandle,
         export: Option<Saver>,
+        copier: Option<Copier>,
     ) -> Self {
         // SVG loader for the button icons.
         egui_extras::install_image_loaders(&ctx);
@@ -940,12 +1034,13 @@ impl MyApp {
             ),
             layer: MapLayer::Standard,
             map_memory: MapMemory::default(),
-            gps_rx,
+            gps,
             compass,
             ble,
             insets,
             current: None,
             current_time: None,
+            current_source: None,
             heading: None,
             speed: None,
             compass_heading: None,
@@ -958,7 +1053,8 @@ impl MyApp {
             beacon: None,
             beacon_time: None,
             beacon_packet: None,
-            beacon_track: Vec::new(),
+            board_id: None,
+            board_tracks: BTreeMap::new(),
             remotes: BTreeMap::new(),
             rssi_history: VecDeque::new(),
             ble_status: "idle".to_string(),
@@ -993,9 +1089,13 @@ impl MyApp {
             // the board is unreachable for, so a stray press should ask
             // for the shortest one.
             ble_off_text: ble::BLE_OFF_MIN_S.to_string(),
-            // Blank rather than a number: the common press is "sleep for
-            // the cadence I already configured", and a prefilled box would
-            // make the uncommon one look like the default.
+            // The firmware's own default, like the advertising window and
+            // for the same reason: a short on period is the hazardous
+            // direction.
+            ble_on_text: ble::BLE_ON_DEFAULT_S.to_string(),
+            // The value the timeout takes when it is switched on: it is off
+            // by default, so the box holds what Apply would set rather than
+            // the zero that is already in force.
             idle_timeout_text: ble::IDLE_TIMEOUT_DEFAULT_S.to_string(),
             sleep_now_text: String::new(),
             board_name_text: String::new(),
@@ -1016,7 +1116,7 @@ impl MyApp {
             discovered: BTreeMap::new(),
             name_edits: BTreeMap::new(),
             radio: None,
-            radio_path: "RADIO.toml".to_string(),
+            radio_path: default_radio_path(cache_dir.as_deref()),
             radio_feedback: None,
             radio_edit: RadioEdit::None,
             radio_push_confirm: false,
@@ -1033,6 +1133,8 @@ impl MyApp {
             zoom_tx,
             zoom_rx,
             controls_width: 0.0,
+            controls_height: 0.0,
+            map_bar_open: true,
             status_bar_height: 0.0,
             logger: Logger::default(),
             // Replaced below once the config has been loaded, which is what
@@ -1045,12 +1147,15 @@ impl MyApp {
             log_ref_bad: false,
             log_hidden: BTreeSet::new(),
             export,
+            copier,
         };
 
-        // Auto-load the default config when present; the Settings page can load
-        // any path later, and saves back to whichever one is in the box. With no
-        // file the defaults apply, which include connecting to the beacon.
+        // Auto-load the default settings when present; the Settings page can
+        // load any path later, and saves back to whichever one is in the box.
+        // With no file the defaults apply, which include connecting to the
+        // node. A file left under the old name is picked up once and renamed.
         let startup_path = app.config_path.clone();
+        migrate_old_config(&startup_path);
         match AppConfig::load(&startup_path) {
             Ok(cfg) => app.apply_config(cfg),
             Err(_) => app.sync_ble_to_config(),
@@ -1423,6 +1528,12 @@ impl MyApp {
         self.beacon = None;
         self.beacon_time = None;
         self.beacon_packet = None;
+        self.board_id = None;
+        // A position that was the node's is gone with the node: leaving it
+        // would draw "you" standing where a link that is over last put you.
+        if self.current_source == Some(LocationSource::Node) {
+            self.clear_current();
+        }
         for node in self.remotes.values_mut() {
             node.pos = None;
             node.time = None;
@@ -1479,7 +1590,6 @@ impl MyApp {
                         .as_deref()
                         .and_then(|name| board_label(name, Some(&mac)))
                         .map(str::to_string),
-                    advertised,
                     selected: self.config.ble.is_selected(&mac),
                     mac,
                 }
@@ -1506,31 +1616,38 @@ impl MyApp {
         self.config.ble.set_name(mac, &typed);
     }
 
-    /// What the app is doing about the link, for the Settings and Status
+    /// What the app is doing about the link, for the Bluetooth and Status
     /// pages. Separate from `ble_status`, which is the worker's own running
     /// commentary on the attempt.
+    ///
+    /// A line describing something still in progress ends without a stop,
+    /// so the page can put the moving dots after it.
     pub(crate) fn ble_intent_text(&self) -> String {
-        let waiting = secs_text((self.intent_since.elapsed().as_secs() as u32).max(1));
+        let waiting = elapsed_text(self.intent_since.elapsed().as_secs());
         match (self.ble_intent, self.ble_connected) {
-            (BleIntent::Idle, _) => "Not connecting. The board is free to sleep.".to_string(),
-            (BleIntent::Scanning, _) => {
-                format!("Looking for boards for {waiting}. Not connected to any.")
-            }
-            // "Connected" is only claimed while the board is actually talking:
+            (BleIntent::Idle, _) => "Not connecting. The node is free to sleep.".to_string(),
+            (BleIntent::Scanning, _) => format!("Scanning for {waiting}"),
+            // "Connected" is only claimed while the node is actually talking:
             // the platform can hold a dead link open for a long time, and this
             // line saying all is well then is worse than saying nothing.
             (_, true) => match self.board_silence() {
                 Some(quiet) => format!(
-                    "Connected, but nothing from the board for {}.",
-                    secs_text(quiet.as_secs() as u32)
+                    "Connected, but nothing from the node for {}.",
+                    elapsed_text(quiet.as_secs())
                 ),
-                None => "Connected. The board stays awake until you disconnect.".to_string(),
+                None => "Connected.".to_string(),
             },
-            (BleIntent::Connect, false) => format!("Connecting for {waiting}."),
+            (BleIntent::Connect, false) => format!("Connecting for {waiting}"),
             (BleIntent::ConnectSleeping, false) => {
-                format!("Scanning for a sleeping board for {waiting}.")
+                format!("Waiting for a sleeping node for {waiting}")
             }
         }
+    }
+
+    /// Whether the link line describes something still in progress, which
+    /// is what the page colors and animates.
+    pub(crate) fn ble_busy(&self) -> bool {
+        !self.ble_connected && self.ble_intent != BleIntent::Idle
     }
 
     /// How long the connected board has been silent beyond what its notify
@@ -1550,20 +1667,26 @@ impl MyApp {
         (quiet > cadence.max(LINK_SILENT)).then_some(quiet)
     }
 
-    /// The board the app is pinned to, named for a heading or a status line.
-    /// "Any board" when nothing is pinned and nothing is connected, which is
+    /// The node the app is pinned to, named for a heading or a status line.
+    /// "Any node" when nothing is pinned and nothing is connected, which is
     /// what an empty MAC means.
     pub(crate) fn selected_device_label(&self) -> String {
         self.board_label()
-            .unwrap_or_else(|| "Any board".to_string())
+            .unwrap_or_else(|| "Any node".to_string())
     }
 
-    /// The connected board's name wherever the map and the pages label it:
-    /// its marker, its points, its log series, its read-outs. "Beacon" when
+    /// The connected node's name wherever the map and the pages label it:
+    /// its marker, its points, its log series, its read-outs. "Node" when
     /// nothing better is known, which is the marker's generic name.
     pub(crate) fn beacon_label(&self) -> String {
         self.board_label()
             .unwrap_or_else(|| MarkerKind::Beacon.label())
+    }
+
+    /// What this device is called: the map's marker, its points, its log
+    /// series. The config's `[phone] name`.
+    pub(crate) fn phone_label(&self) -> String {
+        self.config.phone.name.clone()
     }
 
     /// The best name there is for the board the app is pinned to, or
@@ -1581,11 +1704,41 @@ impl MyApp {
         if let Some(own) = self.board_own_name() {
             return Some(own);
         }
-        let mac = self.config.ble.mac.as_deref();
+        // The address the link came up to, else the pinned one: connected
+        // to "any node", the link is the only thing that knows which.
+        let linked = self.board_id.map(|id| id.mac());
+        let mac = linked.as_deref().or(self.config.ble.mac.as_deref());
         if let Some(nickname) = mac.and_then(|mac| self.config.ble.name_of(mac)) {
             return Some(nickname.to_string());
         }
         self.advertised_name().or_else(|| mac.map(str::to_string))
+    }
+
+    /// The name a node has for itself, written into the config's node list
+    /// under its address, and saved - so the list in the file is the list of
+    /// nodes this app has met, by the names they go by, and a rename on the
+    /// node renames it in the list. Needs both the address and the name,
+    /// which arrive in either order; called on each.
+    fn note_board_name(&mut self) {
+        let (Some(id), Some(name)) = (self.board_id, self.board_name.as_deref()) else {
+            return;
+        };
+        let Some(label) = board_label(name, Some(&id.mac())) else {
+            return;
+        };
+        let mac = id.mac();
+        if self.config.ble.name_of(&mac) == Some(label) {
+            return;
+        }
+        self.config.ble.set_name(&mac, label);
+        let path = self.config_path.trim().to_string();
+        if path.is_empty() {
+            return;
+        }
+        self.config_feedback = Some(match self.config.save(&path) {
+            Ok(_) => Ok(format!("Saved {label} to the node list in {path}")),
+            Err(e) => Err(e),
+        });
     }
 
     /// The label stored on the board, when it has one: what it calls itself
@@ -1593,7 +1746,9 @@ impl MyApp {
     /// by its address (see [`board_label`]).
     pub(crate) fn board_own_name(&self) -> Option<String> {
         let name = self.advertised_name()?;
-        board_label(&name, self.config.ble.mac.as_deref()).map(str::to_string)
+        let linked = self.board_id.map(|id| id.mac());
+        let mac = linked.as_deref().or(self.config.ble.mac.as_deref());
+        board_label(&name, mac).map(str::to_string)
     }
 
     /// The name the board advertises under, prefix and all: what the link
@@ -1991,13 +2146,61 @@ impl MyApp {
         targets
     }
 
-    /// The connected board's position as far as the map is concerned: its
-    /// live position, unless `[ble] show_on_map` has taken the board off the
-    /// map. Everything the map draws or points at for the board reads this;
-    /// the pages that are not the map read `beacon` itself, since the board
-    /// is still there and still reporting.
+    /// The connected node's position as far as the map is concerned: its
+    /// live position, unless `[ble] show_on_map` has taken the node off the
+    /// map - or unless the node is where "you" are, in which case its marker
+    /// would only sit under yours. Everything the map draws or points at for
+    /// the node reads this; the pages that are not the map read `beacon`
+    /// itself, since the node is still there and still reporting.
     fn beacon_on_map(&self) -> Option<Position> {
-        self.beacon.filter(|_| self.config.ble.show_on_map)
+        self.beacon
+            .filter(|_| self.config.ble.show_on_map && !self.node_is_you())
+    }
+
+    /// Whether the current position is the connected node's own fix, which
+    /// makes the node and "you" one marker rather than two.
+    pub(crate) fn node_is_you(&self) -> bool {
+        self.current_source == Some(LocationSource::Node)
+    }
+
+    /// Whether a node fix should be the current position: the setting says
+    /// so, and the phone is not also being asked for one - the node's
+    /// receiver is the better of the two, so it wins while it has a fix.
+    fn node_supplies_position(&self) -> bool {
+        self.config.ble.location
+    }
+
+    /// Drop the current position: its source is gone or switched off, and a
+    /// marker left standing would read as where you are.
+    fn clear_current(&mut self) {
+        self.current = None;
+        self.current_time = None;
+        self.current_source = None;
+        self.heading = None;
+        self.speed = None;
+    }
+
+    /// Keep the position sources in step with the settings: the phone's
+    /// receiver runs only while it is wanted, and a position from a source
+    /// that has been switched off is dropped rather than left on the map.
+    fn sync_location_sources(&mut self) {
+        if let Some(gps) = &self.gps {
+            gps.wanted
+                .store(self.config.phone.location, Ordering::Relaxed);
+        }
+        let off = match self.current_source {
+            Some(LocationSource::Phone) => !self.config.phone.location,
+            Some(LocationSource::Node) => !self.config.ble.location,
+            Some(LocationSource::Manual) | None => false,
+        };
+        if off {
+            self.clear_current();
+        }
+    }
+
+    /// Where the current position is coming from, for the Status page.
+    pub(crate) fn location_source(&self) -> Option<LocationSource> {
+        self.current_source
     }
 
     /// The beacon boards the map can point to: the connected board first, then
@@ -2020,13 +2223,17 @@ impl MyApp {
         targets
     }
 
-    /// The board the distance read-out and its line refer to: the one tracking
-    /// mode currently has selected, or the connected board when not tracking.
-    /// `None` until that board has a position.
+    /// The node the distance read-out and its line refer to: the one tracking
+    /// mode currently has selected, or the connected node when not tracking.
+    /// `None` until that node has a position - and none for the connected
+    /// node while it is where you are, a distance to yourself being nothing.
     fn distance_target(&self) -> Option<(MarkerKind, Position)> {
         match self.tracking_beacon {
             Some(kind) => self.beacon_target(kind),
-            None => self.beacon.map(|p| (MarkerKind::Beacon, p)),
+            None => self
+                .beacon
+                .filter(|_| !self.node_is_you())
+                .map(|p| (MarkerKind::Beacon, p)),
         }
     }
 
@@ -2103,18 +2310,57 @@ impl MyApp {
         match kind {
             MarkerKind::Remote(addr) => self.config.lora.label_of(addr),
             MarkerKind::Beacon => self.beacon_label(),
-            MarkerKind::You => MarkerKind::You.label(),
+            MarkerKind::You => self.phone_label(),
         }
     }
 
     /// How a recorded point's source is named on the Points page: the same
-    /// names the map's markers go by, so a board or a node reads the same
-    /// on both.
+    /// names the map's markers go by, so a node reads the same on both. A
+    /// node other than the one connected to now goes by the name the config
+    /// has for it, else its address.
     pub(crate) fn source_label(&self, source: PointSource) -> String {
         match source {
-            PointSource::Phone => PointSource::Phone.label(),
-            PointSource::Esp => self.beacon_label(),
+            PointSource::Phone => self.phone_label(),
+            PointSource::Board(id) if self.is_this_board(id) => self.beacon_label(),
+            PointSource::Board(id) if id.is_known() => self.config.ble.label_of(&id.mac()),
+            PointSource::Board(_) => MarkerKind::Beacon.label(),
             PointSource::Remote(addr) => self.config.lora.label_of(addr),
+        }
+    }
+
+    /// Whether `id` is the node the app is talking to, or pinned to when
+    /// no link has said which it is talking to.
+    fn is_this_board(&self, id: BoardId) -> bool {
+        match self.board_id {
+            Some(linked) => linked == id,
+            None => match self.config.ble.mac.as_deref().and_then(BoardId::parse) {
+                Some(pinned) => pinned == id,
+                None => !id.is_known(),
+            },
+        }
+    }
+
+    /// The node whose track a fix received now belongs to: the one the link
+    /// named, else the unknown one.
+    fn track_board(&self) -> BoardId {
+        self.board_id.unwrap_or(BoardId::UNKNOWN)
+    }
+
+    /// The connected node's recorded track, for the map.
+    pub(crate) fn board_track(&self) -> &[TrackPoint] {
+        self.board_tracks
+            .get(&self.track_board())
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The track drawn as yours: the phone's, or - while the connected node
+    /// is where you are - that node's, so the path behind you is the path
+    /// you took whichever receiver measured it.
+    pub(crate) fn your_track(&self) -> &[TrackPoint] {
+        if self.node_is_you() {
+            self.board_track()
+        } else {
+            &self.track
         }
     }
 
@@ -2126,11 +2372,12 @@ impl MyApp {
     /// of widgets and this is a query over state. `query` arrives already
     /// trimmed and lowercased, which is the form [`TrackPoint::matches`] takes.
     pub(crate) fn visible_points(&self, filter: PointFilter, query: &str) -> Vec<TrackPoint> {
+        let board_points = self.board_tracks.values().flat_map(|t| t.iter());
         let remote_points = self.remotes.values().flat_map(|n| n.track.iter());
         let mut rows: Vec<TrackPoint> = self
             .track
             .iter()
-            .chain(self.beacon_track.iter())
+            .chain(board_points)
             .chain(remote_points)
             .filter(|p| filter.admits(p.source))
             .filter(|p| query.is_empty() || p.matches(&self.source_label(p.source), query))
@@ -2141,21 +2388,41 @@ impl MyApp {
         rows
     }
 
-    /// How many points are recorded across every track: yours, the beacon's
-    /// and the nodes'.
+    /// How many points are recorded across every track: yours, each
+    /// connected node's and the remote nodes'.
     pub(crate) fn recorded_points(&self) -> usize {
+        let board: usize = self.board_tracks.values().map(Vec::len).sum();
         let remote: usize = self.remotes.values().map(|n| n.track.len()).sum();
-        self.track.len() + self.beacon_track.len() + remote
+        self.track.len() + board + remote
+    }
+
+    /// The nodes with a recorded track, for the Points page's source column.
+    pub(crate) fn tracked_boards(&self) -> impl Iterator<Item = BoardId> + '_ {
+        self.board_tracks.keys().copied()
     }
 
     /// Drop every recorded track. Not undoable, which is why the button behind
     /// it lives on the Settings page rather than in the map bar.
     pub(crate) fn discard_tracks(&mut self) {
         self.track.clear();
-        self.beacon_track.clear();
+        self.board_tracks.clear();
         for node in self.remotes.values_mut() {
             node.track.clear();
         }
+    }
+
+    /// Whether a remote node is on the air now: heard within `[lora]
+    /// pulse_secs`, which is what its marker's pulse says.
+    pub(crate) fn remote_active(&self, addr: u8) -> bool {
+        let window = self.config.lora.pulse_secs;
+        if window <= 0.0 {
+            return false;
+        }
+        self.remotes.get(&addr).and_then(|n| n.heard).is_some_and(|heard| {
+            SystemTime::now()
+                .duration_since(heard)
+                .map_or(true, |age| age.as_secs_f32() < window)
+        })
     }
 
     /// Every remote node worth listing on the Status page: those with a
@@ -2301,6 +2568,19 @@ impl MyApp {
         }
     }
 
+    /// Send the typed BLE on period to the board: the on-half of the
+    /// tracking duty cycle. No zero, like the advertising window it was
+    /// split from - a zero-length on period is a tracker nobody can reach.
+    pub(crate) fn apply_ble_on(&mut self) {
+        match Self::parse_setting(&self.ble_on_text, "seconds") {
+            Ok(secs) => self.send_config(ConfigWrite::Seconds {
+                id: ble::CFG_BLE_ON_S,
+                secs,
+            }),
+            Err(msg) => self.ble_ack = Some(Err(msg)),
+        }
+    }
+
     /// Put the board into a mode.
     ///
     /// [`ble::Mode::Stored`] is the one that ends the link: the board acks
@@ -2321,13 +2601,15 @@ impl MyApp {
         self.send_config(ConfigWrite::Mode(mode));
     }
 
-    /// Send the typed idle timeout to the board.
-    ///
-    /// No zero and no Disable, unlike the wake check: a board leaves idle by
-    /// deep-sleeping, so "never leave idle" is a wake-check interval of 0
-    /// rather than a timeout of 0. The board clamps a zero up to its floor.
-    pub(crate) fn apply_idle_timeout(&mut self) {
-        match Self::parse_setting(&self.idle_timeout_text, "seconds") {
+    /// Send the typed idle timeout to the board. `secs` of 0 turns the
+    /// timeout off - the node stays idle until told otherwise - which is
+    /// the firmware default and what the Disable button sends.
+    pub(crate) fn apply_idle_timeout(&mut self, secs: Option<u32>) {
+        let secs = match secs {
+            Some(secs) => Ok(secs),
+            None => Self::parse_setting(&self.idle_timeout_text, "seconds"),
+        };
+        match secs {
             Ok(secs) => self.send_config(ConfigWrite::Seconds {
                 id: ble::CFG_IDLE_TIMEOUT_S,
                 secs,
@@ -2410,14 +2692,23 @@ impl MyApp {
         Some(bearing_deg(user, beacon))
     }
 
-    /// Apply one phone/manual GPS fix: move the marker, update the heading, and
-    /// append to the recorded track (decimated by the min-distance setting).
-    fn apply_gps_fix(&mut self, fix: GpsFix) {
+    /// Apply one phone or typed GPS fix: move the marker, update the heading,
+    /// and append to the recorded track (decimated by the min-distance
+    /// setting).
+    ///
+    /// A phone fix moves the marker unless the connected node is supplying
+    /// the position - the node's receiver is the better one, so while it
+    /// has a fix the phone's only feeds the phone's own track and the log.
+    pub(crate) fn apply_gps_fix(&mut self, fix: GpsFix, source: LocationSource) {
         let pos = lat_lon(fix.lat, fix.lon);
-        self.current = Some(pos);
-        self.current_time = Some(SystemTime::now());
-        self.heading = fix.bearing;
-        self.speed = fix.speed;
+        let node_has_it = source == LocationSource::Phone && self.node_is_you();
+        if !node_has_it {
+            self.current = Some(pos);
+            self.current_time = Some(SystemTime::now());
+            self.current_source = Some(source);
+            self.heading = fix.bearing;
+            self.speed = fix.speed;
+        }
         if far_enough(
             self.track.last().map(|t| &t.pos),
             pos,
@@ -2444,8 +2735,12 @@ impl MyApp {
     /// Pull every pending fix out of the channels, updating the current
     /// position, the beacon, and their tracks.
     fn drain_sources(&mut self) {
-        while let Some(fix) = self.gps_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.apply_gps_fix(fix);
+        while let Some(fix) = self.gps.as_ref().and_then(|g| g.fixes.try_recv().ok()) {
+            // The receiver is switched off with the setting, but a fix
+            // already on the channel is dropped here rather than applied.
+            if self.config.phone.location {
+                self.apply_gps_fix(fix, LocationSource::Phone);
+            }
         }
 
         // A compass thread that could not start (no rotation-vector sensor on
@@ -2484,7 +2779,10 @@ impl MyApp {
             // still talking. Status, scan sightings and link-state changes are
             // the worker's own and say nothing about the connected board.
             match &event {
-                BleEvent::Status(_) | BleEvent::Discovered(_) | BleEvent::Connected(_) => {}
+                BleEvent::Status(_)
+                | BleEvent::Discovered(_)
+                | BleEvent::Connected(_)
+                | BleEvent::Address(_) => {}
                 _ => self.board_heard = Some(Instant::now()),
             }
             match event {
@@ -2546,7 +2844,18 @@ impl MyApp {
                         self.settings_unsupported = false;
                         self.telemetry = None;
                         self.sleep_commanded = None;
+                    } else {
+                        // The node's address and the position it was giving
+                        // you go with the link.
+                        self.board_id = None;
+                        if self.current_source == Some(LocationSource::Node) {
+                            self.clear_current();
+                        }
                     }
+                }
+                BleEvent::Address(addr) => {
+                    self.board_id = BoardId::parse(&addr);
+                    self.note_board_name();
                 }
                 BleEvent::Fix(p) => {
                     self.beacon_packet = Some(p);
@@ -2554,16 +2863,26 @@ impl MyApp {
                         let pos = lat_lon(p.lat_deg(), p.lon_deg());
                         self.beacon = Some(pos);
                         self.beacon_time = Some(SystemTime::now());
-                        if far_enough(
-                            self.beacon_track.last().map(|t| &t.pos),
-                            pos,
-                            self.config.track.min_distance,
-                        ) {
-                            self.beacon_track.push(TrackPoint {
+                        let board = self.track_board();
+                        let min_distance = self.config.track.min_distance;
+                        let track = self.board_tracks.entry(board).or_default();
+                        if far_enough(track.last().map(|t| &t.pos), pos, min_distance) {
+                            track.push(TrackPoint {
                                 pos,
-                                source: PointSource::Esp,
+                                source: PointSource::Board(board),
                                 time: SystemTime::now(),
                             });
+                        }
+                        // The node's fix as yours, when that is what the
+                        // settings ask for. Its course is only a heading
+                        // while it is moving.
+                        if self.node_supplies_position() {
+                            self.current = Some(pos);
+                            self.current_time = Some(SystemTime::now());
+                            self.current_source = Some(LocationSource::Node);
+                            let speed = p.speed_mps() as f32;
+                            self.speed = Some(speed);
+                            self.heading = (speed > 0.5).then(|| p.course_deg() as f32);
                         }
                     }
                     self.record(packet_row(LogSource::Board, p, SystemTime::now()));
@@ -2664,10 +2983,12 @@ impl MyApp {
                         if s.ble_off_s > 0 {
                             self.ble_off_text = s.ble_off_s.to_string();
                         }
-                        // Always seeded, unlike the off period: the board
-                        // reports the timeout it resolved, so there is no
-                        // "unset" value to preserve here - a 0 would be a
-                        // board that does not know its own effective value.
+                        if s.ble_on_s > 0 {
+                            self.ble_on_text = s.ble_on_s.to_string();
+                        }
+                        // A zero is the timeout switched off, which is the
+                        // default; the box keeps what Apply would switch it
+                        // on to.
                         if s.idle_timeout_s > 0 {
                             self.idle_timeout_text = s.idle_timeout_s.to_string();
                         }
@@ -2704,6 +3025,7 @@ impl MyApp {
                             });
                     }
                     self.board_name = Some(name);
+                    self.note_board_name();
                 }
                 BleEvent::RadioConfig(c) => {
                     self.board_radio_config = Some(c);
@@ -2732,8 +3054,10 @@ impl eframe::App for MyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_sources();
         // Heading-up may have been toggled (or dropped for want of a heading)
-        // last frame; the sensor follows it here, once, for every page.
+        // last frame; the sensor follows it here, once, for every page. The
+        // position sources likewise.
         self.sync_compass_power();
+        self.sync_location_sources();
 
         let ctx = ui.ctx().clone();
         // Before anything is drawn: the pages read these colors and text sizes
@@ -2768,7 +3092,7 @@ impl eframe::App for MyApp {
         // With no live GPS source (desktop), let a position be typed in. Only
         // on the map, where the bar can float at the bottom without landing on
         // top of a scrolling page.
-        if self.gps_rx.is_none() && matches!(self.page, Page::Map) {
+        if self.gps.is_none() && matches!(self.page, Page::Map) {
             self.manual_gps_bar(&ctx, screen);
         }
 
@@ -2792,19 +3116,28 @@ pub(crate) mod tests {
         let (event_tx, event_rx) = channel();
         let (cmd_tx, cmd_rx) = channel();
         // A cache directory under the system temp dir is what keeps the
-        // startup config auto-load away from any real gps-config.toml: the
-        // app starts on its defaults rather than on the working directory's.
-        let cache = std::env::temp_dir().join("gps-gui-rs-tests").join("tiles");
+        // startup settings auto-load away from any real app-settings.toml:
+        // the app starts on its defaults rather than on the working
+        // directory's. Each test gets its own, so a name one test saves
+        // into the file is not another test's starting state.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join("gps-gui-rs-tests")
+            .join(format!("{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
         let app = MyApp::new(
             egui::Context::default(),
             None,
-            Some(cache),
+            Some(dir.join("tiles")),
             None,
             None,
             BleHandle {
                 events: event_rx,
                 commands: cmd_tx,
             },
+            None,
             None,
         );
         (app, cmd_rx, event_tx)
@@ -3021,17 +3354,220 @@ pub(crate) mod tests {
         );
         assert_eq!(app.beacon_label(), "sky-1", "the map and the pages agree");
         assert_eq!(app.marker_label(MarkerKind::Beacon), "sky-1");
-        assert_eq!(app.source_label(PointSource::Esp), "sky-1");
+        let id = BoardId::parse(mac).unwrap();
+        assert_eq!(app.source_label(PointSource::Board(id)), "sky-1");
+        // Another node's points are named for that node, not this one.
+        let other = BoardId::parse("AA:BB:CC:DD:EE:02").unwrap();
+        assert_eq!(app.source_label(PointSource::Board(other)), "AA:BB:CC:DD:EE:02");
+        app.config.ble.set_name("AA:BB:CC:DD:EE:02", "sky-2");
+        assert_eq!(app.source_label(PointSource::Board(other)), "sky-2");
     }
 
-    /// With no board known at all, the marker keeps its generic name and the
-    /// pinned-board line says the app is pinned to nothing.
+    /// With no node known at all, the marker keeps its generic name and the
+    /// pinned-node line says the app is pinned to nothing. You are called
+    /// what the config says.
     #[test]
     fn an_unknown_board_has_generic_names() {
-        let (app, _cmds, _events) = test_app();
-        assert_eq!(app.selected_device_label(), "Any board");
-        assert_eq!(app.beacon_label(), "Beacon");
-        assert_eq!(app.source_label(PointSource::Esp), "Beacon");
+        let (mut app, _cmds, _events) = test_app();
+        assert_eq!(app.selected_device_label(), "Any node");
+        assert_eq!(app.beacon_label(), "Node");
+        assert_eq!(app.source_label(PointSource::Board(BoardId::UNKNOWN)), "Node");
+        assert_eq!(app.marker_label(MarkerKind::You), "Phone");
+        assert_eq!(app.source_label(PointSource::Phone), "Phone");
+        app.config.phone.name = "Sam".to_string();
+        assert_eq!(app.marker_label(MarkerKind::You), "Sam");
+    }
+
+    /// Each node connected to keeps its own track: switching nodes ends a
+    /// path rather than joining it to the next node's, and both stay on the
+    /// Points page under their own names.
+    #[test]
+    fn each_connected_node_has_its_own_track() {
+        let (mut app, _cmds, events) = test_app();
+        let mut far = fix();
+        far.lat_e7 += 100_000; // about a kilometer north
+
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Address("AA:BB:CC:DD:EE:01".to_string()));
+        report(&events, &app, BleEvent::Fix(fix()));
+        app.drain_sources();
+        let first = BoardId::parse("AA:BB:CC:DD:EE:01").unwrap();
+        assert_eq!(app.board_id, Some(first));
+        assert_eq!(app.board_track().len(), 1);
+
+        // A second node, connected to in the same session.
+        app.select_device(Some("AA:BB:CC:DD:EE:02"));
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Address("AA:BB:CC:DD:EE:02".to_string()));
+        report(&events, &app, BleEvent::Fix(far));
+        app.drain_sources();
+        let second = BoardId::parse("AA:BB:CC:DD:EE:02").unwrap();
+        assert_eq!(app.board_track().len(), 1, "the new node starts a path of its own");
+        assert_eq!(app.board_tracks.len(), 2);
+        assert_eq!(app.recorded_points(), 2);
+        assert_eq!(app.tracked_boards().collect::<Vec<_>>(), vec![first, second]);
+
+        let rows = app.visible_points(PointFilter::Board, "");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|p| p.source == PointSource::Board(first)));
+        assert!(rows.iter().any(|p| p.source == PointSource::Board(second)));
+        assert!(app.visible_points(PointFilter::Phone, "").is_empty());
+    }
+
+    /// A node's fix is yours by default, the phone's receiver being off: the
+    /// marker moves to it, the node's own marker does not double it, and the
+    /// distance to it is nothing.
+    #[test]
+    fn the_connected_node_supplies_the_position_by_default() {
+        let (mut app, _cmds, events) = test_app();
+        assert!(app.config.ble.location && !app.config.phone.location);
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Fix(fix()));
+        app.drain_sources();
+        assert_eq!(app.location_source(), Some(LocationSource::Node));
+        let here = app.current.expect("the node's fix is the position");
+        assert!((here.y() - 48.1173).abs() < 1e-4);
+        assert!(app.node_is_you());
+        assert!(app.beacon_on_map().is_none(), "one marker, not two");
+        assert!(app.distance_target().is_none(), "no distance to yourself");
+        assert_eq!(app.your_track().len(), 1, "the node's path is yours");
+
+        // A phone fix arriving meanwhile does not take the marker back.
+        app.config.phone.location = true;
+        app.apply_gps_fix(
+            GpsFix {
+                lat: 51.0,
+                lon: 0.0,
+                bearing: None,
+                speed: None,
+            },
+            LocationSource::Phone,
+        );
+        assert_eq!(app.location_source(), Some(LocationSource::Node));
+        assert_eq!(app.track.len(), 1, "but it is still recorded as the phone's");
+
+        // The link dropping takes the position with it.
+        report(&events, &app, BleEvent::Connected(false));
+        app.drain_sources();
+        assert_eq!(app.current, None);
+        assert_eq!(app.location_source(), None);
+    }
+
+    /// With the node's receiver switched off the phone's fix is the position
+    /// again, and switching a source off drops a position it gave.
+    #[test]
+    fn switching_a_location_source_off_drops_its_position() {
+        let (mut app, _cmds, events) = test_app();
+        app.config.ble.location = false;
+        app.config.phone.location = true;
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Fix(fix()));
+        app.drain_sources();
+        assert_eq!(app.location_source(), None, "the node's fix is not yours");
+        assert!(app.beacon_on_map().is_some(), "so it is its own marker");
+
+        app.apply_gps_fix(
+            GpsFix {
+                lat: 51.0,
+                lon: 0.0,
+                bearing: None,
+                speed: None,
+            },
+            LocationSource::Phone,
+        );
+        assert_eq!(app.location_source(), Some(LocationSource::Phone));
+        app.config.phone.location = false;
+        app.sync_location_sources();
+        assert_eq!(app.current, None);
+
+        // A typed position is never switched off by either setting.
+        app.apply_gps_fix(
+            GpsFix {
+                lat: 51.0,
+                lon: 0.0,
+                bearing: None,
+                speed: None,
+            },
+            LocationSource::Manual,
+        );
+        app.sync_location_sources();
+        assert_eq!(app.location_source(), Some(LocationSource::Manual));
+    }
+
+    /// The name a node has for itself goes into the config's node list under
+    /// its address and is saved, whichever of the two arrives first.
+    #[test]
+    fn a_nodes_own_name_is_written_to_the_node_list() {
+        let (mut app, _cmds, events) = test_app();
+        report(&events, &app, BleEvent::Connected(true));
+        report(&events, &app, BleEvent::Name("ws3gps-sky-1".to_string()));
+        app.drain_sources();
+        assert!(app.config.ble.names.is_empty(), "no address to file it under yet");
+
+        report(&events, &app, BleEvent::Address("AA:BB:CC:DD:EE:01".to_string()));
+        app.drain_sources();
+        assert_eq!(app.config.ble.name_of("AA:BB:CC:DD:EE:01"), Some("sky-1"));
+        assert!(
+            std::path::Path::new(&app.config_path).exists(),
+            "and the list was saved"
+        );
+        assert!(matches!(&app.config_feedback, Some(Ok(msg)) if msg.contains("sky-1")));
+
+        // A rename follows, and an address-only name is not a name.
+        report(&events, &app, BleEvent::Name("ws3gps-sky-2".to_string()));
+        app.drain_sources();
+        assert_eq!(app.config.ble.name_of("AA:BB:CC:DD:EE:01"), Some("sky-2"));
+        report(&events, &app, BleEvent::Name("ws3gps-ee01".to_string()));
+        app.drain_sources();
+        assert_eq!(app.config.ble.name_of("AA:BB:CC:DD:EE:01"), Some("sky-2"));
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    /// A remote node's marker pulses while it was heard within the window,
+    /// and a window of zero never pulses.
+    #[test]
+    fn a_remote_node_is_active_while_recently_heard() {
+        let (mut app, _cmds, events) = test_app();
+        assert!(!app.remote_active(3));
+        report(
+            &events,
+            &app,
+            BleEvent::Remote {
+                src: 3,
+                rssi: -80,
+                packet: fix(),
+                age_s: 0,
+            },
+        );
+        app.drain_sources();
+        assert!(app.remote_active(3));
+        app.config.lora.pulse_secs = 0.0;
+        assert!(!app.remote_active(3));
+        // Heard long before the window.
+        app.config.lora.pulse_secs = 10.0;
+        report(
+            &events,
+            &app,
+            BleEvent::Remote {
+                src: 3,
+                rssi: -80,
+                packet: fix(),
+                age_s: 60,
+            },
+        );
+        app.drain_sources();
+        assert!(!app.remote_active(3));
+    }
+
+    /// The counts that run while something is waited for keep their seconds
+    /// however long they run.
+    #[test]
+    fn elapsed_text_always_shows_the_seconds() {
+        assert_eq!(elapsed_text(0), "0 s");
+        assert_eq!(elapsed_text(45), "45 s");
+        assert_eq!(elapsed_text(60), "1 min 0 s");
+        assert_eq!(elapsed_text(90), "1 min 30 s");
+        assert_eq!(elapsed_text(3723), "1 h 2 min 3 s");
     }
 
     /// The name the board reports over the link outranks what the scan saw,
@@ -3164,13 +3700,13 @@ pub(crate) mod tests {
     #[test]
     fn any_board_is_named_by_the_board_once_connected() {
         let (mut app, _cmds, events) = test_app();
-        assert_eq!(app.selected_device_label(), "Any board");
+        assert_eq!(app.selected_device_label(), "Any node");
 
         report(&events, &app, BleEvent::Name("ws3gps-ground-1".to_string()));
         app.drain_sources();
         assert_eq!(
             app.selected_device_label(),
-            "Any board",
+            "Any node",
             "a name from a session that is over says nothing about the next one"
         );
 
@@ -3344,7 +3880,7 @@ pub(crate) mod tests {
         .unwrap();
         assert!(cleared.contains("cleared"), "{cleared}");
         let old = ack_message(&ack(ble::CFG_NAME, packet::ACK_UNKNOWN_ID)).unwrap_err();
-        assert!(old.contains("board name"), "{old}");
+        assert!(old.contains("node name"), "{old}");
         // An interval of 0 turns sleep off, and must not read as "every off".
         assert_eq!(
             ack_message(&Ack {
@@ -3352,8 +3888,24 @@ pub(crate) mod tests {
                 status: packet::ACK_OK,
                 value_u32: Some(0),
             }),
-            Ok("Board applied: sleep disabled".to_string())
+            Ok("Node applied: sleep disabled".to_string())
         );
+        // The on period quotes its seconds like the window it was split
+        // from, and an idle timeout of 0 is the timeout off.
+        let on = ack_message(&Ack {
+            id: ble::CFG_BLE_ON_S,
+            status: packet::ACK_OK,
+            value_u32: Some(20),
+        })
+        .unwrap();
+        assert!(on.contains("20 s"), "{on}");
+        let never = ack_message(&Ack {
+            id: ble::CFG_IDLE_TIMEOUT_S,
+            status: packet::ACK_OK,
+            value_u32: Some(0),
+        })
+        .unwrap();
+        assert!(never.contains("never"), "{never}");
     }
 
     /// A setting that carries a number has to say which number the board
@@ -3372,7 +3924,7 @@ pub(crate) mod tests {
         assert_eq!(
             acked(ble::ESP_ADV_MIN_S),
             Ok(format!(
-                "Board applied: advertising {} per wake",
+                "Node applied: advertising {} per wake check",
                 secs_text(ble::ESP_ADV_MIN_S)
             ))
         );
@@ -3406,7 +3958,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             acked(0),
-            Ok("Board applied: BLE stays up between windows".to_string())
+            Ok("Node applied: BLE stays up between windows".to_string())
         );
         let thirty = acked(30).unwrap();
         assert!(thirty.contains("30 s"), "{thirty}");
@@ -3460,6 +4012,7 @@ pub(crate) mod tests {
             (ble::Mode::Stored, 0u8),
             (ble::Mode::Idle, 1),
             (ble::Mode::Tracking, 2),
+            (ble::Mode::Listening, 3),
         ] {
             let (bytes, len) = ConfigWrite::Mode(mode).encode();
             assert_eq!(&bytes[..len], &[ble::CFG_MODE, 1, wire]);
@@ -3481,6 +4034,8 @@ pub(crate) mod tests {
         assert_eq!(app.sleep_commanded, None, "tracking keeps the link");
         app.apply_mode(ble::Mode::Idle);
         assert_eq!(app.sleep_commanded, None, "so does idle");
+        app.apply_mode(ble::Mode::Listening);
+        assert_eq!(app.sleep_commanded, None, "and listening");
 
         // With no cadence set the board sleeps on the ceiling rather than
         // refusing, and the app has to predict the same number - it is the
@@ -3508,11 +4063,12 @@ pub(crate) mod tests {
         };
         assert!(acked(ble::Mode::Tracking).contains("tracking"));
         assert!(acked(ble::Mode::Idle).contains("idle"));
+        assert!(acked(ble::Mode::Listening).contains("listening"));
         // The one that has to warn, for the same reason `CFG_SLEEP_NOW`
         // does: the link is about to go.
         assert!(acked(ble::Mode::Stored).contains("disconnect"));
 
-        // A board newer than this app is a board with a mode it has never
+        // A node newer than this app is a node with a mode it has never
         // heard of, which must not read as a failure.
         assert!(ack_message(&Ack {
             id: ble::CFG_MODE,
@@ -3530,9 +4086,9 @@ pub(crate) mod tests {
         assert!(bad.contains("idle timeout"), "{bad}");
     }
 
-    /// The idle timeout has no Disable, unlike the wake check: a board
-    /// leaves idle by deep-sleeping, so "stay idle" is a wake-check interval
-    /// of 0 and not a timeout of 0. The write is the typed value either way.
+    /// The idle timeout sends what was typed, and its Disable sends the
+    /// zero that switches it off - the firmware default, and the way to a
+    /// node that stays idle until told otherwise.
     #[test]
     fn the_idle_timeout_sends_what_was_typed() {
         let (mut app, cmds, events) = test_app();
@@ -3547,12 +4103,15 @@ pub(crate) mod tests {
         };
 
         app.idle_timeout_text = "900".to_string();
-        app.apply_idle_timeout();
+        app.apply_idle_timeout(None);
         assert_eq!(sent(&cmds), Some((ble::CFG_IDLE_TIMEOUT_S, 900)));
+        app.apply_idle_timeout(Some(0));
+        assert_eq!(sent(&cmds), Some((ble::CFG_IDLE_TIMEOUT_S, 0)));
+        assert_eq!(app.idle_timeout_text, "900", "the box is not rewritten");
 
         // A typo answers on the ack line rather than sending anything.
         app.idle_timeout_text = "ten minutes".to_string();
-        app.apply_idle_timeout();
+        app.apply_idle_timeout(None);
         assert_eq!(sent(&cmds), None);
         assert!(app.ble_ack.as_ref().is_some_and(|r| r.is_err()));
 
@@ -3666,22 +4225,28 @@ pub(crate) mod tests {
         let (mut app, _cmds, _events) = test_app();
         assert_eq!(app.speed, None);
 
-        app.apply_gps_fix(GpsFix {
-            lat: 51.4779,
-            lon: -0.0015,
-            bearing: Some(90.0),
-            speed: Some(3.5),
-        });
+        app.apply_gps_fix(
+            GpsFix {
+                lat: 51.4779,
+                lon: -0.0015,
+                bearing: Some(90.0),
+                speed: Some(3.5),
+            },
+            LocationSource::Phone,
+        );
         assert_eq!(app.speed, Some(3.5));
         assert_eq!(app.heading, Some(90.0));
 
         // Stopped: the provider reports neither, and neither may persist.
-        app.apply_gps_fix(GpsFix {
-            lat: 51.4779,
-            lon: -0.0015,
-            bearing: None,
-            speed: None,
-        });
+        app.apply_gps_fix(
+            GpsFix {
+                lat: 51.4779,
+                lon: -0.0015,
+                bearing: None,
+                speed: None,
+            },
+            LocationSource::Phone,
+        );
         assert_eq!(app.speed, None);
         assert_eq!(app.heading, None);
     }
@@ -3934,13 +4499,16 @@ pub(crate) mod tests {
     /// "any node" rather than a particular one.
     #[test]
     fn point_filter_admits_only_its_own_sources() {
-        use PointSource::{Esp, Phone, Remote};
-        for source in [Phone, Esp, Remote(1), Remote(255)] {
+        use PointSource::{Board, Phone, Remote};
+        let node = Board(BoardId::parse("AA:BB:CC:DD:EE:01").unwrap());
+        for source in [Phone, node, Board(BoardId::UNKNOWN), Remote(1), Remote(255)] {
             assert!(PointFilter::All.admits(source));
         }
         assert!(PointFilter::Phone.admits(Phone));
-        assert!(!PointFilter::Phone.admits(Esp));
-        assert!(!PointFilter::Esp.admits(Remote(1)));
+        assert!(!PointFilter::Phone.admits(node));
+        assert!(PointFilter::Board.admits(node));
+        assert!(PointFilter::Board.admits(Board(BoardId::UNKNOWN)));
+        assert!(!PointFilter::Board.admits(Remote(1)));
         assert!(PointFilter::Remote.admits(Remote(1)));
         assert!(PointFilter::Remote.admits(Remote(255)));
         assert!(!PointFilter::Remote.admits(Phone));
@@ -4051,14 +4619,19 @@ pub(crate) mod tests {
         assert_eq!(app.tracking_beacon, Some(MarkerKind::Beacon));
     }
 
-    /// The config has to be saved somewhere writable. On Android the working
-    /// directory is not, so the path is derived from the cache directory the
-    /// platform handed over.
+    /// The settings have to be saved somewhere writable. On Android the
+    /// working directory is not, so the path is derived from the cache
+    /// directory the platform handed over - and so is the radio config's,
+    /// which the phone otherwise had nowhere to keep.
     #[test]
     fn default_config_path_lands_beside_the_cache() {
         assert_eq!(
             default_config_path(Some(std::path::Path::new("/data/app/files/tiles"))),
-            "/data/app/files/gps-config.toml"
+            "/data/app/files/app-settings.toml"
+        );
+        assert_eq!(
+            default_radio_path(Some(std::path::Path::new("/data/app/files/tiles"))),
+            "/data/app/files/RADIO.toml"
         );
         // No cache directory, or one with no parent to speak of: the bare
         // filename, which on desktop is the working directory.
@@ -4067,6 +4640,31 @@ pub(crate) mod tests {
             default_config_path(Some(std::path::Path::new("tiles"))),
             DEFAULT_CONFIG_NAME
         );
+    }
+
+    /// A settings file left under the old name is renamed once, so a phone
+    /// keeps its settings across the rename; a file already under the new
+    /// name is left alone.
+    #[test]
+    fn an_old_settings_file_is_renamed_once() {
+        let dir = std::env::temp_dir().join(format!("gps-gui-rs-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join(OLD_CONFIG_NAME);
+        let new = dir.join(DEFAULT_CONFIG_NAME);
+        let new_path = new.to_str().unwrap();
+
+        assert!(!migrate_old_config(new_path), "nothing to rename");
+        std::fs::write(&old, "[phone]\nname = \"kept\"\n").unwrap();
+        assert!(migrate_old_config(new_path));
+        assert!(!old.exists() && new.exists());
+        assert_eq!(AppConfig::load(new_path).unwrap().phone.name, "kept");
+
+        // Both present: the new one wins and the old is left where it is.
+        std::fs::write(&old, "[phone]\nname = \"stale\"\n").unwrap();
+        assert!(!migrate_old_config(new_path));
+        assert_eq!(AppConfig::load(new_path).unwrap().phone.name, "kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

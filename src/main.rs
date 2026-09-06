@@ -24,6 +24,8 @@ fn main() -> eframe::Result<()> {
             let cache_dir = Some(std::path::PathBuf::from(".cache"));
             // No platform export either: the log is written to a path typed
             // on the Logging page, which is already somewhere reachable here.
+            // No platform clipboard helper either: egui's own copies on
+            // desktop.
             let mut app = MyApp::new(
                 cc.egui_ctx.clone(),
                 None,
@@ -31,6 +33,7 @@ fn main() -> eframe::Result<()> {
                 None,
                 None,
                 ble,
+                None,
                 None,
             );
             // `--adjust` opens straight into the look adjuster, for tuning

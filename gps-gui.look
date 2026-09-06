@@ -105,13 +105,18 @@ type
         row
             # Height of a button on a menu page. Off the icon rather than the
             # text: these are touch targets first.
-            height  1.3icon
-            # Width of a menu button.
-            width   5icon
+            height  1.5icon
+            # The widest a menu button is drawn. The page's own margin and
+            # type.menu.margin come off the screen first, so at the default it
+            # fills what is left.
+            width   100%w max 40em
+        # Side margin of a menu button, inside the page margin.
+        margin  4%
+        row
             # Between two menu buttons.
             gap     0.3icon
         # Text size on a menu button, which its glyph is sized to as well.
-        text  0.45icon
+        text    0.5icon
 
 class
     path
@@ -152,6 +157,18 @@ id
         # The smallest drag that counts as a region box rather than a tap.
         # Also how far a held finger may wander and still count as a hold.
         drag_min        2.5%
+        tab
+            # Padding around the glyph of the tab that folds the controls bar
+            # away.
+            pad  0.15icon
+        zoom
+            # Between the two zoom buttons in the bottom corner.
+            gap  0.15icon
+        key
+            # Radius of a color dot in the map key.
+            dot        0.35em
+            # How far below the controls bar the key hangs.
+            under_bar  0.25icon
     status
         graph
             # Width of the status bar's signal graph.

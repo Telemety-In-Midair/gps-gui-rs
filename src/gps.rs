@@ -1,14 +1,21 @@
 //! GPS position source.
 //!
-//! The rest of the app only depends on an optional `Receiver<GpsFix>`:
-//! something produces fixes on a background thread and sends them over a
-//! channel, and the UI drains that channel each frame. Android reads the
-//! phone's GNSS via LocationManager. Desktop has no built-in source yet, so the
-//! UI shows a manual position entry bar instead (see `app::MyApp`); a real
-//! source can slot in the same way later.
+//! The rest of the app only depends on an optional [`GpsHandle`]: something
+//! produces fixes on a background thread and sends them over a channel, the
+//! UI drains that channel each frame, and a flag says whether the receiver
+//! should be running at all. Android reads the phone's GNSS via
+//! LocationManager. Desktop has no built-in source yet, so the UI shows a
+//! manual position entry bar instead (see `app::MyApp`); a real source can
+//! slot in the same way later.
+
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 #[cfg(target_os = "android")]
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::atomic::Ordering;
+#[cfg(target_os = "android")]
+use std::sync::mpsc::channel;
 #[cfg(target_os = "android")]
 use std::thread;
 #[cfg(target_os = "android")]
@@ -28,11 +35,30 @@ pub struct GpsFix {
     pub speed: Option<f32>,
 }
 
+/// The app's side of a GPS source: the fixes, and whether the receiver
+/// should be running.
+///
+/// The flag is what `[phone] location` turns: with it clear the source
+/// asks the platform for nothing - no permission dialog, no receiver - so
+/// a phone that is only ever the far end of a node's link never powers its
+/// own GNSS for a position nobody reads.
+pub struct GpsHandle {
+    pub fixes: Receiver<GpsFix>,
+    pub wanted: Arc<AtomicBool>,
+}
+
+/// How often the source thread looks at the flag while idle, and between
+/// fixes while running.
+#[cfg(target_os = "android")]
+const WANTED_POLL: Duration = Duration::from_millis(500);
+
 /// Spawn a GPS source backed by the phone's Android LocationManager.
 ///
-/// Requests the fine-location permission if needed, seeds the map with the
-/// freshest last-known fix, then registers for active location updates and
-/// emits each fresh fix on change over the returned channel.
+/// Starts idle. Once the handle's flag is raised it requests the
+/// fine-location permission if needed, seeds the map with the freshest
+/// last-known fix, then registers for active location updates and emits
+/// each fresh fix on change over the channel; when the flag is lowered it
+/// removes the updates again and goes back to waiting.
 ///
 /// Active updates matter: `getLastKnownLocation` is passive and never wakes the
 /// GNSS hardware, so on its own it returns a stale fix that never changes. The
@@ -44,22 +70,25 @@ pub struct GpsFix {
 /// Activity is required: `requestPermissions` is an Activity method, and
 /// `ndk_context`'s context is the Application, which does not have it.
 #[cfg(target_os = "android")]
-pub fn spawn_android_location(ctx: egui::Context, vm: usize, activity: usize) -> Receiver<GpsFix> {
+pub fn spawn_android_location(ctx: egui::Context, vm: usize, activity: usize) -> GpsHandle {
     let (tx, rx) = channel();
+    let wanted = Arc::new(AtomicBool::new(false));
+    let flag = wanted.clone();
 
     thread::spawn(move || {
-        if let Err(err) = android_location_loop(&tx, &ctx, vm, activity) {
+        if let Err(err) = android_location_loop(&tx, &ctx, &flag, vm, activity) {
             log::error!("android location source stopped: {err}");
         }
     });
 
-    rx
+    GpsHandle { fixes: rx, wanted }
 }
 
 #[cfg(target_os = "android")]
 fn android_location_loop(
     tx: &std::sync::mpsc::Sender<GpsFix>,
     ctx: &egui::Context,
+    wanted: &AtomicBool,
     vm: usize,
     activity: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -71,99 +100,143 @@ fn android_location_loop(
     let activity = unsafe { JObject::from_raw(activity as jni::sys::jobject) };
     let mut env = vm.attach_current_thread()?;
 
-    // Ensure the fine-location permission is granted (poll after prompting;
-    // the native activity has no easy onRequestPermissionsResult callback).
-    //
-    // Both permissions go in the one request: since Android 12 a request for
-    // ACCESS_FINE_LOCATION that omits ACCESS_COARSE_LOCATION is ignored
-    // outright - no dialog, no denial, only a logcat line - and the poll below
-    // would then wait forever for an answer that was never asked for.
-    const FINE: &str = "android.permission.ACCESS_FINE_LOCATION";
-    const COARSE: &str = "android.permission.ACCESS_COARSE_LOCATION";
-    let mut last_request: Option<Instant> = None;
-    let mut warned_coarse = false;
-    while !check_permission(&mut env, &activity, FINE)? {
-        // "Approximate" on the Android 12+ dialog grants coarse and denies
-        // fine. That is a deliberate answer, so stop asking and wait for a
-        // change from Settings instead of putting the dialog up on a timer.
-        if check_permission(&mut env, &activity, COARSE)? {
-            if !warned_coarse {
-                warned_coarse = true;
-                log::warn!(
-                    "only approximate location granted; the map needs precise \
-                     location, grant it in Settings"
-                );
-            }
-        } else if last_request.map_or(true, |t| t.elapsed() > Duration::from_secs(20)) {
-            // Re-request rather than ask once: the BLE worker may be putting
-            // its own dialog up at startup, which drops ours.
-            last_request = Some(Instant::now());
-            request_permissions(&mut env, &activity, &[FINE, COARSE])?;
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-
-    // LocationManager lm = activity.getSystemService("location");
-    let service = env.new_string("location")?;
-    let location_manager = env
-        .call_method(
-            &activity,
-            "getSystemService",
-            "(Ljava/lang/String;)Ljava/lang/Object;",
-            &[JValue::Object(&service)],
-        )?
-        .l()?;
-
-    let mut last: Option<GpsFix> = None;
-
-    // Seed the map with the freshest last-known fix so it is not empty before
-    // the first live update arrives (a cold GPS fix can take tens of seconds).
-    if let Some(fix) =
-        last_known_fix(&mut env, &location_manager, &["gps", "fused", "network", "passive"])?
-    {
-        last = Some(fix);
-        if tx.send(fix).is_err() {
-            return Ok(()); // UI has gone away.
-        }
-        ctx.request_repaint();
-    }
-
-    // Register for active updates through the dex shim. This is what powers up
-    // the GNSS hardware; the last-known sweep above is passive and never
-    // refreshes on its own. Fixes land on `loc_rx` via `native_on_location`.
+    // The callback channel and the shim class are made once and kept across
+    // every start and stop: the shim binds its native method to the channel
+    // it is given, and a class is loaded from the dex once per process.
     let (loc_tx, loc_rx) = channel();
     LOC_TX
         .set(std::sync::Mutex::new(loc_tx))
         .map_err(|_| "android location started twice")?;
-    let class = load_location_bridge(&mut env, &activity)?;
+    let mut class: Option<jni::objects::GlobalRef> = None;
+    let mut last: Option<GpsFix> = None;
 
-    // LocationBridge.start(activity, minTimeMs = 1000, minDistanceM = 0)
-    let started = env
-        .call_static_method(
-            &class,
-            "start",
-            "(Landroid/app/Activity;JF)Z",
-            &[JValue::Object(&activity), JValue::Long(1000), JValue::Float(0.0)],
-        )?
-        .z()?;
-    if !started {
-        log::warn!("no location provider available; showing last-known fix only");
-    }
+    loop {
+        // Nothing is asked of the platform until a position is wanted.
+        while !wanted.load(Ordering::Relaxed) {
+            thread::sleep(WANTED_POLL);
+        }
 
-    // The Sender in LOC_TX lives forever, so recv only ends when we break out
-    // ourselves: on shutdown, when the UI channel has closed.
-    while let Ok(fix) = loc_rx.recv() {
-        if last != Some(fix) {
+        // Ensure the fine-location permission is granted (poll after
+        // prompting; the native activity has no easy
+        // onRequestPermissionsResult callback).
+        //
+        // Both permissions go in the one request: since Android 12 a request
+        // for ACCESS_FINE_LOCATION that omits ACCESS_COARSE_LOCATION is
+        // ignored outright - no dialog, no denial, only a logcat line - and
+        // the poll below would then wait forever for an answer that was never
+        // asked for.
+        const FINE: &str = "android.permission.ACCESS_FINE_LOCATION";
+        const COARSE: &str = "android.permission.ACCESS_COARSE_LOCATION";
+        let mut last_request: Option<Instant> = None;
+        let mut warned_coarse = false;
+        let mut granted = false;
+        while wanted.load(Ordering::Relaxed) {
+            if check_permission(&mut env, &activity, FINE)? {
+                granted = true;
+                break;
+            }
+            // "Approximate" on the Android 12+ dialog grants coarse and
+            // denies fine. That is a deliberate answer, so stop asking and
+            // wait for a change from Settings instead of putting the dialog
+            // up on a timer.
+            if check_permission(&mut env, &activity, COARSE)? {
+                if !warned_coarse {
+                    warned_coarse = true;
+                    log::warn!(
+                        "only approximate location granted; the map needs precise \
+                         location, grant it in Settings"
+                    );
+                }
+            } else if last_request.map_or(true, |t| t.elapsed() > Duration::from_secs(20)) {
+                // Re-request rather than ask once: the BLE worker may be
+                // putting its own dialog up at startup, which drops ours.
+                last_request = Some(Instant::now());
+                request_permissions(&mut env, &activity, &[FINE, COARSE])?;
+            }
+            thread::sleep(WANTED_POLL);
+        }
+        if !granted {
+            // The switch went off while the dialog was up.
+            continue;
+        }
+
+        // LocationManager lm = activity.getSystemService("location");
+        let service = env.new_string("location")?;
+        let location_manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+
+        // Seed the map with the freshest last-known fix so it is not empty
+        // before the first live update arrives (a cold GPS fix can take tens
+        // of seconds).
+        if let Some(fix) =
+            last_known_fix(&mut env, &location_manager, &["gps", "fused", "network", "passive"])?
+        {
             last = Some(fix);
             if tx.send(fix).is_err() {
-                let _ = env.call_static_method(&class, "stop", "()V", &[]);
-                break; // UI has gone away.
+                return Ok(()); // UI has gone away.
             }
             ctx.request_repaint();
         }
-    }
 
-    Ok(())
+        // This thread never returns to Java, so the references made per
+        // start are dropped by hand rather than left to accumulate across
+        // every off-and-on of the switch.
+        env.delete_local_ref(location_manager)?;
+        env.delete_local_ref(service)?;
+
+        // Register for active updates through the dex shim. This is what
+        // powers up the GNSS hardware; the last-known sweep above is passive
+        // and never refreshes on its own. Fixes land on `loc_rx` via
+        // `native_on_location`.
+        if class.is_none() {
+            class = Some(load_location_bridge(&mut env, &activity)?);
+        }
+        let class = class.as_ref().expect("loaded above");
+
+        // LocationBridge.start(activity, minTimeMs = 1000, minDistanceM = 0)
+        let started = env
+            .call_static_method(
+                class,
+                "start",
+                "(Landroid/app/Activity;JF)Z",
+                &[JValue::Object(&activity), JValue::Long(1000), JValue::Float(0.0)],
+            )?
+            .z()?;
+        if !started {
+            log::warn!("no location provider available; showing last-known fix only");
+        }
+
+        // Pump until the switch goes off. The Sender in LOC_TX lives forever,
+        // so a disconnect here is the UI having gone away.
+        loop {
+            match loc_rx.recv_timeout(WANTED_POLL) {
+                Ok(fix) => {
+                    if last != Some(fix) {
+                        last = Some(fix);
+                        if tx.send(fix).is_err() {
+                            let _ = env.call_static_method(class, "stop", "()V", &[]);
+                            return Ok(()); // UI has gone away.
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+            if !wanted.load(Ordering::Relaxed) {
+                // Off: the receiver goes down with the updates, which is the
+                // whole saving.
+                let _ = env.call_static_method(class, "stop", "()V", &[]);
+                break;
+            }
+        }
+    }
 }
 
 /// Freshest last-known location across the given providers, or `None` if none

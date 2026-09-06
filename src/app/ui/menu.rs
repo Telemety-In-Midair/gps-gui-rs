@@ -23,8 +23,9 @@ const TOGGLE_FADE_S: f32 = 0.15;
 /// What shapes a button on the menu page, for the adjuster. The sheet writes
 /// them against the icon rather than the body text because these are touch
 /// targets first - the point of the page is that they are comfortable to hit.
-const MENU_BUTTON_KEYS: [Key; 4] = [
+const MENU_BUTTON_KEYS: [Key; 5] = [
     Key::MenuRowWidth,
+    Key::MenuMargin,
     Key::MenuRowHeight,
     Key::MenuRowGap,
     Key::MenuText,
@@ -162,7 +163,13 @@ impl MyApp {
     ) {
         let safe = self.safe_area(ctx);
         let margin = page_margin(ctx);
-        let row = egui::vec2(px(ctx, Key::MenuRowWidth), px(ctx, Key::MenuRowHeight));
+        // As wide as the screen less the page margin and the menu's own,
+        // up to the sheet's ceiling: a row is a touch target, and on a phone
+        // the whole width is what makes it one that cannot be missed.
+        let width = px(ctx, Key::MenuRowWidth)
+            .min(screen.width() - 2.0 * (margin + px(ctx, Key::MenuMargin)))
+            .max(px(ctx, Key::MenuText));
+        let row = egui::vec2(width, px(ctx, Key::MenuRowHeight));
         let row_gap = px(ctx, Key::MenuRowGap);
         let text_size = px(ctx, Key::MenuText);
         let item_gap = px(ctx, Key::GapItem);
@@ -184,6 +191,16 @@ impl MyApp {
                 egui::FontId::proportional(text_size),
             );
             ui.spacing_mut().item_spacing.y = row_gap;
+            // Drawn in the theme's strong text rather than its body text,
+            // frame included: solarized holds its monotones close together,
+            // and a page that is nothing but these rows wants them to read
+            // at a glance in sunlight.
+            let strong = ui.visuals().strong_text_color();
+            let visuals = ui.visuals_mut();
+            for w in [&mut visuals.widgets.inactive, &mut visuals.widgets.hovered] {
+                w.fg_stroke.color = strong;
+                w.bg_stroke = egui::Stroke::new(1.5, strong);
+            }
             // A top-down centered layout both centers each button in the page
             // and centers the glyph and label inside the button, which is what
             // makes `min_size` alone enough to size a row.
@@ -191,7 +208,7 @@ impl MyApp {
                 for (page, label, src) in items {
                     let image = egui::Image::new(src.clone())
                         .fit_to_exact_size(egui::vec2(text_size, text_size))
-                        .tint(ui.visuals().text_color());
+                        .tint(strong);
                     let button = egui::Button::image_and_text(image, *label)
                         .selected(self.menu_marks(*page))
                         .min_size(row);

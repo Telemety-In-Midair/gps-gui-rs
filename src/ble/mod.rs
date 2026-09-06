@@ -81,6 +81,11 @@ pub enum BleEvent {
     Discovered(DiscoveredDevice),
     /// Connection state changed; gates the config controls.
     Connected(bool),
+    /// The address of the node a link has just come up to, sent right after
+    /// `Connected(true)`. Connected to "any node" the app has no other way
+    /// to learn which one answered, and the address is what its recorded
+    /// track and its name are filed under.
+    Address(String),
     /// A decoded position packet from the connected board's own GPS.
     Fix(PositionPacket),
     /// A remote node's position, relayed over LoRa by the connected board and

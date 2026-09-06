@@ -1,0 +1,76 @@
+# gps-gui-rs settings. Every key is optional; a missing one keeps its default.
+
+[colors]
+track = "#0078ff"   # your track, heading arrow, position dot
+fixed = "#ff5028"   # the connected node's marker, distance line and path
+outline = "#ffffff" # ring around the position and node dots
+
+[phone]              # this device
+name = "Phone"       # what the map and the pages call it
+location = false     # use its own GNSS for the current position
+
+[ui]                 # the pages, not the map: their colors and text
+theme = "light"      # "light", "dark" (both solarized) or "system"
+ok = "#859900"      # "yes" and the green feedback lines
+error = "#dc322f"   # "no", errors, and the red feedback lines
+busy = "#268bd2"    # scanning and connecting
+pulse = "#cb4b16"   # a toolbar button flagging that it has no target
+# Empty follows the light/dark theme, which is what keeps these three
+# readable against each other. Setting one is taking that on yourself.
+background = ""      # behind the pages, the map bar and the popups
+button = ""          # a button at rest; hover and press are shaded from it
+text = ""            # body text; weak and strong are shaded from it
+text_scale = 1.0      # page text size (0.8 - 2.5); the page spacing follows it
+
+[sizes]              # screen points; each overlay is sized independently
+marker = 8.0          # current-position dot radius
+beacon = 6.0          # node dot radius
+track = 3.0           # track polyline width (your track and the node paths)
+distance_line = 3.0    # user<->node line width
+distance_text = 14.0   # distance label font size
+
+[distance]
+show = false        # draw the distance label on the line to the node
+units = "metric"    # "metric" (km/m) or "imperial" (mi/ft)
+dotted = true       # draw distance line dotted rather than solid
+
+[map]                # the map page's overlays
+bar_opacity = 1.0    # the top bar and the status bar backgrounds, 0 - 1
+show_key = true      # the color key under the top bar
+
+[ble]
+enabled = true       # master switch for the BLE GPS source
+show_on_map = true   # draw the connected node on the map at all
+show_path = false    # draw the path of the incoming BLE GPS data
+location = true      # use the connected node's GPS as the current position
+mac = ""            # pin a specific node; empty scans by service
+
+[ble.names]          # names for known nodes, keyed by MAC; a node reporting a name writes it here
+# "AA:BB:CC:DD:EE:FF" = "Truck"
+
+[lora]               # remote nodes heard over LoRa and relayed by the connected node
+show_path = true    # draw the remote nodes' paths on the map
+pulse_secs = 10.0    # a node's marker pulses while heard within this; 0 never
+
+[lora.names]         # nicknames for remote nodes, keyed by LoRa address (1-255)
+# 3 = "Truck"
+
+[track]
+min_distance = 3.0   # meters of movement before a new track point
+show_path = true    # draw your own recorded path
+
+[compass]            # heading-up always runs the sensor at full rate
+marker_arrow = true  # point the marker arrow with the compass in north-up and tracking
+arrow_hz = 4.0       # sensor rate while only that arrow needs it
+
+[status_bar]         # the read-out along the bottom of the map
+show = false         # draw it at all
+cycle_secs = 5.0     # seconds each node holds the read-out (1 - 60)
+rssi_top_dbm = -20    # a reception this strong fills the graph
+rssi_bottom_dbm = -120 # and this weak is empty; heights are linear in dBm
+
+[log]                # the CSV log on the Logging page
+auto_start = false  # start recording as soon as the app launches
+file = ""           # log path; empty is a timestamped file beside this one
+# ref_lat = 51.4779   # a fixed point every logged position is measured against
+# ref_lon = -0.0015

@@ -106,6 +106,10 @@ impl MyApp {
             if ui.button("Load").clicked() || submitted(ui, &resp) {
                 self.load_radio();
             }
+            // The path is worth having elsewhere on a phone, where it is
+            // deep in the app's own directory and not something to retype.
+            let path = self.radio_path.clone();
+            self.copy_button(ui, &path);
 
             let dirty = self.radio.as_ref().is_some_and(|r| r.dirty);
             if button!(
@@ -130,7 +134,7 @@ impl MyApp {
             };
             let send = button!(
                 ui,
-                if self.radio_push_pending { "Sending..." } else { "Send to board" },
+                if self.radio_push_pending { "Sending..." } else { "Send to node" },
                 enabled: can_send,
                 hover: text::SEND_HOVER,
                 disabled: why,
@@ -149,7 +153,7 @@ impl MyApp {
             };
             let fetch = button!(
                 ui,
-                "Load from board",
+                "Load from node",
                 enabled: self.board_radio_config.is_some(),
                 hover: text::FETCH_HOVER,
                 disabled: fetch_why,

@@ -154,10 +154,10 @@ impl MyApp {
             if button!(ui, "Use my position", enabled: self.current.is_some()).clicked() {
                 commit = self.current.map(|p| Some((p.y(), p.x())));
             }
-            // The beacon, when there is one: setting the reference to where the
-            // board is standing is the usual way a range test starts.
+            // The node, when there is one: setting the reference to where it
+            // is standing is the usual way a range test starts.
             let beacon: Option<Position> = self.beacon;
-            if button!(ui, "Use beacon", enabled: beacon.is_some()).clicked() {
+            if button!(ui, "Use node", enabled: beacon.is_some()).clicked() {
                 commit = beacon.map(|p| Some((p.y(), p.x())));
             }
             let has_ref = self.config.log.reference().is_some();
@@ -246,9 +246,9 @@ impl MyApp {
                 let hidden = self.log_hidden.contains(&source);
                 let label = match source {
                     LogSource::Node(addr) => self.config.lora.label_of(addr),
-                    LogSource::Phone => "This device".to_string(),
+                    LogSource::Phone => self.phone_label(),
                     LogSource::Board => self.beacon_label(),
-                    LogSource::Telemetry => "Board link".to_string(),
+                    LogSource::Telemetry => "Node link".to_string(),
                 };
                 let points = counts.get(&source).copied().unwrap_or(0);
                 let text = if hidden {

@@ -36,16 +36,16 @@ impl MyApp {
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Source:");
-                // The source names come from `MyApp::source_label`, so the
-                // filter and the rows below it always read the same - and the
-                // same as the map's markers. The exception is the one entry
-                // standing for every remote node: a node's own name shows in
-                // its rows rather than as its own filter button.
+                // The phone's filter goes by its name, as its rows do. The
+                // other two each stand for every node of their kind - the
+                // ones connected to, and the ones heard over LoRa - and a
+                // node's own name shows in its rows rather than as a
+                // filter button of its own.
                 for (filter, label) in [
                     (PointFilter::All, "all".to_string()),
                     (PointFilter::Phone, self.source_label(PointSource::Phone)),
-                    (PointFilter::Esp, self.source_label(PointSource::Esp)),
-                    (PointFilter::Remote, "nodes".to_string()),
+                    (PointFilter::Board, "connected".to_string()),
+                    (PointFilter::Remote, "remote".to_string()),
                 ] {
                     ui.selectable_value(&mut self.points_filter, filter, label);
                 }
@@ -66,8 +66,8 @@ impl MyApp {
             // carry, so the coordinates stay in line down the list. Measured
             // over the sources rather than the rows: a name is per source,
             // and there are a few of those against thousands of rows.
-            let sources = [PointSource::Phone, PointSource::Esp]
-                .into_iter()
+            let sources = std::iter::once(PointSource::Phone)
+                .chain(self.tracked_boards().map(PointSource::Board))
                 .chain(self.remotes.keys().map(|&addr| PointSource::Remote(addr)));
             let column = sources
                 .map(|source| self.source_label(source).chars().count())

@@ -11,12 +11,148 @@
 //! [`section!`] with or without a hint) and the variadic one ([`grid!`]).
 //! Everything else is a plain function, which reads better than a macro would.
 
+use std::hash::Hash;
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
-use crate::app::SafeArea;
+use crate::app::{MyApp, SafeArea};
 use crate::config::UiSettings;
 
 use super::theme::{control_height, em, gap, page_margin, probe, px, Key};
+
+/// How fast the dots behind a busy line cycle.
+const DOTS_PERIOD: Duration = Duration::from_millis(500);
+
+/// The trailing dots of a line describing something in progress - one, two,
+/// three, one - cycling on the clock, and a repaint scheduled to move them.
+/// Appended to a line rather than built into it, so the words stay the
+/// text module's and the animation stays here.
+pub(super) fn busy_dots(ctx: &egui::Context) -> &'static str {
+    let step = (ctx.input(|i| i.time) / DOTS_PERIOD.as_secs_f64()) as u64 % 3;
+    ctx.request_repaint_after(DOTS_PERIOD);
+    match step {
+        0 => ".",
+        1 => "..",
+        _ => "...",
+    }
+}
+
+/// The word "custom" in a preset dropdown: the entry that opens the editor
+/// for a value none of the presets has.
+const CUSTOM: &str = "custom";
+
+/// A setting picked from a short list of presets, with a custom entry that
+/// opens an editor for anything else.
+///
+/// The dropdown shows the preset the value matches, or "custom" when none
+/// does. Picking a preset writes it; picking "custom" opens `edit` beside
+/// the dropdown - and keeps it open, remembered per widget, until a preset
+/// is picked again, so a value dragged through a preset on its way
+/// somewhere else does not snap the editor shut. Returns whether the value
+/// changed.
+pub(super) fn preset_pick<T: PartialEq + Clone>(
+    ui: &mut egui::Ui,
+    id: impl Hash + std::fmt::Debug,
+    value: &mut T,
+    presets: &[(T, &str)],
+    edit: impl FnOnce(&mut egui::Ui, &mut T),
+) -> bool {
+    let id = egui::Id::new("preset_pick").with(id);
+    let mut custom = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let matched = presets.iter().find(|(v, _)| v == value).map(|(_, l)| *l);
+    // With no preset matching there is nothing else to show but the editor.
+    if matched.is_none() {
+        custom = true;
+    }
+    let before = value.clone();
+    let shown = if custom { CUSTOM } else { matched.unwrap_or(CUSTOM) };
+    let combo = egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for (preset, label) in presets {
+                if ui.selectable_label(!custom && preset == value, *label).clicked() {
+                    *value = preset.clone();
+                    custom = false;
+                }
+            }
+            if ui.selectable_label(custom, CUSTOM).clicked() {
+                custom = true;
+            }
+        });
+    probe(
+        ui.ctx(),
+        combo.response.rect,
+        "Dropdown",
+        &[Key::ControlCombo, Key::ControlHeight],
+    );
+    if custom {
+        edit(ui, value);
+    }
+    ui.data_mut(|d| d.insert_temp(id, custom));
+    *value != before
+}
+
+/// A row of preset labels for a list of seconds, with `secs_text` naming
+/// each, so every page spells "5 min" the same way.
+pub(super) fn secs_presets(secs: &[u32]) -> Vec<(String, String)> {
+    secs.iter()
+        .map(|&s| (s.to_string(), crate::app::secs_text(s)))
+        .collect()
+}
+
+/// [`preset_pick`] over a text buffer that holds a number: the presets are
+/// the buffer's own spellings, and the custom editor is the field itself.
+/// For the pages whose numbers are typed and sent rather than bound.
+pub(super) fn preset_text(
+    ui: &mut egui::Ui,
+    id: impl Hash + std::fmt::Debug,
+    text: &mut String,
+    presets: &[(String, String)],
+    width: Key,
+) -> bool {
+    let labelled: Vec<(String, &str)> = presets
+        .iter()
+        .map(|(v, l)| (v.clone(), l.as_str()))
+        .collect();
+    preset_pick(ui, id, text, &labelled, |ui, text| {
+        text_field(ui, text, "", width);
+    })
+}
+
+impl MyApp {
+    /// A button that puts `text` on the clipboard, saying so beside it for a
+    /// moment. The one place the platform difference shows: the phone goes
+    /// through the framework, the desktop through egui.
+    pub(super) fn copy_button(&self, ui: &mut egui::Ui, text: &str) {
+        let id = ui.make_persistent_id(("copied", text));
+        if button!(ui, "Copy", hover: "Put this path on the clipboard").clicked() {
+            let result = match &self.copier {
+                Some(copy) => copy(text),
+                None => {
+                    ui.ctx().copy_text(text.to_string());
+                    Ok(())
+                }
+            };
+            let until = ui.input(|i| i.time) + 2.0;
+            ui.data_mut(|d| d.insert_temp(id, (until, result.err())));
+        }
+        if let Some((until, err)) = ui.data(|d| d.get_temp::<(f64, Option<String>)>(id)) {
+            if ui.input(|i| i.time) < until {
+                match err {
+                    None => {
+                        ui.colored_label(self.config.ui.ok, "copied");
+                    }
+                    Some(e) => {
+                        ui.colored_label(self.config.ui.error, e);
+                    }
+                }
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+            } else {
+                ui.data_mut(|d| d.remove_temp::<(f64, Option<String>)>(id));
+            }
+        }
+    }
+}
 
 /// A square icon button. The icons are white SVGs tinted to the current text
 /// color so they follow the theme.
@@ -192,16 +328,21 @@ pub(super) fn status_bool(ui: &mut egui::Ui, colors: UiSettings, label: &str, ok
     });
 }
 
-/// A wrapping row of controls behind a leading label ("Units:", "Every (s):").
+/// A wrapping row of controls behind a leading label ("Units:", "Every:").
 ///
 /// Wrapping rather than plain horizontal because the labels here are sentences
 /// more often than words: on a phone-width screen a plain row pushes its last
-/// control off the right edge instead of dropping it to the next line.
-pub(super) fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+/// control off the right edge instead of dropping it to the next line. The
+/// row's own response comes back, for a hover over the whole of it.
+pub(super) fn row(
+    ui: &mut egui::Ui,
+    label: &str,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::InnerResponse<()> {
     ui.horizontal_wrapped(|ui| {
         ui.label(label);
         add(ui);
-    });
+    })
 }
 
 /// A number the user drags to change, over the range the loader will accept.

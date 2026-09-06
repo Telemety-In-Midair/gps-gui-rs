@@ -22,6 +22,14 @@ pub(super) fn bluetooth() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/bluetooth.svg")
 }
 
+pub(super) fn chevron_down() -> egui::ImageSource<'static> {
+    egui::include_image!("../../../assets/icons/chevron-down.svg")
+}
+
+pub(super) fn chevron_up() -> egui::ImageSource<'static> {
+    egui::include_image!("../../../assets/icons/chevron-up.svg")
+}
+
 pub(super) fn center() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/center.svg")
 }

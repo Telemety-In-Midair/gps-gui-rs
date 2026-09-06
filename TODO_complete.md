@@ -4,6 +4,65 @@ Items struck through in `TODO.md`, summarized. Newest first.
 
 ## 2026-09-06
 
+- **Make top bar a dropdown.** A chevron tab hangs from the top right corner
+  and folds the map's controls bar away; the bar's button row centers in the
+  width left of it. The zoom buttons moved to a column in the bottom right
+  corner above the status bar (in on top, out below), on every platform, and
+  fold with the bar, as does the new color key under the bar's left end.
+- **Status bar height based on the dBm range.** `[status_bar] rssi_top_dbm`
+  (-20) and `rssi_bottom_dbm` (-120); a bar is full at the top and empty at
+  the bottom, linear in dBm, which is the log scale of received power.
+- **Connecting and scanning in a color, with dots.** `[ui] busy` (solarized
+  blue) on every line describing something in progress, with `busy_dots`
+  cycling after it. Elapsed counts always show seconds (`elapsed_text`).
+- **Higher contrast menu items.** The menu rows draw in the theme's strong
+  text with a matching stroke, glyph included.
+- **Menu buttons larger.** A row fills the screen less the page margin and
+  `type.menu.margin`, up to `type.menu.row.width`; rows are taller and the
+  label bigger.
+- **Default paths.** `app-settings.toml` (was `gps-config.toml`; an old file
+  is renamed once at startup) and `RADIO.toml` both live beside the tile
+  cache, which on a phone is the one writable place. Every path field has a
+  Copy button; on Android that goes through the clipboard service over JNI,
+  since egui's own clipboard is a no-op there.
+- **Should the TOML have an assets/ equivalent?** No: the repo's root
+  `app-settings.toml` is the generated default and a test holds it to that,
+  the same arrangement as `gps-gui.look`, so nothing can drift.
+- **Node track per node.** `PointSource::Board(BoardId)`; the transports
+  report the address of the node a link came up to, and each node keeps its
+  own track, so switching nodes ends a path instead of joining it.
+- **Node list in the TOML.** A name a node reports for itself is written into
+  `[ble.names]` under its address and saved, so a rename on the node renames
+  it in the file.
+- **Remote pulse timeout.** `[lora] pulse_secs` (10): a remote node's marker
+  beats while it was heard within the window.
+- **Listening mode.** Firmware `CFG_MODE 3`: GPS and receiver up, nothing
+  transmitted, BLE up throughout, persisted. A fourth button on the mode row.
+- **Device is a node.** Every page and message says node; "Beacon" survives
+  only as the map marker's code name.
+- **Settings are dropdowns.** `preset_pick`: a short list of presets and a
+  custom entry that opens the editor, over most numbers on the Settings and
+  Bluetooth pages. The text-size and bar-opacity sliders are the exceptions.
+- **Phone name and location.** `[phone] name` labels this device everywhere;
+  `[phone] location` (off by default) runs its receiver, which the Android
+  source thread now powers only while asked. `[ble] location` (on) makes the
+  connected node's fix the position, its marker folding into yours.
+- **Transparency slider for the map bars.** `[map] bar_opacity`, shared by
+  the controls bar, the status bar and the key.
+- **Markers select on a single tap**, read off the tile widget's response so
+  a tap on a button is never also a marker pick. **Color key** on the map.
+- **Status page separated.** Your position (with its source) in one section,
+  the node - link, mode, its own fix, telemetry - under its own name in
+  another.
+- **Picker without address names**; **node name last** on the Bluetooth page.
+- **Idle to stored off by default** (firmware: `0x18 = 0` is off) with a
+  Disable button; **the tracker's BLE on period** is its own setting
+  (`0x1A`), no longer the wake check's advertising window.
+- **Connect versus Connect to sleeping.** Checked: the same thing on desktop
+  and on Android with "any node"; with a node pinned on Android, only the
+  sleeping one scans continuously and can catch a window. Documented.
+- **Less verbose.** Every hover and hint rewritten shorter.
+
 - **Make extras menu. Reduce normal menu count.** The menu is two pages now.
   The main one holds Map, Status, Bluetooth and More; More holds Points,
   Logging, Settings and Radio, with a Back row after them. Both are drawn by

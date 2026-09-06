@@ -15,7 +15,7 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
 - `src/app/ui/` - owns **rendering**. It is a submodule of `app`, so its
   `impl MyApp` blocks can reach `MyApp`'s private fields directly. It is split
   by *kind of thing*, so a change has one obvious home:
-  - `pages/` - one file per page (`map`, `points`, `status`, `beacon`,
+  - `pages/` - one file per page (`map`, `points`, `status`, `bluetooth`,
     `settings`, `radio`, `logging`, `manual`). Each is a list of declarations:
     this section, that control, bound to this field.
   - `widgets.rs` - the vocabulary those declarations are written in: the
@@ -36,10 +36,12 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
 Two of the pieces the UI is drawn *with* are top-level modules rather than
 `ui` ones, both being pure data with no drawing in them: `src/solarized.rs` is
 the two themes (below) and `src/fonts.rs` is the embedded typeface, 0xProto,
-installed into the context once in `MyApp::new`.
+installed into the context once in `MyApp::new`. `src/clipboard.rs` is the
+platform clipboard behind the Copy buttons: egui's own on desktop, and a JNI
+call into Android's clipboard service on the phone, where egui's is a no-op.
 
 The page renderers read state that lives outside the UI too: `src/config.rs`
-holds the app's own TOML settings, `src/radio.rs` holds the board's RADIO.TOML
+holds the app's own TOML settings, `src/radio.rs` holds the node's RADIO.TOML
 model the Radio page edits (and the airtime estimate the Radio page prints),
 and `src/logging.rs` holds the CSV recorder behind the Logging page (all three
 below). `src/look.rs` holds the look sheet: every size and spacing, as a
@@ -73,6 +75,7 @@ graph TD
         Look["look.rs<br/>the look sheet"]
         Solarized["solarized.rs<br/>the two themes"]
         Fonts["fonts.rs<br/>0xProto, embedded"]
+        Clipboard["clipboard.rs<br/>Copy buttons"]
     end
 
     Loop --> Pages
@@ -93,6 +96,7 @@ graph TD
     MyApp --> Look
     MyApp -->|apply_ui_style, on a change| Solarized
     MyApp -->|once, at startup| Fonts
+    MyApp -->|on a Copy press| Clipboard
     Theme -->|reads each frame| Look
     Theme -->|em is the row height of| Fonts
     Loop --> Adjust
@@ -104,8 +108,11 @@ graph TD
 `MyApp::ui` (in `app.rs`) runs once per frame:
 
 1. `drain_sources()` pulls every pending message off the channels (phone GPS,
-   compass, BLE beacon events, and the offline zoom-probe result) and updates
-   state. Nothing in the render path blocks on IO.
+   compass, BLE node events, and the offline zoom-probe result) and updates
+   state. Nothing in the render path blocks on IO. Then
+   `sync_compass_power` and `sync_location_sources` push the settings out to
+   the sensors: the compass rate, and whether the phone's receiver runs at
+   all (below, "Position sources").
 2. It reads the viewport rect (`screen`) and matches on `self.page` to call the
    one page renderer.
 3. After the page, it draws the always-on overlays: the corner page toggle (on
@@ -133,7 +140,8 @@ controlled by `egui::Order`, lowest first:
   panning the map, while the controls above stay clickable.
 - `Foreground` - the controls bar, the bottom status bar, floating popups, the
   manual GPS bar.
-- `Tooltip` - the floating corner page toggle on non-map pages.
+- `Tooltip` - the floating corner page toggle on non-map pages, and the
+  map's bar tab, which sits over the bar it folds.
 - `Debug` - the adjuster, over everything, in one `Area` (below).
 
 Pointer priority follows the same order: a higher layer under the pointer wins
@@ -174,7 +182,25 @@ The scaffolding, as functions:
 - `row(ui, label, add)` - a wrapping row of controls behind a leading label.
   Wrapping rather than plain horizontal because these labels are sentences more
   often than words: a plain `horizontal` never wraps, so on a phone the last
-  control is pushed off the edge instead of dropping to the next line.
+  control is pushed off the edge instead of dropping to the next line. It
+  hands back the row's inner response, for a hover over the whole of it.
+- `preset_pick(ui, id, &mut value, presets, edit)` - a dropdown of presets
+  over a setting, with a "custom" entry that opens `edit` beside it. The
+  dropdown shows the preset the value matches, or "custom" when none does;
+  "custom" stays open once picked (remembered per widget in egui's memory)
+  so a value dragged through a preset does not snap the editor shut. Most
+  numbers on the Settings and Bluetooth pages are one of these.
+  `preset_text` is the same over a text buffer that holds a number, for the
+  Bluetooth page's typed-and-sent values; `secs_presets` labels a list of
+  seconds with `secs_text` so every page spells "5 min" the same way.
+- `busy_dots(ctx)` - the trailing dots of a line describing something in
+  progress, cycling one-two-three on the clock, with the repaint scheduled.
+  Appended to a line rather than built into it, so the words stay the text
+  module's; the lines that take it end without a stop.
+- `MyApp::copy_button(ui, text)` - a Copy button that puts `text` on the
+  clipboard and says so for a moment, through `MyApp::copier` on the phone
+  and egui on desktop. Beside every path field, since a path on a phone is
+  deep in the app's own directory and not something to retype.
 - `text_field(ui, buf, hint, width)` and `submitted(ui, &resp)` - a single-line
   input, and whether Enter has just committed it, so a field and the button
   beside it act alike.
@@ -310,8 +336,9 @@ the whole vocabulary, and there is no unit for points:
   held between two text widths with `min`/`max`).
 - **Fractions of the icon side** (`icon`) for anything sitting beside the
   toolbar: the button padding (`type.bar.button.pad`), the menu page's buttons
-  (`type.menu.row`), and how far the map's popups hang below the bar
-  (`id.map.*`).
+  (`type.menu.row`), the bar tab and the zoom column (`id.map.tab.pad`,
+  `id.map.zoom.gap`), and how far the map's popups and the key hang below the
+  bar (`id.map.*`).
 - **Text heights** (`em`) for everything inside a page: the vertical rhythm
   (`type.gap`, five steps from `hair` to `section`), the insides of a control
   (`type.control.*`) and the narrow inputs (`class.number.width`,
@@ -515,11 +542,15 @@ the page the menu was opened from, which is both the entry marked as current
 and where leaving without picking one goes; it is never a menu page itself.
 
 - `menu_page` / `more_page` - the two lists, each `menu_list` with its own
-  `Area` id. One large button per entry, centered on an empty screen, measured
-  off the icon (`type.menu.row.*`) because the buttons are touch targets first.
-  The column is centered vertically by hand - the page is an `Area`, which has
-  no height to align against, so the free space is worked out from the screen
-  instead.
+  `Area` id. One large button per entry, centered on an empty screen, as wide
+  as the screen less the page margin and `type.menu.margin` (up to
+  `type.menu.row.width`'s ceiling) and as tall as `type.menu.row.height` -
+  measured off the icon because the buttons are touch targets first. They are
+  drawn in the theme's *strong* text with a stroke to match, glyph included:
+  solarized holds its monotones close together, and a page that is nothing
+  but these rows wants them to read at a glance in sunlight. The column is
+  centered vertically by hand - the page is an `Area`, which has no height to
+  align against, so the free space is worked out from the screen instead.
 - `page_menu` - the button that opens the menu and closes it again. On the map
   it sits inline at the right end of the controls bar; the glyph crossfades
   between the hamburger and an X. From *either* menu page it leaves the menu
@@ -554,11 +585,56 @@ overlays that sit at one edge still ask for the end they need - the manual
 position bar and the download readout for the bottom, the corner page toggle
 for the top.
 
+## Position sources (`gps.rs` + `app.rs`)
+
+Where "you" are on the map comes from one of three places, and
+`MyApp::current_source` says which:
+
+- **The phone's own receiver** (`LocationSource::Phone`), only while `[phone]
+  location` is on - and off by default. `gps::GpsHandle` carries a `wanted`
+  flag beside its channel; `sync_location_sources` stores the setting into
+  it every frame, and the Android source thread asks the platform for
+  nothing until it is raised: no permission dialog, no receiver. Lowered, it
+  removes the location updates and waits again.
+- **The connected node's receiver** (`LocationSource::Node`), while `[ble]
+  location` is on (the default) and the node has a fix. Its fix moves your
+  marker, its course is your heading while it is moving, and its path is what
+  `your_track` draws behind you. The node then *is* you: `beacon_on_map`
+  hides its own marker, `distance_target` has no distance to it, and it is
+  out of the tracking and center lists. Both settings on, the node wins while
+  it has a fix; a phone fix arriving meanwhile still feeds the phone's own
+  track and the log.
+- **Typed in** (`LocationSource::Manual`), from the desktop bar. Never
+  switched off by either setting.
+
+Turning a source off drops a position it gave (`clear_current`), and so does
+the node's link ending: a marker left standing would read as where you are.
+The Status page says which source the position is from, and says when
+neither receiver is on.
+
 ## The map page (`pages/map.rs` + `mapdraw.rs`)
 
 The map is a full-bleed `Background` area so it can overscan past the screen
 edges. The key wrinkles:
 
+- **The bar folds.** A tab hangs from the top right corner
+  (`MyApp::bar_tab`, at the `Tooltip` order so it wins the press where it
+  overlaps the bar): a chevron up folds the controls bar away, a chevron down
+  brings it back. `MyApp::map_bar_open` is session state. The zoom column
+  and the color key go with the bar; the tab and the status bar stay. While
+  the bar is up its button row centers in the width left of the tab
+  (`tab_reserve`), so the tab never sits on a button.
+- **The zoom buttons are a column in the bottom right corner**
+  (`zoom_column`): in on top, out below, above the status bar
+  (`bottom_overlay_inset`). On every platform now that they are out of the
+  bar; pinching still works on a touch screen.
+- **The color key** (`map_key`, `[map] show_key`) hangs under the left end
+  of the bar: one row per marker that is on the map - you, the connected
+  node, each remote node heard - in its color and by its name. Never longer
+  than the map is busy.
+- **Both bars take `[map] bar_opacity`** (`MyApp::bar_fill`): the controls
+  bar, the status bar and the key share one fill, the panel color with its
+  alpha multiplied, so at 0 the map shows through all three.
 - **Heading-up rotation.** When enabled and a heading is known, the map is
   drawn into a square `map_rect` sized to the screen diagonal (so the corners
   stay filled at any angle), then every painted shape is rotated about the
@@ -581,11 +657,15 @@ edges. The key wrinkles:
   Either path goes through `MyApp::center_on`, which leaves tracking mode,
   centers (following the live position only for you), and kicks off the offline
   zoom probe.
-- **Beacon heartbeat.** While the BLE link is up, a ring expands out of the
-  beacon marker and fades, one beat per `PULSE_PERIOD`. The phase is computed in
-  `MyApp::map` and handed to `GpsLayer` as `beacon_pulse`; the animation runs on
-  `request_repaint_after(PULSE_FRAME)` rather than a per-frame repaint, so an
-  otherwise idle map is not pinned at full frame rate.
+- **Heartbeats.** While the BLE link is up, a ring expands out of the
+  connected node's marker and fades, one beat per `PULSE_PERIOD`; a remote
+  node's marker beats the same way while it was heard within `[lora]
+  pulse_secs` (`MyApp::remote_active`, 10 s by default, 0 never), which is
+  what tells a marker where the node *is* from one left where it last was.
+  The phase is computed once in `MyApp::map` and handed to `GpsLayer` as
+  `beacon_pulse` and each `RemoteDraw::pulse`; the animation runs on
+  `request_repaint_after(PULSE_FRAME)` rather than a per-frame repaint, and
+  not at all while no marker is beating.
 - **Tracking mode.** The track button (`tracking_beacon: Option<MarkerKind>` is
   the board being followed - the board itself, not its place in
   `MyApp::beacon_targets`, which is ordered and grows in the middle, so an index
@@ -610,27 +690,30 @@ edges. The key wrinkles:
   under the pointer - which a background area never is. So walkers' zoom gesture
   is turned off (`zoom_gesture(false)`, `zoom_with_ctrl(false)`) and we drive
   zoom ourselves: mouse-wheel on desktop, pinch on Android (both gated by
-  `cfg!(target_os = "android")`). The **+/- zoom buttons are desktop-only**;
-  mobile relies on pinch, so the buttons would only crowd the small toolbar.
+  `cfg!(target_os = "android")`), and the corner column's buttons on both.
 - **Panning** is by primary-button drag, suppressed while pinching or while a
   download box is being picked.
 - **The path button** is a session-only master switch (`MyApp::show_paths`) over
   every recorded path. It only ever hides: which paths a shown map draws is
   `[track] show_path`, `[ble] show_path` and `[lora] show_path` on the Settings
-  page (the phone track, the connected board's path, and the remote nodes' paths
+  page (your path, the connected node's path, and the remote nodes' paths
   respectively), and the button changes none of them, so a press is undone by a
-  press. The line to the tracked board and its distance label are not paths and
+  press. Your path is the phone's track, or the connected node's while the
+  node is where you are (`MyApp::your_track`). The line to the tracked board and its distance label are not paths and
   stay drawn either way - they say where that board is *now*, which is what is
   worth keeping when the map is too busy to read. It replaced the old "clear
   tracks" button; discarding the points moved to the Settings page, off the bar
   used while moving.
-- **Marker info.** A double-click/tap projects each marker to screen space (the
+- **Marker info.** A single tap projects each marker to screen space (the
   same projection + rotation the marker layer draws with) and selects the
-  closest one within a hit radius; a miss dismisses the popup.
-- **Overlay drawing (`marker.rs`).** `GpsLayer` draws the phone track, the
-  connected board and its path, every remote node (`RemoteDraw`: a marker and a
-  dashed path each, in the node's palette color), and the line from the user to
-  the distance target. It draws whatever it is handed and decides no visibility
+  closest one within a hit radius; a miss dismisses the popup. The tap is
+  read off the tile widget's own response (`MyApp::map` returns it) rather
+  than the raw pointer, so a tap on a button over the map is that button's
+  and never also a marker pick.
+- **Overlay drawing (`marker.rs`).** `GpsLayer` draws your track, the
+  connected node and its path, every remote node (`RemoteDraw`: a marker, a
+  dashed path and a heartbeat each, in the node's palette color), and the line
+  from the user to the distance target. It draws whatever it is handed and decides no visibility
   itself: a hidden path arrives as an empty `Vec`, so the map page is the only
   place the button and the per-path settings are combined. Remote colors are the
   built-in `config::remote_color(addr)` palette, cycled by LoRa address so a
@@ -670,12 +753,17 @@ Two halves, side by side:
   carry a signal - and cleared by `forget_board_state`, since every bar was
   measured by the board that has just been swapped out.
 
-  The dBm scale is **fixed** (`RSSI_FLOOR_DBM`..`RSSI_CEIL_DBM`), not
-  autoscaled: a bar's height has to mean the same thing frame to frame for a
-  glance to be worth anything, and an autoscale over ten samples turns a few dB
-  of noise on a steady link into a full-height swing. The slots are always ten
-  wide whatever has arrived, so bars fill from the left and then slide through
-  rather than re-spacing on every reception.
+  The dBm scale is **fixed**, not autoscaled: a bar's height has to mean the
+  same thing frame to frame for a glance to be worth anything, and an
+  autoscale over ten samples turns a few dB of noise on a steady link into a
+  full-height swing. The ends are `[status_bar] rssi_top_dbm` (full, -20 by
+  default) and `rssi_bottom_dbm` (empty, -120), which the loader holds apart
+  by at least `RSSI_SPAN_MIN`. Heights are **linear in dBm** between them,
+  which is the log scale of received power: each equal step up a bar is the
+  same ratio of power, so a bar half full is a hundred-thousandth of the
+  signal, not half - which is how a radio link is read. The slots are always
+  ten wide whatever has arrived, so bars fill from the left and then slide
+  through rather than re-spacing on every reception.
 - **One node's read-out** - its name in its own color, the signal it was last
   heard at, how long ago, its satellite count (ok-colored with a fix,
   error-colored without: the count means nothing on its own, since a node can
@@ -695,10 +783,11 @@ keeps the read-out and never rotates.
 The bar records its own height in `MyApp::status_bar_height` after laying out,
 because the read-out wraps and how tall it ends up depends on the text size and
 what is being reported. `MyApp::bottom_overlay_inset` is what the other
-bottom-anchored overlays - the desktop manual position bar and the offline
-download progress - position from: the larger of that height and the
-gesture-bar inset, not their sum (the bar's own frame already covers the
-inset), and only on the map page, which is the one page that draws it.
+bottom-anchored overlays - the zoom column, the desktop manual position bar
+and the offline download progress - position from: the larger of that height
+and the gesture-bar inset, not their sum (the bar's own frame already covers
+the inset), and only on the map page, which is the one page that draws it. The
+bar's fill is the map's `bar_fill`, so it fades with the controls bar.
 
 ## Offline region download flow
 
@@ -725,15 +814,28 @@ selection and shows progress.
 
 The app's own TOML settings are edited here, not just loaded. Every widget binds
 straight to the live `AppConfig` on `MyApp`, so a change shows on the map at
-once; the file is only touched by the buttons.
+once; the file is only touched by the buttons. Most numbers are a
+`preset_pick`: a short list of presets and a custom entry that opens the
+drag; the two sliders (text size, bar opacity) are the exceptions, being
+things to watch move.
+
+The file is `app-settings.toml`. It was `gps-config.toml`, and a file left
+under that name beside the new one's path is renamed once at startup
+(`migrate_old_config`), so a phone keeps its settings across the rename. The
+copy the repo ships at its root is the generated default,
+`AppConfig::default().to_toml()`, and a test holds it to that - the same
+arrangement as `gps-gui.look` - so the file documents every key exactly as
+the code writes it, and there is no second copy under `assets/` to drift.
 
 **The split with the Bluetooth page is by who owns the setting**, not by subject.
-Settings holds what the app owns and can save: the config file itself, the text
-size of the pages, the marker colors and overlay sizes, what the map draws
-(including the beacon path and the distance read-out), the compass rate behind
-the marker arrow, the map status bar, track recording, and the offline-map
-download.
-Everything the *board* owns, plus the link that reaches it, is on the Beacon
+Settings holds what the app owns and can save: the settings file itself, this
+device (`[phone] name`, and which receivers supply the position - see
+"Position sources"), the text size of the pages, the marker colors and overlay
+sizes, what the map draws (the paths, the remote pulse window, the distance
+read-out), the two bars over the map (`[map] bar_opacity`, `show_key`), the
+compass rate behind the marker arrow, the map status bar and its dBm span,
+track recording, and the offline-map download.
+Everything the *node* owns, plus the link that reaches it, is on the Bluetooth
 page below. The beacon-related app settings (`[ble] enabled`, `mac` and the
 `[ble.names]` nicknames) live there anyway, because they decide how the link is
 made and are useless apart from it; they repeat the Save button rather than
@@ -754,10 +856,11 @@ sending you back here for it, writing the same file and sharing the same
   working directory. It is both what starts loaded and what Save writes back to.
 - **Colors are in two tables.** `[colors]` is the map (`track`, `fixed`, and the
   `outline` ring around both dots); `[ui]` is the pages: `theme`, which of the
-  two solarized themes they are drawn in, then `ok`, `error` and the `pulse` on
-  a toolbar button with no target, where the color *is* the message, plus
-  `background`, `button` and `text` - the surfaces and the text everything else
-  is drawn with - and `text_scale`, how big that text is.
+  two solarized themes they are drawn in, then `ok`, `error`, `busy` (the link
+  lines while scanning or connecting, with `busy_dots` after them) and the
+  `pulse` on a toolbar button with no target, where the color *is* the
+  message, plus `background`, `button` and `text` - the surfaces and the text
+  everything else is drawn with - and `text_scale`, how big that text is.
 - **`theme` is `light` (the default), `dark` or `system`,** edited by the picker
   under "Theme". It is a `ThemeChoice` rather than a bool so `system` can mean
   "follow the desktop or phone", which it then does for as long as the app runs.
@@ -801,16 +904,15 @@ sending you back here for it, writing the same file and sharing the same
   phone, beacon and every remote track). `mac` is an `Option<String>` where
   `None` means "any board"; it is no longer typed by hand but chosen in the
   Bluetooth page's device picker.
-- `[ble] show_on_map` takes the connected board off the map altogether: its
+- `[ble] show_on_map` takes the connected node off the map altogether: its
   marker, heartbeat, path, the distance line and label, and its place among the
   tracking and center targets. Everything the map draws or points at for the
-  board reads `MyApp::beacon_on_map` (the live position filtered by the
-  setting) rather than `beacon`; the Status page, the log and the recording
-  read `beacon` itself, because the board is still connected and still
-  reporting - the setting is for a board held next to the phone, whose marker
-  only sits on top of yours. `distance_target` is left alone so the Status page
-  still measures to the board; `mapdraw::drawn_distance_target` is the map's
-  filtered view of it.
+  node reads `MyApp::beacon_on_map` (the live position filtered by the
+  setting, and by whether the node is where you are) rather than `beacon`; the
+  Status page, the log and the recording read `beacon` itself, because the
+  node is still connected and still reporting. `distance_target` is left alone
+  so the Status page still measures to the node; `mapdraw::drawn_distance_target`
+  is the map's filtered view of it.
 - **Remote LoRa nodes** are relayed to the app by the connected board over the
   `midair_proto::ble::REMOTE_UUID` characteristic (`[src, rssi, PositionPacket]`);
   the transports decode it with `ble::remote_event` into `BleEvent::Remote`, and
@@ -825,27 +927,35 @@ sending you back here for it, writing the same file and sharing the same
 
 ## The Bluetooth page (`pages/bluetooth.rs` + `ble/`)
 
-Everything about the beacon that is not drawing: which board to talk to
+Everything about the node that is not drawing: which node to talk to
 (`device_picker_ui`), the link to it (`ble_link_ui`), the connection settings,
-the notify interval, and the board's own power and sleep settings.
+the notify interval, the node's own power and sleep settings, and - last,
+being the least often changed - the name stored on the node. The lines that
+describe something in progress (scanning, connecting, waiting for an ack,
+reading the node's settings) are drawn in `[ui] busy` with moving dots after
+them, and every elapsed count keeps its seconds (`app::elapsed_text`), so a
+scan at "2 min 14 s" reads as alive where "2 min" read as stuck.
 
-### Choosing a board (`device_picker_ui`)
+### Choosing a node (`device_picker_ui`)
 
-Several boards can be in range at once - typically when they are together to be
+Several nodes can be in range at once - typically when they are together to be
 configured or woken, rather than tracked. **Only one is ever connected**, so the
 picker is a single-choice list and the transports keep their single-session
 shape.
 
-- **Identity is the MAC; the name comes from the board first, then the app.**
-  A Wio-S3 board stores a label in its flash (written with `CFG_NAME` on the
-  config characteristic, from the page's "Board name" section) and advertises
+- **Identity is the MAC; the name comes from the node first, then the app.**
+  A Wio-S3 node stores a label in its flash (written with `CFG_NAME` on the
+  config characteristic, from the page's "Node name" section) and advertises
   `ws3gps-<label>`; one that has never been named advertises the tail of its
-  own address instead, and every C3 beacon advertises the same
-  `packet::DEVICE_NAME`. `[ble.names]` maps MAC -> nickname in the app's config
-  for the boards that carry no name of their own. `normalize_mac` is what makes
-  the key stable - addresses come back in whatever case the stack prefers and a
-  hand-edited file may use dashes, so the raw string would file one board
-  twice.
+  own address instead, which the picker does not show - it says nothing the
+  address beside it does not. `[ble.names]` maps MAC -> name in the app's
+  settings, and it is the list of nodes the app has met: a name a node
+  reports for itself is written there under the node's address and saved
+  (`note_board_name`, on whichever of the name and the address arrives
+  second), so a rename on the node renames it in the file. `normalize_mac` is
+  what makes the key stable - addresses come back in whatever case the stack
+  prefers and a hand-edited file may use dashes, so the raw string would file
+  one node twice.
 - **One resolver names the board everywhere.** `MyApp::board_label` picks, in
   order: the label stored on the board (`ble::board_label` strips the prefix
   and rejects the address fallback, reproducing it exactly from the pinned MAC
@@ -872,17 +982,36 @@ shape.
   board, so committing on every keystroke would delete the row the moment the box
   was cleared to retype. `name_edits` holds the buffers separately from
   `config.ble.names` for the same reason.
-- **Switching boards drops the last one's state** (`forget_board_state`). The
-  position, packet, telemetry, log and settings all describe the old board; a
-  stale beacon position is the worst of them, since the map would go on drawing
-  it as the board now selected. `beacon_track` is deliberately kept - it is
-  recorded history that also backs the Points page.
+- **Which node the link is up to is an event.** The transports send
+  `BleEvent::Address` right after `Connected(true)`; connected to "any node"
+  it is the only way the app learns which one answered. `MyApp::board_id`
+  holds it as a `points::BoardId`, and it is what the node's recorded track
+  is filed under: `board_tracks` is one track per node, so switching nodes
+  ends a path rather than joining it to the next node's, and the Points page
+  lists each under its own name (`source_label`, the config's name for the
+  address or the address itself).
+- **Switching nodes drops the last one's state** (`forget_board_state`). The
+  position, packet, telemetry, log, settings and address all describe the old
+  node; a stale position is the worst of them, since the map would go on
+  drawing it as the node now selected - and if it was yours, the position
+  goes too. The tracks are deliberately kept - they are recorded history that
+  also backs the Points page.
 
-### Board power and sleep (`board_power_ui`)
+### Node power and sleep (`board_power_ui`)
 
-The bottom section of the Bluetooth page drives the Wio-S3's own sleep switches
-and deep sleep. Unlike everything above it, **none of it is app state**: the
-board holds these in flash and is the authority on them.
+This section of the Bluetooth page drives the Wio-S3's own mode, sleep switches
+and intervals. Unlike everything above it, **none of it is app state**: the
+node holds these in flash and is the authority on them.
+
+The mode row offers four: stored, idle, tracking and **listening** - the node
+held beside the phone, with its GPS and receiver up, nothing transmitted and
+BLE up throughout, which is the mode that makes `[ble] location` worth
+having. Each interval below belongs to one mode: the wake check and the
+advertising window to stored, the idle timeout to idle, and the BLE on and
+off periods to tracking. The idle timeout is **off by default** and has a
+Disable that sends the zero which switches it off, so a node left idle stays
+reachable; the BLE on period is the tracker's own now rather than the wake
+check's window, since the two never wanted the same length.
 
 There is no GPS/LoRa power rail here, and the app deliberately offers no
 control for one. The protocol still carries `CFG_PWR_EN` and the board still
@@ -913,17 +1042,15 @@ with it.
   wake source but the timer, so the ceiling is the longest the board can be out
   of reach, and a wait that long needs no confirmation, no persisted state and
   no way back in beyond waiting.
-- **The advertising window has no Disable, unlike the interval next to it.**
-  `CFG_ESP_ADV_WINDOW_S` sets how long each wake advertises, clamped to
-  `ble::ESP_ADV_MIN_S` - `ESP_ADV_MAX_S` (1 s - 60 s; the page reads the
+- **The advertising window and the BLE on period have no Disable, unlike the
+  intervals next to them.** `CFG_ESP_ADV_WINDOW_S` sets how long each wake
+  check advertises and `CFG_BLE_ON_S` how long BLE stays up between off
+  periods while tracking, both clamped to 1 s - 60 s (the page reads the
   constants rather than quoting numbers). The wake-check interval takes 0 to
-  mean "never sleep", which is
-  the safe direction; a 0-length window is the opposite, leaving a sleeping
-  board unreachable by anything but a physical reset, so the board clamps 0 up
-  to the floor and the page offers no button that asks for it. The two controls
-  sit together because they are the same decision - the interval and the window
-  are the duty cycle, and so the battery life - but only one of them can be
-  turned off.
+  mean "never sleep", which is the safe direction; a 0-length window is the
+  opposite, leaving a sleeping node unreachable by anything but a physical
+  reset, so the node clamps 0 up to the floor and the page offers no button
+  that asks for it.
 - **The BLE off period has a Disable, and for the opposite reason the window
   does not.** `CFG_BLE_OFF_S` sets how long the board powers its BLE
   controller down between advertising windows, clamped to
@@ -1011,21 +1138,24 @@ with it.
   what the app was asked to do; `ble_status` is the worker's running commentary
   on the attempt. Showing only the second was most of why "nothing seems to
   happen" - a scan that is working looks identical to one that is not.
-- **"Connected" is only claimed while the board is talking.** Both platforms
+- **"Connected" is only claimed while the node is talking.** Both platforms
   can hold a dead link open for a long time, so `MyApp::board_silence` watches
   when anything last came off a characteristic (`board_heard`); after three
   notify intervals of quiet (10 s floor) the intent line switches to
-  "Connected, but nothing from the board for X." and loses the all-well color.
+  "Connected, but nothing from the node for X." and loses the all-well color.
   The "for X" counts (here and in "Connecting for X") restart per attempt: on
   every request sent and on the moment a live link drops.
-- **`chase` is what makes the two transports behave the same.** Desktop always
+- **`chase` is what makes the two transports behave the same, and it is the
+  whole difference between Connect and Connect to sleeping.** Desktop always
   finds its device by scanning, so chasing only changes its status line. The
   Android worker normally shortcuts a pinned MAC straight to `connectGatt`,
   which is a *bounded* attempt - retried on a fixed cycle it can stay out of
   phase with a 15 s window for a very long time. Chasing makes it scan and
   match the address among the hits instead, exactly as desktop does, so it is
   always listening. The shortcut stays for the normal case, where a continuous
-  low-latency scan would cost battery for nothing.
+  low-latency scan would cost battery for nothing. So: on desktop, or on
+  Android connecting to "any node", the two buttons do the same thing; on
+  Android with a node pinned, only "Connect to sleeping" can catch a window.
 
 ## The Radio config page (`pages/radio.rs` + `radio.rs`)
 
@@ -1128,7 +1258,8 @@ off the device. The model is `src/logging.rs`; the page is `logging_page`.
   same question, so the legend entries are toggles (`MyApp::log_hidden`,
   session state). Every source ever seen keeps its entry, hidden or not -
   otherwise there is no way to bring one back. Colors are `LogSource::color`,
-  which is the map's: your color, the board's, and `remote_color(addr)`.
+  which is the map's: your color, the node's, and `remote_color(addr)`; the
+  names are the map's too (`[phone] name`, the node's name).
 - **Export is the one thing that is platform-shaped.** `MyApp::export` is an
   `Option<export::Saver>` - the same shape as `insets`, so `app.rs` stays free
   of `cfg`. On Android it is `export::downloads_saver`, which inserts the CSV
@@ -1148,12 +1279,13 @@ off the device. The model is `src/logging.rs`; the page is `logging_page`.
 
 ## Manual position bar (desktop)
 
-With no live GPS source (`gps_rx.is_none()`, i.e. desktop), a bottom-anchored
+With no live GPS source (`gps.is_none()`, i.e. desktop), a bottom-anchored
 bar lets a position be typed as "lat, lon". A valid entry feeds the same
-`apply_gps_fix` pipeline a real fix would and recenters the map. It is shown on
-the Map page only. A typed position carries no course and no speed, so the
-Status page's velocity line stays off on desktop - both come from the receiver,
-and there is no second position to derive them from.
+`apply_gps_fix` pipeline a real fix would, as `LocationSource::Manual`, and
+recenters the map. It is shown on the Map page only. A typed position carries
+no course and no speed, so the Status page's velocity line stays off on
+desktop - both come from the receiver, and there is no second position to
+derive them from.
 
 It positions from `MyApp::bottom_overlay_inset`, so it stacks above the map
 status bar instead of overlapping it (see that section for how the clearance is
@@ -1193,8 +1325,13 @@ everywhere); only `compass::spawn` and the thread are Android-only.
 Mobile vs desktop is gated on `cfg!(target_os = "android")` and on whether the
 live-source channels/insets are present:
 
-- **Zoom**: desktop = wheel + buttons; mobile = pinch (no buttons).
-- **GPS**: mobile = live GNSS channel; desktop = manual position bar.
+- **Zoom**: desktop = wheel + the corner buttons; mobile = pinch + the same
+  buttons.
+- **GPS**: mobile = live GNSS channel, powered only while `[phone] location`
+  is on; desktop = manual position bar. The connected node's receiver can be
+  the position on both.
+- **Clipboard**: mobile = Android's clipboard service over JNI; desktop =
+  egui's own.
 - **Heading-up lock**: mobile locks/centers the view; desktop keeps free pan.
 - **Compass**: mobile only, and powered only while heading-up is on.
 - **Marker list**: opened by a long press on mobile, a right-click on desktop.

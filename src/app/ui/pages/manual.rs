@@ -4,7 +4,7 @@
 use crate::app::ui::text::manual as text;
 use crate::app::ui::theme::{corner_margin, Key};
 use crate::app::ui::widgets::{floating, submitted, text_field};
-use crate::app::MyApp;
+use crate::app::{LocationSource, MyApp};
 use crate::gps::GpsFix;
 use crate::points::parse_lat_lon;
 
@@ -34,12 +34,15 @@ impl MyApp {
                         match parse_lat_lon(&self.manual_gps_text) {
                             Some((lat, lon)) => {
                                 self.manual_gps_bad = false;
-                                self.apply_gps_fix(GpsFix {
-                                    lat,
-                                    lon,
-                                    bearing: None,
-                                    speed: None,
-                                });
+                                self.apply_gps_fix(
+                                    GpsFix {
+                                        lat,
+                                        lon,
+                                        bearing: None,
+                                        speed: None,
+                                    },
+                                    LocationSource::Manual,
+                                );
                                 self.map_memory.follow_my_position();
                             }
                             None => self.manual_gps_bad = true,

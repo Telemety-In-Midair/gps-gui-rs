@@ -1,5 +1,5 @@
-//! Loadable TOML configuration: marker colors, overlay sizes, the beacon
-//! distance readout, track recording, and the BLE beacon settings.
+//! Loadable TOML configuration: marker colors, overlay sizes, the distance
+//! readout, track recording, and the BLE node settings.
 //!
 //! The Settings page edits these live and writes them back with [`AppConfig::save`],
 //! which edits an existing file in place (comments, key order, and keys this app
@@ -10,14 +10,19 @@
 //!
 //! ```toml
 //! [colors]
-//! track = "#0078ff"   # phone track, heading arrow, position dot
-//! fixed = "#ff5028"   # BLE beacon marker, distance line, beacon path
-//! outline = "#ffffff" # ring around the position and beacon dots
+//! track = "#0078ff"   # your track, heading arrow, position dot
+//! fixed = "#ff5028"   # the connected node's marker, distance line and path
+//! outline = "#ffffff" # ring around the position and node dots
+//!
+//! [phone]             # this device
+//! name = "Phone"      # what the map and the pages call it
+//! location = false    # use its own GNSS for the current position
 //!
 //! [ui]                # the pages rather than the map: their colors and text
 //! theme = "light"     # "light", "dark" (both solarized) or "system"
 //! ok = "#859900"      # "yes" and the green feedback lines
 //! error = "#dc322f"   # "no", errors, and the red feedback lines
+//! busy = "#268bd2"    # scanning and connecting
 //! pulse = "#cb4b16"   # a toolbar button flagging that it has no target
 //! background = ""     # pages, map bar and popups; empty follows the theme
 //! button = ""         # a button at rest; empty follows the theme
@@ -26,35 +31,41 @@
 //!
 //! [sizes]             # screen points; each overlay is sized independently
 //! marker = 8.0        # current-position dot radius
-//! beacon = 6.0        # beacon dot radius
-//! track = 3.0         # track polyline width (phone track and beacon path)
-//! distance_line = 3.0 # user<->beacon line width
-//! distance_text = 14.0 # beacon-distance label font size
+//! beacon = 6.0        # node dot radius
+//! track = 3.0         # track polyline width (your track and the node paths)
+//! distance_line = 3.0 # user<->node line width
+//! distance_text = 14.0 # distance label font size
 //!
 //! [distance]
-//! show = false        # draw the distance label on the user<->beacon line
+//! show = false        # draw the distance label on the user<->node line
 //! units = "metric"    # "metric" (km/m) or "imperial" (mi/ft)
-//! dotted = true       # draw the user<->beacon line dotted rather than solid
+//! dotted = true       # draw the user<->node line dotted rather than solid
+//!
+//! [map]               # the map page's overlays
+//! bar_opacity = 1.0   # the top bar and the status bar backgrounds, 0 - 1
+//! show_key = true     # the color key under the top bar
 //!
 //! [ble]
 //! enabled = true      # master switch for the BLE GPS source
-//! show_on_map = true  # draw the connected board on the map at all
+//! show_on_map = true  # draw the connected node on the map at all
 //! show_path = false   # draw the path of the incoming BLE GPS data
-//! mac = "AA:BB:CC:DD:EE:FF"  # pin a specific device; omit to scan by service
+//! location = true     # use the connected node's GPS as the current position
+//! mac = "AA:BB:CC:DD:EE:FF"  # pin a specific node; omit to scan by service
 //!
-//! [ble.names]         # nicknames for known boards, keyed by MAC (a name
-//!                     # stored on the board itself wins over these)
+//! [ble.names]         # names for known nodes, keyed by MAC; a node reporting
+//!                     # a name of its own writes it here
 //! "AA:BB:CC:DD:EE:FF" = "Truck"
 //!
 //! [lora]
 //! show_path = true    # draw the remote LoRa nodes' paths on the map
+//! pulse_secs = 10.0   # a node's marker pulses while heard within this; 0 never
 //!
 //! [lora.names]        # nicknames for remote nodes, keyed by LoRa address
 //! 3 = "Truck"
 //!
 //! [track]
 //! min_distance = 3.0  # meters of movement before a new track point is recorded
-//! show_path = true    # draw the phone's own recorded path
+//! show_path = true    # draw your own recorded path
 //!
 //! [compass]
 //! marker_arrow = true # point the marker arrow with the compass outside heading-up
@@ -63,6 +74,8 @@
 //! [status_bar]        # the read-out along the bottom of the map
 //! show = false        # draw it at all
 //! cycle_secs = 5.0    # seconds each node holds the read-out when several are heard
+//! rssi_top_dbm = -20  # a reception this strong fills the graph
+//! rssi_bottom_dbm = -120 # and this weak is empty; heights are linear in dBm
 //!
 //! [log]
 //! auto_start = false  # start recording the CSV log as soon as the app launches
@@ -84,7 +97,7 @@ use crate::solarized;
 pub struct MarkerColors {
     /// Track polyline, heading arrow, and the current-position dot.
     pub track: Color32,
-    /// BLE beacon marker, the line drawn to it, and its path.
+    /// The connected node's marker, the line drawn to it, and its path.
     pub fixed: Color32,
     /// Ring around both dots, which is what keeps them apart from the tiles
     /// under them whatever the base map looks like there.
@@ -205,6 +218,9 @@ pub struct UiSettings {
     pub ok: Color32,
     /// "no" on the Status page, error text, and the `Err` feedback lines.
     pub error: Color32,
+    /// The link lines while the app is scanning or connecting: something is
+    /// in progress and not yet either of the two above.
+    pub busy: Color32,
     /// Background pulse on a toolbar button with no target.
     pub pulse: Color32,
     /// Fill behind the pages, the map's controls bar and the popups. `None`
@@ -235,6 +251,7 @@ impl Default for UiSettings {
             // an unrelated set of primaries is what would look wrong.
             ok: solarized::GREEN,
             error: solarized::RED,
+            busy: solarized::BLUE,
             pulse: solarized::ORANGE,
             background: None,
             button: None,
@@ -250,11 +267,11 @@ impl Default for UiSettings {
 pub struct MarkerSizes {
     /// Radius of the current-position dot.
     pub marker: f32,
-    /// Radius of the BLE beacon dot.
+    /// Radius of a node dot, the connected node's and the remote ones'.
     pub beacon: f32,
-    /// Width of the recorded track polylines (phone track and beacon path).
+    /// Width of the recorded track polylines (your track and the node paths).
     pub track: f32,
-    /// Width of the line drawn from the current position to the beacon.
+    /// Width of the line drawn from the current position to the node.
     pub distance_line: f32,
     /// Font size of the distance label drawn on that line.
     pub distance_text: f32,
@@ -272,7 +289,52 @@ impl Default for MarkerSizes {
     }
 }
 
-/// Unit system for the beacon-distance label.
+/// This device: what it is called, and whether its own receiver is used.
+#[derive(Clone)]
+pub struct PhoneSettings {
+    /// What the map's marker, the Points page and the log legend call this
+    /// device. "Phone" by default, since that is what it is in the field.
+    pub name: String,
+    /// Use the device's own GNSS for the current position. Off by default:
+    /// the usual setup is a node held next to the phone whose receiver is
+    /// the better one, and the phone's costs battery for a second answer.
+    /// See `[ble] location` for that node.
+    pub location: bool,
+}
+
+impl Default for PhoneSettings {
+    fn default() -> Self {
+        Self {
+            name: DEFAULT_PHONE_NAME.to_string(),
+            location: false,
+        }
+    }
+}
+
+/// What this device is called when nobody has named it.
+pub const DEFAULT_PHONE_NAME: &str = "Phone";
+
+/// The map page's own overlays: how see-through its two bars are, and
+/// whether the color key is drawn.
+#[derive(Clone, Copy)]
+pub struct MapSettings {
+    /// Opacity of the controls bar and the status bar backgrounds, 0 (the
+    /// map shows through) to 1 (solid).
+    pub bar_opacity: f32,
+    /// Draw the key under the controls bar: one row per marker color.
+    pub show_key: bool,
+}
+
+impl Default for MapSettings {
+    fn default() -> Self {
+        Self {
+            bar_opacity: 1.0,
+            show_key: true,
+        }
+    }
+}
+
+/// Unit system for the distance label.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DistanceUnits {
     /// Kilometers and meters.
@@ -359,6 +421,10 @@ pub struct BleSettings {
     pub show_on_map: bool,
     /// Draw the path of the incoming BLE GPS data on the map.
     pub show_path: bool,
+    /// Use the connected node's GPS as this device's current position while
+    /// it has a fix. On by default, which with `[phone] location` off is
+    /// what makes the node beside the phone the one receiver in use.
+    pub location: bool,
     /// Pin a specific device MAC; `None` scans for the GPS service.
     pub mac: Option<String>,
     /// Nicknames for known boards, keyed by MAC. A board that has not been
@@ -376,6 +442,7 @@ impl Default for BleSettings {
             enabled: true,
             show_on_map: true,
             show_path: false,
+            location: true,
             mac: None,
             names: BTreeMap::new(),
         }
@@ -440,6 +507,10 @@ pub struct LoraSettings {
     /// Draw the remote nodes' paths on the map. The map bar's path button and
     /// the per-node color are separate; this only hides the lines.
     pub show_path: bool,
+    /// How long after a node was last heard its marker keeps pulsing, in
+    /// seconds; 0 never pulses. The pulse is what says "on the air now"
+    /// rather than "last seen here".
+    pub pulse_secs: f32,
     /// Nicknames for known nodes, keyed by LoRa address.
     pub names: BTreeMap<u8, String>,
 }
@@ -450,10 +521,14 @@ impl Default for LoraSettings {
         // nodes are received, unlike the connected board's own path.
         Self {
             show_path: true,
+            pulse_secs: DEFAULT_PULSE_SECS,
             names: BTreeMap::new(),
         }
     }
 }
+
+/// How long a remote node's marker pulses after it was last heard.
+pub const DEFAULT_PULSE_SECS: f32 = 10.0;
 
 impl LoraSettings {
     /// The nickname for `addr`, if one is set.
@@ -540,6 +615,12 @@ pub struct StatusBarSettings {
     /// Only used when more than one node has been heard; a single node keeps
     /// the read-out to itself and never cycles.
     pub cycle_secs: f32,
+    /// The signal that fills a bar of the graph, in dBm.
+    pub rssi_top_dbm: i16,
+    /// The signal that leaves a bar empty, in dBm. Heights are linear in
+    /// dBm between the two, which is the log scale of the received power:
+    /// each equal step up a bar is the same ratio of power.
+    pub rssi_bottom_dbm: i16,
 }
 
 impl Default for StatusBarSettings {
@@ -547,9 +628,23 @@ impl Default for StatusBarSettings {
         Self {
             show: false,
             cycle_secs: 5.0,
+            rssi_top_dbm: RSSI_TOP_DEFAULT_DBM,
+            rssi_bottom_dbm: RSSI_BOTTOM_DEFAULT_DBM,
         }
     }
 }
+
+/// The graph's default span: the ceiling is a node in the same room, the
+/// floor is under any sensitivity worth plotting.
+pub const RSSI_TOP_DEFAULT_DBM: i16 = -20;
+pub const RSSI_BOTTOM_DEFAULT_DBM: i16 = -120;
+
+/// The dBm values the graph's span is accepted in, and the least it may
+/// cover: a span narrower than this turns a few dB of noise into a
+/// full-height swing, which is what the fixed scale exists to avoid.
+pub const RSSI_DBM_MIN: i16 = -200;
+pub const RSSI_DBM_MAX: i16 = 0;
+pub const RSSI_SPAN_MIN: i16 = 10;
 
 /// CSV logging settings.
 ///
@@ -595,9 +690,11 @@ impl LogSettings {
 #[derive(Clone, Default)]
 pub struct AppConfig {
     pub colors: MarkerColors,
+    pub phone: PhoneSettings,
     pub ui: UiSettings,
     pub sizes: MarkerSizes,
     pub distance: DistanceSettings,
+    pub map: MapSettings,
     pub ble: BleSettings,
     pub lora: LoraSettings,
     pub track: TrackSettings,
@@ -613,11 +710,15 @@ struct RawConfig {
     #[serde(default)]
     colors: RawColors,
     #[serde(default)]
+    phone: RawPhone,
+    #[serde(default)]
     ui: RawUi,
     #[serde(default)]
     sizes: RawSizes,
     #[serde(default)]
     distance: RawDistance,
+    #[serde(default)]
+    map: RawMap,
     #[serde(default)]
     ble: RawBle,
     #[serde(default)]
@@ -640,10 +741,23 @@ struct RawColors {
 }
 
 #[derive(Deserialize, Default)]
+struct RawPhone {
+    name: Option<String>,
+    location: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawMap {
+    bar_opacity: Option<f32>,
+    show_key: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
 struct RawUi {
     theme: Option<String>,
     ok: Option<String>,
     error: Option<String>,
+    busy: Option<String>,
     pulse: Option<String>,
     background: Option<String>,
     button: Option<String>,
@@ -672,6 +786,7 @@ struct RawBle {
     enabled: Option<bool>,
     show_on_map: Option<bool>,
     show_path: Option<bool>,
+    location: Option<bool>,
     mac: Option<String>,
     #[serde(default)]
     names: BTreeMap<String, String>,
@@ -680,6 +795,7 @@ struct RawBle {
 #[derive(Deserialize, Default)]
 struct RawLora {
     show_path: Option<bool>,
+    pulse_secs: Option<f32>,
     // TOML table keys are strings; parsed to a u8 address on the way in.
     #[serde(default)]
     names: BTreeMap<String, String>,
@@ -701,6 +817,8 @@ struct RawCompass {
 struct RawStatusBar {
     show: Option<bool>,
     cycle_secs: Option<f32>,
+    rssi_top_dbm: Option<i16>,
+    rssi_bottom_dbm: Option<i16>,
 }
 
 #[derive(Deserialize, Default)]
@@ -915,9 +1033,12 @@ impl AppConfig {
             "outline",
             hex(self.colors.outline).into(),
         );
+        set(&mut doc, "phone", "name", self.phone.name.as_str().into());
+        set(&mut doc, "phone", "location", self.phone.location.into());
         set(&mut doc, "ui", "theme", self.ui.theme.as_str().into());
         set(&mut doc, "ui", "ok", hex(self.ui.ok).into());
         set(&mut doc, "ui", "error", hex(self.ui.error).into());
+        set(&mut doc, "ui", "busy", hex(self.ui.busy).into());
         set(&mut doc, "ui", "pulse", hex(self.ui.pulse).into());
         // Left in the file as an empty string rather than dropped, so the key is
         // there to fill in by hand.
@@ -953,9 +1074,17 @@ impl AppConfig {
             self.distance.units.as_str().into(),
         );
         set(&mut doc, "distance", "dotted", self.distance.dotted.into());
+        set(
+            &mut doc,
+            "map",
+            "bar_opacity",
+            f32_value(self.map.bar_opacity),
+        );
+        set(&mut doc, "map", "show_key", self.map.show_key.into());
         set(&mut doc, "ble", "enabled", self.ble.enabled.into());
         set(&mut doc, "ble", "show_on_map", self.ble.show_on_map.into());
         set(&mut doc, "ble", "show_path", self.ble.show_path.into());
+        set(&mut doc, "ble", "location", self.ble.location.into());
         // An empty string reads back as "unset", so an unpinned MAC keeps the
         // key in the file rather than dropping the line.
         set(
@@ -965,6 +1094,12 @@ impl AppConfig {
             self.ble.mac.clone().unwrap_or_default().into(),
         );
         set(&mut doc, "lora", "show_path", self.lora.show_path.into());
+        set(
+            &mut doc,
+            "lora",
+            "pulse_secs",
+            f32_value(self.lora.pulse_secs),
+        );
         set(
             &mut doc,
             "track",
@@ -990,6 +1125,18 @@ impl AppConfig {
             "status_bar",
             "cycle_secs",
             f32_value(self.status_bar.cycle_secs),
+        );
+        set(
+            &mut doc,
+            "status_bar",
+            "rssi_top_dbm",
+            i64::from(self.status_bar.rssi_top_dbm).into(),
+        );
+        set(
+            &mut doc,
+            "status_bar",
+            "rssi_bottom_dbm",
+            i64::from(self.status_bar.rssi_bottom_dbm).into(),
         );
         set(&mut doc, "log", "auto_start", self.log.auto_start.into());
         set(
@@ -1050,14 +1197,19 @@ impl AppConfig {
             "# gps-gui-rs settings. Every key is optional; a missing one keeps its default.\n\
              \n\
              [colors]\n\
-             track = \"{track}\"   # phone track, heading arrow, position dot\n\
-             fixed = \"{fixed}\"   # BLE beacon marker, distance line, beacon path\n\
-             outline = \"{outline}\" # ring around the position and beacon dots\n\
+             track = \"{track}\"   # your track, heading arrow, position dot\n\
+             fixed = \"{fixed}\"   # the connected node's marker, distance line and path\n\
+             outline = \"{outline}\" # ring around the position and node dots\n\
+             \n\
+             [phone]              # this device\n\
+             name = \"{phone_name}\"       # what the map and the pages call it\n\
+             location = {phone_location}     # use its own GNSS for the current position\n\
              \n\
              [ui]                 # the pages, not the map: their colors and text\n\
              theme = \"{theme}\"      # \"light\", \"dark\" (both solarized) or \"system\"\n\
              ok = \"{ok}\"      # \"yes\" and the green feedback lines\n\
              error = \"{error}\"   # \"no\", errors, and the red feedback lines\n\
+             busy = \"{busy}\"    # scanning and connecting\n\
              pulse = \"{pulse}\"   # a toolbar button flagging that it has no target\n\
              # Empty follows the light/dark theme, which is what keeps these three\n\
              # readable against each other. Setting one is taking that on yourself.\n\
@@ -1068,34 +1220,40 @@ impl AppConfig {
              \n\
              [sizes]              # screen points; each overlay is sized independently\n\
              marker = {marker:?}          # current-position dot radius\n\
-             beacon = {beacon:?}          # beacon dot radius\n\
-             track = {track_w:?}           # track polyline width (phone track and beacon path)\n\
-             distance_line = {dline:?}    # user<->beacon line width\n\
-             distance_text = {dtext:?}   # beacon-distance label font size\n\
+             beacon = {beacon:?}          # node dot radius\n\
+             track = {track_w:?}           # track polyline width (your track and the node paths)\n\
+             distance_line = {dline:?}    # user<->node line width\n\
+             distance_text = {dtext:?}   # distance label font size\n\
              \n\
              [distance]\n\
-             show = {show}        # draw the distance label on the line to the beacon\n\
+             show = {show}        # draw the distance label on the line to the node\n\
              units = \"{units}\"    # \"metric\" (km/m) or \"imperial\" (mi/ft)\n\
              dotted = {dotted}       # draw distance line dotted rather than solid\n\
              \n\
+             [map]                # the map page's overlays\n\
+             bar_opacity = {bar_opacity:?}    # the top bar and the status bar backgrounds, 0 - 1\n\
+             show_key = {show_key}      # the color key under the top bar\n\
+             \n\
              [ble]\n\
              enabled = {enabled}       # master switch for the BLE GPS source\n\
-             show_on_map = {show_on_map}   # draw the connected board on the map at all\n\
+             show_on_map = {show_on_map}   # draw the connected node on the map at all\n\
              show_path = {show_path}    # draw the path of the incoming BLE GPS data\n\
-             mac = \"{mac}\"            # pin a specific device; empty scans by service\n\
+             location = {ble_location}      # use the connected node's GPS as the current position\n\
+             mac = \"{mac}\"            # pin a specific node; empty scans by service\n\
              \n\
-             [ble.names]          # your names for known boards, keyed by MAC; a name stored on the board wins\n\
+             [ble.names]          # names for known nodes, keyed by MAC; a node reporting a name writes it here\n\
              {names}\
              \n\
-             [lora]               # remote nodes heard over LoRa and relayed by the connected board\n\
+             [lora]               # remote nodes heard over LoRa and relayed by the connected node\n\
              show_path = {lora_show_path}    # draw the remote nodes' paths on the map\n\
+             pulse_secs = {pulse_secs:?}    # a node's marker pulses while heard within this; 0 never\n\
              \n\
              [lora.names]         # nicknames for remote nodes, keyed by LoRa address (1-255)\n\
              {lora_names}\
              \n\
              [track]\n\
              min_distance = {min_distance:?}   # meters of movement before a new track point\n\
-             show_path = {show_track}    # draw the phone's own recorded path\n\
+             show_path = {show_track}    # draw your own recorded path\n\
              \n\
              [compass]            # heading-up always runs the sensor at full rate\n\
              marker_arrow = {marker_arrow}  # point the marker arrow with the compass in north-up and tracking\n\
@@ -1104,6 +1262,8 @@ impl AppConfig {
              [status_bar]         # the read-out along the bottom of the map\n\
              show = {status_show}         # draw it at all\n\
              cycle_secs = {cycle_secs:?}     # seconds each node holds the read-out ({cycle_min} - {cycle_max})\n\
+             rssi_top_dbm = {rssi_top}    # a reception this strong fills the graph\n\
+             rssi_bottom_dbm = {rssi_bottom} # and this weak is empty; heights are linear in dBm\n\
              \n\
              [log]                # the CSV log on the Logging page\n\
              auto_start = {auto_start}  # start recording as soon as the app launches\n\
@@ -1112,9 +1272,12 @@ impl AppConfig {
             track = hex(self.colors.track),
             fixed = hex(self.colors.fixed),
             outline = hex(self.colors.outline),
+            phone_name = self.phone.name,
+            phone_location = self.phone.location,
             theme = self.ui.theme.as_str(),
             ok = hex(self.ui.ok),
             error = hex(self.ui.error),
+            busy = hex(self.ui.busy),
             pulse = hex(self.ui.pulse),
             background = hex_opt(self.ui.background),
             button = hex_opt(self.ui.button),
@@ -1130,12 +1293,16 @@ impl AppConfig {
             show = self.distance.show,
             units = self.distance.units.as_str(),
             dotted = self.distance.dotted,
+            bar_opacity = self.map.bar_opacity,
+            show_key = self.map.show_key,
             enabled = self.ble.enabled,
             show_on_map = self.ble.show_on_map,
             show_path = self.ble.show_path,
+            ble_location = self.ble.location,
             mac = self.ble.mac.clone().unwrap_or_default(),
             names = names,
             lora_show_path = self.lora.show_path,
+            pulse_secs = self.lora.pulse_secs,
             lora_names = lora_names,
             min_distance = self.track.min_distance,
             show_track = self.track.show_path,
@@ -1145,6 +1312,8 @@ impl AppConfig {
             cycle_secs = self.status_bar.cycle_secs,
             cycle_min = STATUS_CYCLE_MIN,
             cycle_max = STATUS_CYCLE_MAX,
+            rssi_top = self.status_bar.rssi_top_dbm,
+            rssi_bottom = self.status_bar.rssi_bottom_dbm,
             auto_start = self.log.auto_start,
             log_file = self.log.file.clone().unwrap_or_default(),
             reference = reference,
@@ -1163,6 +1332,17 @@ impl AppConfig {
         if let Some(s) = raw.colors.outline {
             config.colors.outline = parse_hex(&s)?;
         }
+        // A blank name is no name: the default stands rather than a marker
+        // labelled with nothing.
+        if let Some(name) = raw.phone.name {
+            let name = name.trim();
+            if !name.is_empty() {
+                config.phone.name = name.to_string();
+            }
+        }
+        if let Some(v) = raw.phone.location {
+            config.phone.location = v;
+        }
         if let Some(s) = raw.ui.theme {
             config.ui.theme = ThemeChoice::parse(&s)?;
         }
@@ -1171,6 +1351,9 @@ impl AppConfig {
         }
         if let Some(s) = raw.ui.error {
             config.ui.error = parse_hex(&s)?;
+        }
+        if let Some(s) = raw.ui.busy {
+            config.ui.busy = parse_hex(&s)?;
         }
         if let Some(s) = raw.ui.pulse {
             config.ui.pulse = parse_hex(&s)?;
@@ -1216,8 +1399,20 @@ impl AppConfig {
         if let Some(v) = raw.distance.dotted {
             config.distance.dotted = v;
         }
+        if let Some(v) = raw.map.bar_opacity {
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err(format!("map.bar_opacity must be between 0 and 1, got {v}"));
+            }
+            config.map.bar_opacity = v;
+        }
+        if let Some(v) = raw.map.show_key {
+            config.map.show_key = v;
+        }
         if let Some(v) = raw.ble.enabled {
             config.ble.enabled = v;
+        }
+        if let Some(v) = raw.ble.location {
+            config.ble.location = v;
         }
         if let Some(v) = raw.ble.show_on_map {
             config.ble.show_on_map = v;
@@ -1239,6 +1434,12 @@ impl AppConfig {
             .collect();
         if let Some(v) = raw.lora.show_path {
             config.lora.show_path = v;
+        }
+        if let Some(v) = raw.lora.pulse_secs {
+            if !v.is_finite() || v < 0.0 {
+                return Err(format!("lora.pulse_secs must be >= 0, got {v}"));
+            }
+            config.lora.pulse_secs = v;
         }
         // LoRa node keys are addresses (1-255); 0 is the local GPS, not a
         // remote. A key that is not one is a typo worth surfacing rather than
@@ -1286,6 +1487,24 @@ impl AppConfig {
                 ));
             }
             config.status_bar.cycle_secs = v;
+        }
+        if let Some(v) = raw.status_bar.rssi_top_dbm {
+            config.status_bar.rssi_top_dbm = v;
+        }
+        if let Some(v) = raw.status_bar.rssi_bottom_dbm {
+            config.status_bar.rssi_bottom_dbm = v;
+        }
+        // Checked as a pair whichever half the file set: the graph needs a
+        // span, and a top under the bottom is a graph drawn upside down.
+        let (top, bottom) = (config.status_bar.rssi_top_dbm, config.status_bar.rssi_bottom_dbm);
+        if !(RSSI_DBM_MIN..=RSSI_DBM_MAX).contains(&top)
+            || !(RSSI_DBM_MIN..=RSSI_DBM_MAX).contains(&bottom)
+            || top - bottom < RSSI_SPAN_MIN
+        {
+            return Err(format!(
+                "status_bar.rssi_top_dbm ({top}) and rssi_bottom_dbm ({bottom}) must be dBm \
+                 values between {RSSI_DBM_MIN} and {RSSI_DBM_MAX}, at least {RSSI_SPAN_MIN} apart"
+            ));
         }
         if let Some(v) = raw.log.auto_start {
             config.log.auto_start = v;
@@ -1367,6 +1586,71 @@ mod tests {
         // The generated `mac = ""` means "scan by service", not a pinned MAC.
         assert_eq!(back.ble.mac, None);
         assert_eq!(back.ble.show_on_map, cfg.ble.show_on_map);
+        assert_eq!(back.ble.location, cfg.ble.location);
+        assert_eq!(back.phone.name, cfg.phone.name);
+        assert_eq!(back.phone.location, cfg.phone.location);
+        assert_eq!(back.map.bar_opacity, cfg.map.bar_opacity);
+        assert_eq!(back.map.show_key, cfg.map.show_key);
+        assert_eq!(back.lora.pulse_secs, cfg.lora.pulse_secs);
+        assert_eq!(back.status_bar.rssi_top_dbm, cfg.status_bar.rssi_top_dbm);
+        assert_eq!(back.status_bar.rssi_bottom_dbm, cfg.status_bar.rssi_bottom_dbm);
+        assert_eq!(back.ui.busy, cfg.ui.busy);
+    }
+
+    /// The phone's own receiver is off by default and the node's is on:
+    /// the usual setup is a node held next to the phone, and its receiver
+    /// is the one worth the battery.
+    #[test]
+    fn the_location_source_defaults_to_the_node() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.phone.location);
+        assert!(cfg.ble.location);
+        assert_eq!(cfg.phone.name, "Phone");
+
+        let cfg = AppConfig::from_toml(
+            "[phone]\nname = \"  Sam  \"\nlocation = true\n\n[ble]\nlocation = false\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.phone.name, "Sam");
+        assert!(cfg.phone.location);
+        assert!(!cfg.ble.location);
+        // A blank name is no name.
+        assert_eq!(
+            AppConfig::from_toml("[phone]\nname = \"  \"").unwrap().phone.name,
+            "Phone"
+        );
+    }
+
+    /// The graph's span is a pair: both ends are dBm values and the top is
+    /// above the bottom by enough to be a graph.
+    #[test]
+    fn the_status_bar_span_is_checked_as_a_pair() {
+        let cfg = AppConfig::from_toml("[status_bar]\nrssi_top_dbm = -30\nrssi_bottom_dbm = -110")
+            .unwrap();
+        assert_eq!(cfg.status_bar.rssi_top_dbm, -30);
+        assert_eq!(cfg.status_bar.rssi_bottom_dbm, -110);
+        // One end moved past the other, or a span too narrow to read.
+        assert!(AppConfig::from_toml("[status_bar]\nrssi_top_dbm = -130").is_err());
+        assert!(AppConfig::from_toml("[status_bar]\nrssi_bottom_dbm = -25").is_err());
+        assert!(AppConfig::from_toml("[status_bar]\nrssi_top_dbm = 40").is_err());
+        assert!(
+            AppConfig::from_toml("[status_bar]\nrssi_top_dbm = -50\nrssi_bottom_dbm = -55")
+                .is_err()
+        );
+        assert_eq!(AppConfig::default().status_bar.rssi_top_dbm, -20);
+        assert_eq!(AppConfig::default().status_bar.rssi_bottom_dbm, -120);
+    }
+
+    #[test]
+    fn map_opacity_and_pulse_are_range_checked() {
+        assert!(AppConfig::from_toml("[map]\nbar_opacity = 1.5").is_err());
+        assert!(AppConfig::from_toml("[map]\nbar_opacity = -0.1").is_err());
+        assert!(AppConfig::from_toml("[lora]\npulse_secs = -1.0").is_err());
+        let cfg = AppConfig::from_toml("[map]\nbar_opacity = 0.5\nshow_key = false\n\n[lora]\npulse_secs = 0.0").unwrap();
+        assert_eq!(cfg.map.bar_opacity, 0.5);
+        assert!(!cfg.map.show_key);
+        assert_eq!(cfg.lora.pulse_secs, 0.0);
+        assert_eq!(AppConfig::default().lora.pulse_secs, 10.0);
     }
 
     /// The map switch for the connected board reads back from a file, and a
@@ -1653,6 +1937,29 @@ mod tests {
         assert!(back.status_bar.show);
         assert_eq!(back.status_bar.cycle_secs, 8.0);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_the_shipped_config() {
+        std::fs::write("app-settings.toml", AppConfig::default().to_toml()).unwrap();
+    }
+
+    /// The settings file the repo ships is the generated default, so it
+    /// documents every key as the code writes it rather than as it once
+    /// did. `cargo test regenerate_the_shipped_config -- --ignored` writes
+    /// it again.
+    #[test]
+    fn the_shipped_config_is_the_generated_default() {
+        let text = include_str!("../app-settings.toml");
+        assert_eq!(
+            text,
+            AppConfig::default().to_toml(),
+            "app-settings.toml is out of date - regenerate it"
+        );
+        let back = AppConfig::from_toml(text).expect("the shipped file loads");
+        assert_eq!(back.phone.name, AppConfig::default().phone.name);
+        assert_eq!(back.ble.location, AppConfig::default().ble.location);
     }
 
     #[test]

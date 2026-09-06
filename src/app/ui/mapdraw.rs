@@ -33,26 +33,33 @@ impl MyApp {
     /// `rotation` is set, the painted shapes are rotated about the center of
     /// `clip` and then clipped back to `clip`, so the visible map spins with the
     /// heading while its corners stay filled by the overscan.
+    ///
+    /// Returns where the map itself was tapped this frame, if it was: the
+    /// tile widget takes the click, so a tap that landed on a button over the
+    /// map is never one of these.
     pub(super) fn map(
         &mut self,
         ui: &mut egui::Ui,
         map_rect: egui::Rect,
         rotation: Option<Rot2>,
         clip: egui::Rect,
-    ) {
+    ) -> Option<Pos2> {
         let my_position = self.current.unwrap_or_else(default_position);
 
-        // Heartbeat phase for the beacon marker while the BLE link is up. The
-        // animation is driven by repainting on a timer rather than every frame,
-        // so an idle map costs a handful of frames a second instead of sixty.
-        // A board taken off the map has no marker to beat, and the timer
-        // would only be waking an idle map for nothing.
+        // Heartbeat phase for the markers that are alive: the connected
+        // node's while the BLE link is up, and a remote node's while it was
+        // heard within the pulse window. The animation is driven by
+        // repainting on a timer rather than every frame, so an idle map
+        // costs a handful of frames a second instead of sixty - and nothing
+        // at all while no marker is beating.
         let beacon = self.beacon_on_map();
-        let beacon_pulse = (self.ble_connected && beacon.is_some()).then(|| {
+        let beat = (ui.input(|i| i.time).rem_euclid(PULSE_PERIOD) / PULSE_PERIOD) as f32;
+        let beacon_pulse = (self.ble_connected && beacon.is_some()).then_some(beat);
+        let any_remote_active = self.remotes.keys().any(|&addr| self.remote_active(addr));
+        if beacon_pulse.is_some() || any_remote_active {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs_f32(PULSE_FRAME));
-            (ui.input(|i| i.time).rem_euclid(PULSE_PERIOD) / PULSE_PERIOD) as f32
-        });
+        }
 
         // The arrow is eased toward the live heading rather than snapping to it:
         // outside heading-up the compass runs at a few Hz, so the raw readings
@@ -92,6 +99,7 @@ impl MyApp {
                 pos: node.last_pos(),
                 track: paths(self.config.lora.show_path, &node.track),
                 color: remote_color(addr),
+                pulse: self.remote_active(addr).then_some(beat),
             })
             .collect();
         // The user->target line goes to the tracked board (or the connected
@@ -105,11 +113,13 @@ impl MyApp {
         });
         let layer = GpsLayer {
             current: self.current,
-            track: paths(self.config.track.show_path, &self.track),
+            // Yours: the phone's track, or the node's while the node is
+            // where you are.
+            track: paths(self.config.track.show_path, self.your_track()),
             heading: arrow,
             beacon,
             beacon_track: match beacon {
-                Some(_) => paths(self.config.ble.show_path, &self.beacon_track),
+                Some(_) => paths(self.config.ble.show_path, self.board_track()),
                 None => Vec::new(),
             },
             beacon_pulse,
@@ -193,7 +203,14 @@ impl MyApp {
             } else {
                 egui::DragPanButtons::empty()
             });
-        child.add(map);
+        let response = child.add(map);
+        // A tap: a press released without a drag, as the tile widget sees
+        // it. Read here rather than off the raw pointer so a tap on a button
+        // over the map is that button's and not also a marker pick.
+        let tapped = response
+            .clicked()
+            .then(|| response.interact_pointer_pos())
+            .flatten();
 
         if let Some(rot) = rotation {
             let pivot = clip.center();
@@ -212,6 +229,7 @@ impl MyApp {
         // Painted last, so it is outside the rotation pass above and sits over
         // the markers.
         self.distance_label(ui, map_rect, rotation, clip);
+        tapped
     }
     /// Paint the beacon-distance label: the distance to the beacon, centered
     /// just above the midpoint of the user->beacon line, turning with the map.

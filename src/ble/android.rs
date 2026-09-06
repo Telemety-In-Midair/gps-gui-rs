@@ -463,6 +463,7 @@ fn connected(
     // link it has already asked to be rid of.
     inbox.check(report, target)?;
     report.send(BleEvent::Connected(true));
+    report.send(BleEvent::Address(address.to_string()));
     // The MTU is worth showing: it is what decides whether the longer
     // notifications (log lines, remote reports) arrive whole.
     report.status(match mtu {

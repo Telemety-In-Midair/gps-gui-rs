@@ -1,11 +1,11 @@
-//! The Bluetooth page: the BLE link to the board, the app-side settings that
-//! decide how it connects, and the board's own power and sleep settings.
+//! The Bluetooth page: the BLE link to a node, the app-side settings that
+//! decide how it connects, and the node's own power and sleep settings.
 //!
 //! Split from [`MyApp::settings_page`] by who owns each setting. The two
 //! groups here read alike but are not: the connection settings are the app's,
-//! saved to its TOML with the button beside them, while everything under
-//! "Board power and sleep" lives in the board's flash and is only ever
-//! reported by the board (see [`MyApp::board_power_ui`]).
+//! saved to its settings file with the button beside them, while everything
+//! under "Node power and sleep" lives in the node's flash and is only ever
+//! reported by the node (see [`MyApp::board_power_ui`]).
 
 use std::time::Duration;
 
@@ -14,16 +14,28 @@ use midair_proto::{ble, session};
 use crate::app::ui::text::bluetooth as text;
 use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{
-    button, check, content_page, feedback_label, heading, hint, row, section, text_field,
+    busy_dots, button, check, content_page, feedback_label, heading, hint, preset_text, row,
+    secs_presets, section, text_field,
 };
 use crate::app::{secs_text, BleIntent, MyApp};
 use crate::ble::ConfigWrite;
 
 /// How often the elapsed counts refresh, and how often a running scan's signal
 /// readings do. Both move by themselves; the scan is the faster of the two
-/// because a board answering is the thing being waited for.
+/// because a node answering is the thing being waited for.
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const SCAN_TICK: Duration = Duration::from_millis(500);
+
+/// The presets each number box offers. Every list is a spread over the
+/// range the node clamps to, so a preset is never a value the node will
+/// quietly change.
+const NOTIFY_MS: [u32; 5] = [250, 500, 1000, 2000, 5000];
+const WAKE_CHECK_S: [u32; 5] = [5, 30, 60, 120, 300];
+const ADV_WINDOW_S: [u32; 5] = [1, 5, 15, 30, 60];
+const BLE_ON_S: [u32; 4] = [5, 15, 30, 60];
+const BLE_OFF_S: [u32; 5] = [5, 30, 60, 120, 300];
+const IDLE_TIMEOUT_S: [u32; 5] = [60, 300, 600, 1800, 3600];
+const SLEEP_NOW_S: [u32; 4] = [5, 30, 60, 300];
 
 impl MyApp {
     pub(crate) fn bluetooth_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
@@ -32,8 +44,8 @@ impl MyApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 heading!(ui, "Bluetooth", text::INTRO);
 
-                // Which board first, then what to do about the link to it.
-                section!(ui, "Device");
+                // Which node first, then what to do about the link to it.
+                section!(ui, "Node");
                 gap(ui, Key::GapTight);
                 self.device_picker_ui(ui);
 
@@ -45,32 +57,33 @@ impl MyApp {
                 gap(ui, Key::GapTight);
                 self.connection_ui(ui);
 
-                section!(ui, sep "Board name", text::BOARD_NAME_INTRO);
-                gap(ui, Key::GapTight);
-                self.board_name_ui(ui);
-
-                section!(ui, sep "Board power and sleep", text::BOARD_INTRO);
+                section!(ui, sep "Node power and sleep", text::BOARD_INTRO);
                 gap(ui, Key::GapItem);
                 self.board_power_ui(ui);
+
+                // Last: the one thing here that is neither the link nor a
+                // power setting, and the least often changed.
+                section!(ui, sep "Node name", text::BOARD_NAME_INTRO);
+                gap(ui, Key::GapTight);
+                self.board_name_ui(ui);
             });
         });
     }
 
-    /// Pick which board to talk to. Only one is connected at a time, so this is
+    /// Pick which node to talk to. Only one is connected at a time, so this is
     /// a single-choice list rather than a set of toggles.
     ///
-    /// A board nobody has named advertises by its address, and every C3
-    /// beacon advertises the same name, so a raw scan of those is told apart
-    /// only by MAC. The nickname box on each row is what makes such a list
-    /// readable, and it is stored in the app's config file. A board named on
-    /// the board itself carries its own label, which is shown in the box's
-    /// place of honor since it is what every page calls it.
+    /// A node is told apart by its address; the name box on each row is the
+    /// app's own, kept in the settings file, and a node that carries a name
+    /// of its own overwrites it. The address-derived name an unnamed node
+    /// advertises under is not shown: it says nothing the address beside it
+    /// does not.
     fn device_picker_ui(&mut self, ui: &mut egui::Ui) {
         let scanning = self.ble_intent == BleIntent::Scanning;
         ui.horizontal_wrapped(|ui| {
             let scan = button!(
                 ui,
-                if scanning { "Stop scanning" } else { "Scan for boards" },
+                if scanning { "Stop scanning" } else { "Scan for nodes" },
                 hover: if scanning { text::SCAN_STOP_HOVER } else { text::SCAN_START_HOVER },
             );
             if scan.clicked() {
@@ -81,13 +94,16 @@ impl MyApp {
                 });
             }
             if scanning {
-                ui.spinner();
+                ui.colored_label(
+                    self.config.ui.busy,
+                    format!("{}{}", text::SCANNING, busy_dots(ui.ctx())),
+                );
             }
         });
         gap(ui, Key::GapTight);
 
         let rows = self.device_rows();
-        // Named boards are remembered, so an empty list means nothing has ever
+        // Named nodes are remembered, so an empty list means nothing has ever
         // been named and nothing is on the air right now.
         if rows.is_empty() {
             hint!(
@@ -102,7 +118,7 @@ impl MyApp {
 
         let any_selected = self.config.ble.mac.is_none();
         if ui
-            .radio(any_selected, "Any board")
+            .radio(any_selected, "Any node")
             .on_hover_text(text::ANY_BOARD_HOVER)
             .clicked()
             && !any_selected
@@ -116,29 +132,21 @@ impl MyApp {
                     self.select_device(Some(&device.mac));
                 }
                 // Committing on blur rather than per keystroke: an empty name
-                // forgets the board, and that must not happen mid-edit just
+                // forgets the node, and that must not happen mid-edit just
                 // because the box was cleared before retyping.
                 let name = self.name_edit(&device.mac);
-                if text_field(ui, name, "name this board", Key::BluetoothName).lost_focus() {
+                if text_field(ui, name, "name this node", Key::BluetoothName).lost_focus() {
                     self.commit_name(&device.mac);
                 }
-                // A name stored on the board is what every page calls it,
-                // over the box to its left, so it is drawn as a label rather
-                // than as a hint. An unnamed board's address name is shown
-                // grey: legible, but nobody chose it.
-                match (&device.own_name, &device.advertised) {
-                    (Some(own), _) => {
-                        ui.label(own.as_str());
-                    }
-                    (None, Some(advertised)) => {
-                        hint!(ui, advertised.as_str());
-                    }
-                    (None, None) => {}
+                // A name stored on the node is what every page calls it,
+                // over the box to its left, so it is drawn as a label.
+                if let Some(own) = &device.own_name {
+                    ui.label(own.as_str());
                 }
                 hint!(ui, device.mac.as_str());
                 match device.rssi {
                     // Only a running scan measures this, so its absence during
-                    // a scan is the useful signal: that board is not answering.
+                    // a scan is the useful signal: that node is not answering.
                     Some(rssi) => {
                         ui.colored_label(self.config.ui.ok, format!("{rssi} dBm"));
                     }
@@ -163,12 +171,10 @@ impl MyApp {
     ///
     /// Three buttons rather than a toggle because the three requests are
     /// genuinely different - one of them (Disconnect) is the only way to let
-    /// the board sleep, and that was impossible to express when connecting was
-    /// a checkbox the app re-applied on its own.
-    ///
-    /// Every one of them takes effect on the press. Connect stays live while
-    /// connected because pressing it then is a real request - start over from
-    /// a scan - and it is the way out of a link that is up but not working.
+    /// the node sleep. Every one of them takes effect on the press. Connect
+    /// stays live while connected because pressing it then is a real request
+    /// - start over from a scan - and it is the way out of a link that is up
+    /// but not working.
     fn ble_link_ui(&mut self, ui: &mut egui::Ui) {
         let connected = self.ble_connected;
         let idle = self.ble_intent == BleIntent::Idle;
@@ -196,9 +202,9 @@ impl MyApp {
         });
 
         gap(ui, Key::GapTight);
-        // Which board these buttons act on. With several boards around, the
+        // Which node these buttons act on. With several nodes around, the
         // link state means little without knowing whose it is.
-        ui.label(format!("Board: {}", self.selected_device_label()));
+        ui.label(format!("Node: {}", self.selected_device_label()));
         if connected {
             // A link that has gone quiet is not shown in the all-well color:
             // the text is doubting the connection, so the color must not vouch
@@ -212,14 +218,19 @@ impl MyApp {
         } else if idle {
             hint!(ui, self.ble_intent_text());
         } else {
-            ui.label(self.ble_intent_text());
+            // In progress: its own color, and dots that move so a count
+            // that is not changing still reads as alive.
+            ui.colored_label(
+                self.config.ui.busy,
+                format!("{}{}", self.ble_intent_text(), busy_dots(ui.ctx())),
+            );
         }
         // The worker's own commentary: scanning, connecting, why it retried.
         // Distinct from the line above, which is what was *asked* for.
         hint!(ui, "BLE: {}", self.ble_status);
 
         // The single most useful thing to know while debugging sleep: a
-        // connected board never sleeps, so a sleep interval that "does
+        // connected node never sleeps, so a sleep interval that "does
         // nothing" is usually just the app holding the link open.
         if let (true, Some(s)) = (connected, self.board_settings) {
             gap(ui, Key::GapHair);
@@ -237,10 +248,10 @@ impl MyApp {
         }
     }
 
-    /// The app's own connection settings, and the board's notify interval.
+    /// The app's own connection settings, and the node's notify interval.
     ///
-    /// The board names, the selected board and the auto-connect checkbox are
-    /// the app's settings, not the board's, so they need the same Save the
+    /// The node names, the selected node and the auto-connect checkbox are
+    /// the app's settings, not the node's, so they need the same Save the
     /// Settings page has rather than a trip back to it. Same file, same
     /// feedback line.
     fn connection_ui(&mut self, ui: &mut egui::Ui) {
@@ -251,34 +262,52 @@ impl MyApp {
             hover: text::AUTO_CONNECT_HOVER,
         );
         gap(ui, Key::GapTight);
-        if button!(ui, "Save to config file", hover: text::SAVE_HOVER).clicked() {
+        if button!(ui, "Save to settings file", hover: text::SAVE_HOVER).clicked() {
             self.save_config();
         }
         feedback_label(ui, self.config.ui, &self.config_feedback);
 
         gap(ui, Key::GapItem);
         let ready = self.ble_connected && !self.ble_ack_pending;
-        row(ui, "Notify interval (ms):", |ui| {
-            text_field(ui, &mut self.ble_interval_text, "", Key::BluetoothNumber);
+        let presets: Vec<(String, String)> = NOTIFY_MS
+            .iter()
+            .map(|ms| (ms.to_string(), format!("{ms} ms")))
+            .collect();
+        row(ui, "Notify interval:", |ui| {
+            preset_text(
+                ui,
+                "notify_interval",
+                &mut self.ble_interval_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
             if button!(ui, "Apply", enabled: ready).clicked() {
                 self.apply_notify_interval();
             }
         });
+        self.ack_line_ui(ui);
+    }
+
+    /// The last config write's answer, or that one is still on its way.
+    fn ack_line_ui(&self, ui: &mut egui::Ui) {
         if self.ble_ack.is_none() && self.ble_ack_pending {
-            ui.label(text::AWAITING_ACK);
+            ui.colored_label(
+                self.config.ui.busy,
+                format!("{}{}", text::AWAITING_ACK, busy_dots(ui.ctx())),
+            );
         } else {
             feedback_label(ui, self.config.ui, &self.ble_ack);
         }
     }
 
-    /// The name stored on the board.
+    /// The name stored on the node.
     ///
-    /// A section of its own rather than one of the power settings below: it
-    /// rides the same config characteristic and the same one-write-at-a-time
-    /// rule, but it is read off its own characteristic, so a board whose
-    /// settings blob is too new to decode can still be named. The line under
-    /// the box is the board's own report of what it is called, which is the
-    /// confirmation that matters - the ack only says a length was stored.
+    /// It rides the same config characteristic and the same one-write-at-a-time
+    /// rule as the power settings, but it is read off its own characteristic,
+    /// so a node whose settings blob is too new to decode can still be named.
+    /// The line under the box is the node's own report of what it is called,
+    /// which is the confirmation that matters - the ack only says a length
+    /// was stored.
     fn board_name_ui(&mut self, ui: &mut egui::Ui) {
         if !self.ble_connected {
             ui.label(text::BOARD_NEED_LINK);
@@ -290,7 +319,7 @@ impl MyApp {
             text_field(
                 ui,
                 &mut self.board_name_text,
-                "name this board",
+                "name this node",
                 Key::BluetoothName,
             )
             .on_hover_text(text::board_name_hover(ble::NAME_LABEL_MAX));
@@ -308,19 +337,18 @@ impl MyApp {
             }
         });
         ui.label(match (self.board_own_name(), &self.board_name) {
-            (Some(label), _) => format!("Board: called {label}."),
-            (None, Some(advertised)) => {
-                format!("Board: unnamed, advertising as {advertised}.")
-            }
+            (Some(label), _) => format!("Called {label}."),
+            (None, Some(advertised)) => format!("Unnamed, advertising as {advertised}."),
             (None, None) => text::BOARD_NO_NAME.to_string(),
         });
+        self.ack_line_ui(ui);
     }
 
-    /// The board's sleep switches and the wake-check interval.
+    /// The node's mode, its sleep switches and its intervals.
     ///
-    /// Every control reads the board's own settings blob rather than a local
-    /// copy: the board is the authority, and it changes these by itself
-    /// (clamping an interval). A control therefore only moves once the board
+    /// Every control reads the node's own settings blob rather than a local
+    /// copy: the node is the authority, and it changes these by itself
+    /// (clamping an interval). A control therefore only moves once the node
     /// reports that it moved.
     fn board_power_ui(&mut self, ui: &mut egui::Ui) {
         if !self.ble_connected {
@@ -333,18 +361,21 @@ impl MyApp {
             return;
         }
         let Some(s) = self.board_settings else {
-            ui.label(text::BOARD_READING);
+            ui.colored_label(
+                self.config.ui.busy,
+                format!("{}{}", text::BOARD_READING, busy_dots(ui.ctx())),
+            );
             return;
         };
 
-        // One write at a time: while an ack is outstanding the board has not
+        // One write at a time: while an ack is outstanding the node has not
         // yet said what it applied, and these controls show only what it has.
         let busy = self.ble_ack_pending;
 
         // The mode comes first because it decides which of the settings
-        // below the board even reads. Selection is drawn from the board's
+        // below the node even reads. Selection is drawn from the node's
         // reported mode rather than from the last button pressed, like
-        // every other control here - so a press that the board refuses, or
+        // every other control here - so a press that the node refuses, or
         // that has not landed yet, leaves the highlight where it was.
         ui.strong("Mode");
         hint!(ui, text::MODE_INTRO);
@@ -354,6 +385,7 @@ impl MyApp {
                 (ble::Mode::Stored, "Stored", text::MODE_STORED_HOVER),
                 (ble::Mode::Idle, "Idle", text::MODE_IDLE_HOVER),
                 (ble::Mode::Tracking, "Tracking", text::MODE_TRACKING_HOVER),
+                (ble::Mode::Listening, "Listening", text::MODE_LISTENING_HOVER),
             ] {
                 let resp = ui
                     .add_enabled_ui(!busy, |ui| ui.selectable_label(s.mode == mode, label))
@@ -370,6 +402,7 @@ impl MyApp {
             self.apply_mode(mode);
         }
         ui.label(text::mode_state(s.mode));
+        self.ack_line_ui(ui);
 
         gap(ui, Key::GapBlock);
         ui.add_enabled_ui(!busy, |ui| {
@@ -393,14 +426,22 @@ impl MyApp {
             }
         });
 
+        // Stored: the wake cadence and its window.
         gap(ui, Key::GapBlock);
         ui.strong("Wake check");
         hint!(
             ui,
             text::wake_check(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
         );
-        row(ui, "Every (s):", |ui| {
-            text_field(ui, &mut self.sleep_interval_text, "", Key::BluetoothNumber);
+        let presets = secs_presets(&WAKE_CHECK_S);
+        row(ui, "Every:", |ui| {
+            preset_text(
+                ui,
+                "wake_check",
+                &mut self.sleep_interval_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_sleep_interval(None);
             }
@@ -416,38 +457,112 @@ impl MyApp {
             }
         });
         ui.label(match s.sleep_interval_s {
-            0 => "Board: sleep disabled.".to_string(),
-            secs => format!("Board: waking every {}.", secs_text(secs)),
+            0 => "Node: sleep disabled.".to_string(),
+            secs => format!("Node: waking every {}.", secs_text(secs)),
         });
 
         gap(ui, Key::GapBlock);
         ui.strong("Advertising window");
         hint!(ui, text::adv_window(ble::ESP_ADV_MIN_S, ble::ESP_ADV_MAX_S));
-        hint!(ui, text::adv_window_note(session::LINGER_S as u32));
-        row(ui, "Window (s):", |ui| {
-            text_field(ui, &mut self.adv_window_text, "", Key::BluetoothNumber);
+        hint!(ui, small text::adv_window_note(session::LINGER_S as u32));
+        let presets = secs_presets(&ADV_WINDOW_S);
+        row(ui, "Window:", |ui| {
+            preset_text(
+                ui,
+                "adv_window",
+                &mut self.adv_window_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_adv_window();
             }
         });
         // No Disable here, unlike the wake check: a zero-length window would
-        // leave a sleeping board unreachable by anything short of a physical
-        // reset, so the board clamps 0 up to the floor rather than storing it.
+        // leave a sleeping node unreachable by anything short of a physical
+        // reset, so the node clamps 0 up to the floor rather than storing it.
         ui.label(format!(
-            "Board: advertising {} per wake.",
+            "Node: advertising {} per wake check.",
             secs_text(s.adv_window_s)
+        ));
+
+        // Idle: how long it lasts, if it ends at all.
+        gap(ui, Key::GapBlock);
+        ui.strong("Idle timeout");
+        hint!(
+            ui,
+            text::idle_timeout(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S)
+        );
+        let presets = secs_presets(&IDLE_TIMEOUT_S);
+        row(ui, "Idle for:", |ui| {
+            preset_text(
+                ui,
+                "idle_timeout",
+                &mut self.idle_timeout_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
+            if button!(ui, "Apply", enabled: !busy).clicked() {
+                self.apply_idle_timeout(None);
+            }
+            // Zero is the timeout off, which is the firmware default and the
+            // safe direction: a node that stays idle can still be reached.
+            let can_disable = !busy && s.idle_timeout_s > 0;
+            let disable = button!(
+                ui,
+                "Disable",
+                enabled: can_disable,
+                hover: text::IDLE_DISABLE_HOVER,
+            );
+            if disable.clicked() {
+                self.apply_idle_timeout(Some(0));
+            }
+        });
+        ui.label(match (s.idle_timeout_s, s.sleep_interval_s) {
+            (0, _) => "Node: stays idle until told otherwise.".to_string(),
+            (_, 0) => "Node: idle timeout set, but with no wake check it stays reachable.".to_string(),
+            (secs, _) => format!("Node: idle {} before it stores itself.", secs_text(secs)),
+        });
+
+        // Tracking: the modem duty cycle, both halves.
+        gap(ui, Key::GapBlock);
+        ui.strong("BLE on period");
+        hint!(ui, text::ble_on(ble::BLE_ON_MIN_S, ble::BLE_ON_MAX_S));
+        let presets = secs_presets(&BLE_ON_S);
+        row(ui, "Up for:", |ui| {
+            preset_text(
+                ui,
+                "ble_on",
+                &mut self.ble_on_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
+            if button!(ui, "Apply", enabled: !busy).clicked() {
+                self.apply_ble_on();
+            }
+        });
+        ui.label(format!(
+            "Node: BLE up {} between off periods.",
+            secs_text(s.ble_on_s)
         ));
 
         gap(ui, Key::GapBlock);
         ui.strong("BLE off period");
         hint!(ui, text::ble_off(ble::BLE_OFF_MIN_S, ble::BLE_OFF_MAX_S));
-        row(ui, "Down for (s):", |ui| {
-            text_field(ui, &mut self.ble_off_text, "", Key::BluetoothNumber);
+        let presets = secs_presets(&BLE_OFF_S);
+        row(ui, "Down for:", |ui| {
+            preset_text(
+                ui,
+                "ble_off",
+                &mut self.ble_off_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
             if button!(ui, "Apply", enabled: !busy).clicked() {
                 self.apply_ble_off(None);
             }
-            // A Disable here, unlike the advertising window: zero is the
-            // firmware default and the safe direction - it makes the board
+            // A Disable here, unlike the on period: zero is the firmware
+            // default and the safe direction - it makes the node
             // continuously reachable rather than unreachable.
             let can_disable = !busy && s.ble_off_s > 0;
             let disable = button!(
@@ -461,43 +576,15 @@ impl MyApp {
             }
         });
         ui.label(match s.ble_off_s {
-            0 => "Board: BLE always up.".to_string(),
+            0 => "Node: BLE always up.".to_string(),
             secs => format!(
-                "Board: BLE down {} between windows, still beaconing.",
+                "Node: BLE down {} between on periods, still beaconing.",
                 secs_text(secs)
             ),
         });
 
-        gap(ui, Key::GapBlock);
-        ui.strong("Idle timeout");
-        hint!(
-            ui,
-            text::idle_timeout(ble::IDLE_TIMEOUT_MIN_S, ble::IDLE_TIMEOUT_MAX_S)
-        );
-        row(ui, "Idle for (s):", |ui| {
-            text_field(ui, &mut self.idle_timeout_text, "", Key::BluetoothNumber);
-            if button!(ui, "Apply", enabled: !busy).clicked() {
-                self.apply_idle_timeout();
-            }
-        });
-        // No Disable, unlike the wake check and the off period: a board
-        // leaves idle by deep-sleeping, so "stay idle forever" is a
-        // wake-check interval of 0 rather than a timeout of 0. The board
-        // clamps a zero up to its floor for the same reason the advertising
-        // window does.
-        ui.label(match s.sleep_interval_s {
-            0 => format!(
-                "Board: idle for {}, but with no wake check set it stays reachable instead.",
-                secs_text(s.idle_timeout_s)
-            ),
-            _ => format!(
-                "Board: idle {} before it stores itself.",
-                secs_text(s.idle_timeout_s)
-            ),
-        });
-
         // Separated from the settings above because it is not one. Every
-        // other control on this page changes what the board will do; this
+        // other control on this page changes what the node will do; this
         // one makes it do something, once, and then the link goes away.
         gap(ui, Key::GapBlock);
         ui.strong("Sleep now");
@@ -506,21 +593,29 @@ impl MyApp {
             text::sleep_now(ble::ESP_SLEEP_MIN_S, ble::ESP_SLEEP_MAX_S)
         );
         hint!(ui, small text::SLEEP_NOW_MODE_NOTE);
-        row(ui, "For (s):", |ui| {
-            text_field(ui, &mut self.sleep_now_text, "", Key::BluetoothNumber)
-                .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
+        let mut presets = vec![(String::new(), "wake check".to_string())];
+        presets.extend(secs_presets(&SLEEP_NOW_S));
+        row(ui, "For:", |ui| {
+            preset_text(
+                ui,
+                "sleep_now",
+                &mut self.sleep_now_text,
+                &presets,
+                Key::BluetoothNumber,
+            );
             if button!(ui, "Sleep now", enabled: !busy, hover: text::SLEEP_NOW_HOVER).clicked() {
                 self.apply_sleep_now();
             }
         });
         // What a blank box will actually do, worked out with the firmware's
-        // own resolver rather than restated here - the board is the
+        // own resolver rather than restated here - the node is the
         // authority on this number as much as on the settings above.
         if self.sleep_now_text.trim().is_empty() {
             ui.label(format!(
                 "Blank: sleeps for {}.",
                 secs_text(ble::resolve_sleep_now(0, s.sleep_interval_s))
-            ));
+            ))
+            .on_hover_text(text::SLEEP_NOW_BLANK_HOVER);
         }
     }
 }

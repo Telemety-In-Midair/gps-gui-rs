@@ -1,29 +1,33 @@
-//! The Settings page: the app's own TOML settings - what it draws, what it
-//! records, and the config file itself.
+//! The Settings page: the app's own settings - what it draws, what it
+//! records, where its position comes from, and the settings file itself.
 //!
-//! The beacon and the board's own settings are a separate page
-//! ([`MyApp::bluetooth_page`]); the split is by who owns the setting, since only
-//! the ones here are the app's to keep.
+//! The node's own settings are a separate page ([`MyApp::bluetooth_page`]);
+//! the split is by who owns the setting, since only the ones here are the
+//! app's to keep.
 //!
 //! Every widget is bound straight to the live [`crate::config::AppConfig`], so
 //! a change takes effect on the map immediately; Save is what makes it outlast
-//! the session.
+//! the session. Most numbers are picked from a short list of presets, with a
+//! custom entry for anything else.
 
 use crate::app::ui::adjust::Adjust;
 use crate::app::ui::text::settings as text;
 use crate::app::ui::theme::{gap, probe, px, Key};
 use crate::app::ui::widgets::{
-    button, check, content_page, drag, feedback_label, grid, heading, hint, row, section,
-    submitted, text_field,
+    button, check, content_page, drag, feedback_label, grid, heading, hint, preset_pick, row,
+    section, submitted, text_field,
 };
 use crate::app::{MyApp, Page, RegionSelect};
 use crate::config::{
-    DistanceUnits, ThemeChoice, COMPASS_HZ_MAX, COMPASS_HZ_MIN, STATUS_CYCLE_MAX,
-    STATUS_CYCLE_MIN, TEXT_SCALE_MAX, TEXT_SCALE_MIN,
+    DistanceUnits, ThemeChoice, COMPASS_HZ_MAX, COMPASS_HZ_MIN, RSSI_DBM_MAX, RSSI_DBM_MIN,
+    STATUS_CYCLE_MAX, STATUS_CYCLE_MIN, TEXT_SCALE_MAX, TEXT_SCALE_MIN,
 };
 
 /// The step the text-size slider moves in.
 const TEXT_SCALE_STEP: f64 = 0.05;
+
+/// The step the bar-opacity slider moves in.
+const OPACITY_STEP: f64 = 0.05;
 
 /// Range and drag speed for the overlay sizes, in points. The loader rejects a
 /// size of 0 or less, so the drag stops short of one rather than writing a
@@ -35,6 +39,46 @@ const SIZE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=64.0;
 /// whole second per point of travel: the useful range is a handful of seconds,
 /// and the loader's own range is what stops the drag at either end.
 const CYCLE_SPEED: f64 = 0.05;
+
+/// The presets each number offers, each a spread over the range the loader
+/// accepts.
+const MARKER_SIZES: [f32; 4] = [6.0, 8.0, 12.0, 16.0];
+const BEACON_SIZES: [f32; 4] = [4.0, 6.0, 9.0, 12.0];
+const LINE_WIDTHS: [f32; 4] = [2.0, 3.0, 5.0, 8.0];
+const TEXT_SIZES: [f32; 4] = [12.0, 14.0, 18.0, 24.0];
+const PULSE_SECS: [f32; 5] = [0.0, 5.0, 10.0, 30.0, 60.0];
+const ARROW_HZ: [f32; 5] = [1.0, 2.0, 4.0, 8.0, 15.0];
+const CYCLE_SECS: [f32; 4] = [2.0, 5.0, 10.0, 30.0];
+const RSSI_TOPS: [i16; 4] = [-10, -20, -30, -40];
+const RSSI_BOTTOMS: [i16; 4] = [-100, -110, -120, -130];
+const MIN_DISTANCES: [f64; 6] = [0.0, 1.0, 3.0, 5.0, 10.0, 25.0];
+
+/// A number without trailing zeros, for a preset label: "3", "0.5".
+fn num(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// A preset dropdown over an `f32` setting, the custom entry a drag over
+/// `range`. `unit` follows each preset's number.
+fn f32_pick(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut f32,
+    presets: &[f32],
+    unit: &str,
+    speed: f64,
+    range: std::ops::RangeInclusive<f32>,
+) {
+    let labels: Vec<(f32, String)> = presets
+        .iter()
+        .map(|&p| (p, format!("{}{unit}", num(f64::from(p)))))
+        .collect();
+    let labelled: Vec<(f32, &str)> = labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
+    preset_pick(ui, id, value, &labelled, |ui, v| {
+        drag(ui, v, speed, range);
+    });
+}
 
 /// A color that may be left to the light/dark theme: a checkbox that turns the
 /// override on and off, and a picker beside it, enabled only while it is on.
@@ -67,20 +111,22 @@ impl MyApp {
         let safe = self.safe_area(ctx);
         content_page(ctx, "settings", screen, safe, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                heading!(ui, "App settings", text::INTRO);
+                heading!(ui, "Settings", text::INTRO);
                 gap(ui, Key::GapBlock);
 
-                ui.label("Config file (TOML):");
+                ui.label("Settings file (TOML):");
                 ui.horizontal_wrapped(|ui| {
                     let resp = text_field(
                         ui,
                         &mut self.config_path,
-                        "/path/to/config.toml",
+                        "/path/to/app-settings.toml",
                         Key::SettingsConfigPath,
                     );
                     if ui.button("Load").clicked() || submitted(ui, &resp) {
                         self.load_config();
                     }
+                    let path = self.config_path.clone();
+                    self.copy_button(ui, &path);
                 });
                 gap(ui, Key::GapItem);
                 ui.horizontal_wrapped(|ui| {
@@ -94,17 +140,46 @@ impl MyApp {
                 gap(ui, Key::GapItem);
                 feedback_label(ui, self.config.ui, &self.config_feedback);
 
+                self.phone_ui(ui);
                 self.text_size_ui(ui);
                 self.look_ui(ui);
                 self.theme_ui(ui);
                 self.colors_ui(ui);
                 self.overlays_ui(ui);
+                self.map_bars_ui(ui);
                 self.compass_ui(ui);
                 self.status_bar_ui(ui);
                 self.track_ui(ui);
                 self.offline_ui(ui);
             });
         });
+    }
+
+    /// This device: its name, and which receiver the current position comes
+    /// from - its own, the connected node's, or both with the node's
+    /// winning.
+    fn phone_ui(&mut self, ui: &mut egui::Ui) {
+        section!(ui, "Phone", text::PHONE);
+        gap(ui, Key::GapTight);
+        row(ui, "Name:", |ui| {
+            let resp = text_field(ui, &mut self.config.phone.name, "Phone", Key::BluetoothName);
+            // A blank name is no name, as the loader reads it.
+            if resp.lost_focus() && self.config.phone.name.trim().is_empty() {
+                self.config.phone.name = crate::config::DEFAULT_PHONE_NAME.to_string();
+            }
+        });
+        check!(
+            ui,
+            self.config.phone.location,
+            "Use the phone's receiver",
+            hover: text::PHONE_LOCATION_HOVER,
+        );
+        check!(
+            ui,
+            self.config.ble.location,
+            "Use the connected node's receiver",
+            hover: text::NODE_LOCATION_HOVER,
+        );
     }
 
     fn text_size_ui(&mut self, ui: &mut egui::Ui) {
@@ -152,6 +227,8 @@ impl MyApp {
             if ui.button("Load").clicked() || submitted(ui, &resp) {
                 self.load_look();
             }
+            let path = self.look_path.clone();
+            self.copy_button(ui, &path);
         });
         gap(ui, Key::GapItem);
         ui.horizontal_wrapped(|ui| {
@@ -195,8 +272,8 @@ impl MyApp {
     fn colors_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Marker colors");
         grid!(ui, "cfg_colors", |ui| {
-            "track" => ui.color_edit_button_srgba(&mut self.config.colors.track),
-            "beacon" => ui.color_edit_button_srgba(&mut self.config.colors.fixed),
+            "you" => ui.color_edit_button_srgba(&mut self.config.colors.track),
+            "connected node" => ui.color_edit_button_srgba(&mut self.config.colors.fixed),
             "marker outline" => ui.color_edit_button_srgba(&mut self.config.colors.outline),
         });
 
@@ -204,6 +281,7 @@ impl MyApp {
         grid!(ui, "cfg_ui_colors", |ui| {
             "ok" => ui.color_edit_button_srgba(&mut self.config.ui.ok),
             "error" => ui.color_edit_button_srgba(&mut self.config.ui.error),
+            "busy" => ui.color_edit_button_srgba(&mut self.config.ui.busy),
             "no-target pulse" => ui.color_edit_button_srgba(&mut self.config.ui.pulse),
         });
 
@@ -226,53 +304,71 @@ impl MyApp {
         section!(ui, "Overlay sizes (points)");
         let s = &mut self.config.sizes;
         grid!(ui, "cfg_sizes", |ui| {
-            "marker" => drag(ui, &mut s.marker, SIZE_SPEED, SIZE_RANGE),
-            "beacon" => drag(ui, &mut s.beacon, SIZE_SPEED, SIZE_RANGE),
-            "track" => drag(ui, &mut s.track, SIZE_SPEED, SIZE_RANGE),
-            "distance line" => drag(ui, &mut s.distance_line, SIZE_SPEED, SIZE_RANGE),
-            "distance text" => drag(ui, &mut s.distance_text, SIZE_SPEED, SIZE_RANGE),
+            "you" => f32_pick(ui, "size_marker", &mut s.marker, &MARKER_SIZES, "", SIZE_SPEED, SIZE_RANGE),
+            "nodes" => f32_pick(ui, "size_beacon", &mut s.beacon, &BEACON_SIZES, "", SIZE_SPEED, SIZE_RANGE),
+            "track" => f32_pick(ui, "size_track", &mut s.track, &LINE_WIDTHS, "", SIZE_SPEED, SIZE_RANGE),
+            "distance line" => f32_pick(ui, "size_dline", &mut s.distance_line, &LINE_WIDTHS, "", SIZE_SPEED, SIZE_RANGE),
+            "distance text" => f32_pick(ui, "size_dtext", &mut s.distance_text, &TEXT_SIZES, "", SIZE_SPEED, SIZE_RANGE),
         });
 
         section!(ui, "Map overlays");
-        // "Central" is what the Points page calls this device's own fixes, so
-        // the two pages name the same track the same way.
         check!(
             ui,
             self.config.track.show_path,
-            "Show central path on map",
+            "Show your path",
             hover: text::CENTRAL_PATH_HOVER,
         );
         check!(
             ui,
             self.config.ble.show_on_map,
-            "Show the connected board on map",
+            "Show the connected node",
             hover: text::BOARD_ON_MAP_HOVER,
         );
         // The path is part of what the switch above takes off the map, so
-        // its own box has nothing to say while the board is hidden.
+        // its own box has nothing to say while the node is hidden.
         let board_drawn = self.config.ble.show_on_map;
         ui.add_enabled_ui(board_drawn, |ui| {
-            check!(ui, self.config.ble.show_path, "Show beacon path on map");
+            check!(ui, self.config.ble.show_path, "Show the connected node's path");
         });
         check!(
             ui,
             self.config.lora.show_path,
-            "Show remote node paths on map",
+            "Show remote node paths",
             hover: text::REMOTE_PATHS_HOVER,
         );
-        gap(ui, Key::GapHair);
-        hint!(ui, text::PATHS_NOTE);
+        row(ui, "Remote node pulse:", |ui| {
+            let labels: Vec<(f32, String)> = PULSE_SECS
+                .iter()
+                .map(|&p| {
+                    (
+                        p,
+                        if p == 0.0 {
+                            "never".to_string()
+                        } else {
+                            format!("{} s", num(f64::from(p)))
+                        },
+                    )
+                })
+                .collect();
+            let labelled: Vec<(f32, &str)> =
+                labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
+            preset_pick(ui, "pulse_secs", &mut self.config.lora.pulse_secs, &labelled, |ui, v| {
+                drag(ui, v, 0.1, 0.0..=3600.0);
+            });
+        })
+        .response
+        .on_hover_text(text::PULSE_HOVER);
 
         gap(ui, Key::GapHair);
         check!(
             ui,
             self.config.distance.show,
-            "Show distance on the line to the beacon"
+            "Show the distance on the line to the node"
         );
         check!(
             ui,
             self.config.distance.dotted,
-            "Draw distance line dotted rather than solid"
+            "Draw the distance line dotted"
         );
         row(ui, "Units:", |ui| {
             for (units, label) in [
@@ -284,6 +380,29 @@ impl MyApp {
         });
     }
 
+    /// The two bars over the map: how see-through they are, and the key
+    /// under the top one.
+    fn map_bars_ui(&mut self, ui: &mut egui::Ui) {
+        section!(ui, "Map bars", text::MAP_BARS);
+        gap(ui, Key::GapTight);
+        row(ui, "Opacity:", |ui| {
+            ui.spacing_mut().slider_width = px(ui.ctx(), Key::SettingsSlider);
+            let slider = ui.add(
+                egui::Slider::new(&mut self.config.map.bar_opacity, 0.0..=1.0)
+                    .step_by(OPACITY_STEP)
+                    .fixed_decimals(2),
+            );
+            probe(ui.ctx(), slider.rect, "Slider", &[Key::SettingsSlider]);
+            slider.on_hover_text(text::BAR_OPACITY_HOVER);
+        });
+        check!(
+            ui,
+            self.config.map.show_key,
+            "Show the color key",
+            hover: text::KEY_HOVER,
+        );
+    }
+
     fn compass_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Compass", text::COMPASS);
         check!(
@@ -292,47 +411,92 @@ impl MyApp {
             "Point the marker arrow with the compass"
         );
         let on = self.config.compass.marker_arrow;
-        row(ui, "Compass rate for the arrow (Hz):", |ui| {
+        row(ui, "Rate:", |ui| {
             ui.add_enabled_ui(on, |ui| {
-                drag(
+                f32_pick(
                     ui,
+                    "arrow_hz",
                     &mut self.config.compass.arrow_hz,
+                    &ARROW_HZ,
+                    " Hz",
                     0.1,
                     COMPASS_HZ_MIN..=COMPASS_HZ_MAX,
-                )
-                .on_hover_text(text::ARROW_HZ_HOVER);
+                );
             });
-        });
+        })
+        .response
+        .on_hover_text(text::ARROW_HZ_HOVER);
     }
 
-    /// The map's bottom status bar: whether it is drawn, and how long each
-    /// node holds it.
+    /// The map's bottom status bar: whether it is drawn, how long each node
+    /// holds it, and the span its bars are drawn against.
     fn status_bar_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Map status bar", text::STATUS_BAR);
         check!(
             ui,
             self.config.status_bar.show,
-            "Show the status bar at the bottom of the map",
+            "Show the status bar",
             hover: text::STATUS_BAR_SHOW_HOVER,
         );
         let on = self.config.status_bar.show;
-        row(ui, "Seconds per node:", |ui| {
-            ui.add_enabled_ui(on, |ui| {
-                drag(
+        ui.add_enabled_ui(on, |ui| {
+            row(ui, "Seconds per node:", |ui| {
+                f32_pick(
                     ui,
+                    "cycle_secs",
                     &mut self.config.status_bar.cycle_secs,
+                    &CYCLE_SECS,
+                    " s",
                     CYCLE_SPEED,
                     STATUS_CYCLE_MIN..=STATUS_CYCLE_MAX,
-                )
-                .on_hover_text(text::STATUS_CYCLE_HOVER);
+                );
+            })
+            .response
+            .on_hover_text(text::STATUS_CYCLE_HOVER);
+            gap(ui, Key::GapHair);
+            hint!(ui, text::RSSI_RANGE);
+            let bar = &mut self.config.status_bar;
+            grid!(ui, "cfg_rssi", |ui| {
+                "top" => {
+                    let labels: Vec<(i16, String)> =
+                        RSSI_TOPS.iter().map(|&v| (v, format!("{v} dBm"))).collect();
+                    let labelled: Vec<(i16, &str)> =
+                        labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
+                    preset_pick(ui, "rssi_top", &mut bar.rssi_top_dbm, &labelled, |ui, v| {
+                        drag(ui, v, 1.0, RSSI_DBM_MIN..=RSSI_DBM_MAX);
+                    })
+                },
+                "bottom" => {
+                    let labels: Vec<(i16, String)> =
+                        RSSI_BOTTOMS.iter().map(|&v| (v, format!("{v} dBm"))).collect();
+                    let labelled: Vec<(i16, &str)> =
+                        labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
+                    preset_pick(ui, "rssi_bottom", &mut bar.rssi_bottom_dbm, &labelled, |ui, v| {
+                        drag(ui, v, 1.0, RSSI_DBM_MIN..=RSSI_DBM_MAX);
+                    })
+                },
             });
         });
     }
 
     fn track_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Track recording");
-        row(ui, "Minimum move between points (m):", |ui| {
-            drag(ui, &mut self.config.track.min_distance, 0.1, 0.0..=1000.0);
+        row(ui, "Minimum move between points:", |ui| {
+            let labels: Vec<(f64, String)> = MIN_DISTANCES
+                .iter()
+                .map(|&v| (v, format!("{} m", num(v))))
+                .collect();
+            let labelled: Vec<(f64, &str)> =
+                labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
+            preset_pick(
+                ui,
+                "min_distance",
+                &mut self.config.track.min_distance,
+                &labelled,
+                |ui, v| {
+                    drag(ui, v, 0.1, 0.0..=1000.0);
+                },
+            );
         });
         gap(ui, Key::GapItem);
         // The map bar's old Clear button is a path toggle now, and discarding

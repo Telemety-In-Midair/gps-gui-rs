@@ -1,5 +1,8 @@
 pub mod app;
 pub mod ble;
+// Putting text on the platform clipboard. Cross-platform type; the Android
+// JNI path is the only implementation, desktop going through egui itself.
+pub mod clipboard;
 // The handle type is cross-platform (the app holds an `Option` of it on every
 // target); only the sensor thread behind it is Android-only.
 pub mod compass;
@@ -77,7 +80,9 @@ fn android_main(android_app: egui_winit::winit::platform::android::activity::And
         "gps-gui-rs",
         options,
         Box::new(move |cc| {
-            let gps_rx = gps::spawn_android_location(cc.egui_ctx.clone(), vm_ptr, activity_ptr);
+            // Starts with the receiver off; the app raises its flag only
+            // while `[phone] location` says so.
+            let gps = gps::spawn_android_location(cc.egui_ctx.clone(), vm_ptr, activity_ptr);
             // Starts with the sensor off; the app powers it up only for
             // heading-up (see `MyApp::sync_compass_power`).
             let compass = Some(compass::spawn(cc.egui_ctx.clone()));
@@ -87,14 +92,18 @@ fn android_main(android_app: egui_winit::winit::platform::android::activity::And
             // The private data dir the log is written to is unreachable from
             // the phone itself, so exporting goes through MediaStore.
             let export = Some(export::downloads_saver(vm_ptr, activity_ptr));
+            // egui's own clipboard is desktop-only, so the phone gets one
+            // through the framework.
+            let copier = Some(clipboard::android_copier(vm_ptr, activity_ptr));
             Ok(Box::new(app::MyApp::new(
                 cc.egui_ctx.clone(),
-                Some(gps_rx),
+                Some(gps),
                 cache_dir,
                 compass,
                 insets,
                 ble,
                 export,
+                copier,
             )))
         }),
     );

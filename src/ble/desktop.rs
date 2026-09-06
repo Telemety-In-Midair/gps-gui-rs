@@ -373,6 +373,7 @@ async fn connected(
     // link it has already asked to be rid of.
     inbox.check(report, target)?;
     report.send(BleEvent::Connected(true));
+    report.send(BleEvent::Address(addr.to_string()));
     report.status(format!("connected to {addr}"));
 
     // Populate the board controls from the board itself rather than assuming

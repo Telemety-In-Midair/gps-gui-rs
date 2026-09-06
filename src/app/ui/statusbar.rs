@@ -15,19 +15,38 @@ use std::time::{Duration, SystemTime};
 use crate::app::ui::text::statusbar as text;
 use crate::app::ui::theme::{bar_margin, em, probe, px, Key};
 use crate::app::{MyApp, NodeStatus, RssiSample, RSSI_HISTORY};
-use crate::config::{remote_color, STATUS_CYCLE_MIN};
+use crate::config::{remote_color, RSSI_SPAN_MIN, STATUS_CYCLE_MIN};
 use crate::points::age_text;
 
-/// The dBm range the bars are drawn against.
+/// The dBm range the bars are drawn against: full at `top`, empty at
+/// `bottom`.
 ///
 /// Fixed rather than autoscaled over the ten samples. A bar's height has to
 /// mean the same thing from one frame to the next for a glance at it to be
 /// worth anything, and an autoscale turns a few dB of noise on a steady link
-/// into a full-height swing. The ends are the usable span of a LoRa receiver:
-/// below the floor is under any sensitivity worth plotting, above the ceiling
-/// is a node in the same room.
-const RSSI_FLOOR_DBM: f32 = -130.0;
-const RSSI_CEIL_DBM: f32 = -30.0;
+/// into a full-height swing. The ends are `[status_bar]`'s, defaulting to
+/// the usable span of a LoRa receiver: below the floor is under any
+/// sensitivity worth plotting, above the ceiling is a node in the same room.
+///
+/// Heights are linear in dBm, which is the log scale of received power:
+/// each equal step up a bar is the same ratio of power, so a bar half full
+/// is not half the signal but a hundred-thousandth of it, which is how a
+/// radio link is read.
+#[derive(Clone, Copy)]
+struct RssiRange {
+    top: f32,
+    bottom: f32,
+}
+
+impl RssiRange {
+    /// Where a reading lands, 0 at the bottom to 1 at the top. The loader
+    /// holds the pair apart, but the bar is drawn from the live config,
+    /// which a half-dragged control can carry through each other.
+    fn frac(self, dbm: f32) -> f32 {
+        let span = (self.top - self.bottom).max(f32::from(RSSI_SPAN_MIN));
+        ((dbm - self.bottom) / span).clamp(0.0, 1.0)
+    }
+}
 
 /// What shapes the graph, for the adjuster.
 const GRAPH_KEYS: [Key; 4] = [
@@ -70,7 +89,14 @@ fn cycle_slot(now: f64, dwell: f32, count: usize) -> (usize, Option<f32>) {
 /// `min` is the shortest a bar is drawn as a ratio of the graph height, so a
 /// reception at the very floor still gets a sliver and a barely-heard node
 /// reads as one that was heard rather than as an empty slot.
-fn rssi_graph(ui: &mut egui::Ui, size: egui::Vec2, samples: &[RssiSample], gap: f32, min: f32) {
+fn rssi_graph(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    samples: &[RssiSample],
+    range: RssiRange,
+    gap: f32,
+    min: f32,
+) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     probe(ui.ctx(), rect, "Signal graph", &GRAPH_KEYS);
     let visuals = ui.visuals();
@@ -84,9 +110,8 @@ fn rssi_graph(ui: &mut egui::Ui, size: egui::Vec2, samples: &[RssiSample], gap: 
     );
     let slot = rect.width() / RSSI_HISTORY as f32;
     let gap = slot * gap;
-    let span = RSSI_CEIL_DBM - RSSI_FLOOR_DBM;
     for (i, sample) in samples.iter().take(RSSI_HISTORY).enumerate() {
-        let frac = ((f32::from(sample.dbm) - RSSI_FLOOR_DBM) / span).clamp(0.0, 1.0);
+        let frac = range.frac(f32::from(sample.dbm));
         let height = (rect.height() * frac).max(rect.height() * min);
         let left = rect.left() + slot * i as f32 + gap / 2.0;
         let bar = egui::Rect::from_min_max(
@@ -112,6 +137,7 @@ impl MyApp {
         }
         let bottom = self.bottom_inset(ctx);
         let (margin_x, margin_y) = bar_margin(ctx);
+        let fill = self.bar_fill(ctx);
         let area = egui::Area::new(egui::Id::new("map_status_bar"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(screen.left(), screen.bottom()))
@@ -120,7 +146,7 @@ impl MyApp {
             .constrain(false)
             .show(ctx, |ui| {
                 egui::Frame::NONE
-                    .fill(ui.visuals().panel_fill)
+                    .fill(fill)
                     .inner_margin(egui::Margin {
                         left: margin_x,
                         right: margin_x,
@@ -155,6 +181,10 @@ impl MyApp {
             nodes.len(),
         );
 
+        let range = RssiRange {
+            top: f32::from(self.config.status_bar.rssi_top_dbm),
+            bottom: f32::from(self.config.status_bar.rssi_bottom_dbm),
+        };
         ui.horizontal_wrapped(|ui| {
             let ctx = ui.ctx().clone();
             let width = px(&ctx, Key::StatusGraphWidth).max(em);
@@ -163,6 +193,7 @@ impl MyApp {
                 ui,
                 egui::vec2(width, height),
                 &samples,
+                range,
                 px(&ctx, Key::StatusBarGap),
                 px(&ctx, Key::StatusBarMin),
             );
@@ -232,6 +263,26 @@ mod tests {
         let (slot, remaining) = cycle_slot(6.0, 5.0, 2);
         assert_eq!(slot, 1);
         assert!((remaining.unwrap() - 4.0).abs() < 1e-3);
+    }
+
+    /// A bar's height is linear in dBm between the two ends, clamped at
+    /// both, and a pair dragged together still draws.
+    #[test]
+    fn a_bar_is_linear_in_dbm_between_its_ends() {
+        let range = RssiRange {
+            top: -20.0,
+            bottom: -120.0,
+        };
+        assert_eq!(range.frac(-120.0), 0.0);
+        assert_eq!(range.frac(-20.0), 1.0);
+        assert!((range.frac(-70.0) - 0.5).abs() < 1e-6);
+        assert_eq!(range.frac(-130.0), 0.0);
+        assert_eq!(range.frac(0.0), 1.0);
+        let collapsed = RssiRange {
+            top: -50.0,
+            bottom: -50.0,
+        };
+        assert!(collapsed.frac(-50.0).is_finite());
     }
 
     #[test]

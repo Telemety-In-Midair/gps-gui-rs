@@ -1,5 +1,6 @@
-//! The interactive map page: the floating controls bar, the marker info
-//! popups, and the offline region-download selection and progress.
+//! The interactive map page: the folding controls bar and the tab that
+//! folds it, the zoom column and the color key that go with it, the marker
+//! info popups, and the offline region-download selection and progress.
 //!
 //! The map picture itself is painted in [`crate::app::ui::mapdraw`] and the
 //! bottom status bar in [`crate::app::ui::statusbar`]; what is declared here
@@ -15,10 +16,11 @@ use crate::app::ui::icons;
 use crate::app::ui::mapdraw::{default_position, rotate_pos};
 use crate::app::ui::text::map as text;
 use crate::app::ui::theme::{
-    bar_margin, corner_margin, gap, icon_size, icon_size_for_row, probe, px, Key,
+    bar_margin, corner_margin, em, gap, icon_size, icon_size_for_row, probe, px, Key,
 };
 use crate::app::ui::widgets::{button, floating, icon_button, icon_button_pulse};
 use crate::app::{ease_heading, ping_reason, MarkerKind, MyApp, RegionSelect, ROTATE_TAU};
+use crate::config::remote_color;
 use crate::offline;
 use crate::points::age_text;
 use crate::tiles::MapLayer;
@@ -43,8 +45,8 @@ const TOOLBAR_KEYS: [Key; 4] = [
     Key::BarGap,
 ];
 
-/// How close a double-click must land to a marker to select it: one icon side,
-/// so the reach is the same as a toolbar button's touch target.
+/// How close a tap must land to a marker to select it: one icon side, so
+/// the reach is the same as a toolbar button's touch target.
 fn marker_hit_radius(ctx: &egui::Context) -> f32 {
     icon_size(ctx)
 }
@@ -121,6 +123,7 @@ impl MyApp {
 
         // Full-bleed map in the background layer. It lives in its own Area (not a
         // CentralPanel) so its clip rect can extend past the screen for overscan.
+        let mut tapped = None;
         egui::Area::new(egui::Id::new("map"))
             .order(egui::Order::Background)
             .fixed_pos(map_rect.min)
@@ -128,13 +131,13 @@ impl MyApp {
             .constrain(false)
             .show(ctx, |ui| {
                 ui.set_clip_rect(map_rect);
-                self.map(ui, map_rect, rotation, screen);
+                tapped = self.map(ui, map_rect, rotation, screen);
             });
 
-        // Double-click/tap a marker to show its name and time since last update.
-        // Skipped while a region box is being drawn (double-clicks belong to it).
+        // Tap a marker to show its name and time since last update. Skipped
+        // while a region box is being drawn (taps belong to it).
         if !selecting {
-            self.marker_info(ctx, screen, map_rect, rotation);
+            self.marker_info(ctx, screen, map_rect, rotation, tapped);
         }
 
         // The box-selection layer sits between the map and the controls.
@@ -142,34 +145,48 @@ impl MyApp {
 
         // Controls float on top in the foreground layer, so they keep pointer
         // priority over the (interactive) map behind them. The fill spans the
-        // status-bar area; the top inset pushes the buttons clear of it.
+        // status-bar area; the top inset pushes the buttons clear of it. The
+        // tab in the corner folds the whole bar away, and the zoom column
+        // and the key go with it.
         let top = self.top_inset(ctx);
         let (margin_x, margin_y) = bar_margin(ctx);
-        let bar = egui::Area::new(egui::Id::new("controls"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(egui::Pos2::ZERO)
-            .movable(false)
-            .constrain(false)
-            .show(ctx, |ui| {
-                egui::Frame::NONE
-                    .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
-                    .show(ui, |ui| {
-                        // The frame's margin is part of the screen width, so the
-                        // content gets what is left of it. Setting the full width
-                        // here would push the bar (and the button row it sizes)
-                        // past the right edge by the margin.
-                        ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
-                        ui.add_space(top);
-                        self.controls(ui);
-                    });
-            });
-        probe(
-            ctx,
-            bar.response.rect,
-            "Controls bar",
-            &[Key::BarMarginX, Key::BarMarginY],
-        );
+        if self.map_bar_open {
+            let fill = self.bar_fill(ctx);
+            let reserve = self.tab_reserve(ctx);
+            let bar = egui::Area::new(egui::Id::new("controls"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::Pos2::ZERO)
+                .movable(false)
+                .constrain(false)
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(fill)
+                        .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
+                        .show(ui, |ui| {
+                            // The frame's margin is part of the screen width, so the
+                            // content gets what is left of it. Setting the full width
+                            // here would push the bar (and the button row it sizes)
+                            // past the right edge by the margin.
+                            ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
+                            ui.add_space(top);
+                            self.controls(ui, reserve);
+                        });
+                });
+            probe(
+                ctx,
+                bar.response.rect,
+                "Controls bar",
+                &[Key::BarMarginX, Key::BarMarginY],
+            );
+            self.controls_height = bar.response.rect.height();
+            self.zoom_column(ctx, screen);
+            if self.config.map.show_key {
+                self.map_key(ctx, screen);
+            }
+        } else {
+            self.controls_height = 0.0;
+        }
+        self.bar_tab(ctx, screen);
 
         // The signal read-out along the bottom, when it is turned on. Drawn
         // before the transient popups so a confirmation still lands on top of
@@ -183,12 +200,168 @@ impl MyApp {
         self.center_menu_ui(ctx, screen);
     }
 
+    /// The fill behind the map's bars, at the opacity the settings ask for.
+    /// The status bar and the key share it, so the three read as one surface.
+    pub(in crate::app::ui) fn bar_fill(&self, ctx: &egui::Context) -> egui::Color32 {
+        ctx.global_style()
+            .visuals
+            .panel_fill
+            .gamma_multiply(self.config.map.bar_opacity)
+    }
+
+    /// How much of the bar's width the corner tab covers, past the bar's own
+    /// side margin, so the button row centers in the space left of it.
+    fn tab_reserve(&self, ctx: &egui::Context) -> f32 {
+        let (margin_x, _) = bar_margin(ctx);
+        (icon_size(ctx) + 2.0 * px(ctx, Key::MapTabPad) + corner_margin(ctx)
+            - f32::from(margin_x))
+        .max(0.0)
+    }
+
+    /// The tab hanging from the top right corner that folds the controls bar
+    /// away and brings it back. Drawn on top of the bar when the bar is up,
+    /// alone at the edge when it is not, so it is always in the one place.
+    fn bar_tab(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+        let icon = icon_size(ctx);
+        let top = self.top_inset(ctx);
+        let margin = corner_margin(ctx);
+        let pad = px(ctx, Key::MapTabPad);
+        let fill = self.bar_fill(ctx);
+        let (glyph, hint) = if self.map_bar_open {
+            (icons::chevron_up(), text::FOLD_BAR)
+        } else {
+            (icons::chevron_down(), text::UNFOLD_BAR)
+        };
+        let area = egui::Area::new(egui::Id::new("map_bar_tab"))
+            // Over the bar, which is Foreground, so the tab wins the press
+            // where the two overlap.
+            .order(egui::Order::Tooltip)
+            .fixed_pos(egui::pos2(screen.right() - margin, top))
+            .pivot(egui::Align2::RIGHT_TOP)
+            .movable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE.fill(fill).show(ui, |ui| {
+                    ui.spacing_mut().button_padding = egui::Vec2::splat(pad);
+                    if icon_button(ui, icon, glyph).on_hover_text(hint).clicked() {
+                        self.map_bar_open = !self.map_bar_open;
+                    }
+                });
+            });
+        probe(
+            ctx,
+            area.response.rect,
+            "Bar tab",
+            &[Key::MapTabPad, Key::IconSize, Key::CornerMargin],
+        );
+    }
+
+    /// The zoom buttons, stacked in the bottom right corner above the status
+    /// bar: in on top, out below. On every platform now that they are out of
+    /// the bar; pinching still works where there is a touch screen.
+    fn zoom_column(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+        let icon = icon_size(ctx);
+        let margin = corner_margin(ctx);
+        let pad = px(ctx, Key::MapTabPad);
+        let between = px(ctx, Key::MapZoomGap);
+        let foot = self.bottom_overlay_inset(ctx);
+        let area = egui::Area::new(egui::Id::new("map_zoom"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(
+                screen.right() - margin,
+                screen.bottom() - foot - margin,
+            ))
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .movable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.spacing_mut().button_padding = egui::Vec2::splat(pad);
+                ui.spacing_mut().item_spacing.y = between;
+                ui.vertical(|ui| {
+                    if icon_button(ui, icon, icons::zoom_in())
+                        .on_hover_text(text::ZOOM_IN)
+                        .clicked()
+                    {
+                        let _ = self.map_memory.zoom_in();
+                    }
+                    if icon_button(ui, icon, icons::zoom_out())
+                        .on_hover_text(text::ZOOM_OUT)
+                        .clicked()
+                    {
+                        let _ = self.map_memory.zoom_out();
+                    }
+                });
+            });
+        probe(
+            ctx,
+            area.response.rect,
+            "Zoom column",
+            &[Key::MapZoomGap, Key::MapTabPad, Key::IconSize, Key::CornerMargin],
+        );
+    }
+
+    /// The color key, hanging under the left end of the controls bar: one
+    /// row per marker on the map, in the color it is drawn in. Only the
+    /// markers that are there, so the key is never longer than the map is
+    /// busy.
+    fn map_key(&self, ctx: &egui::Context, screen: egui::Rect) {
+        let mut entries: Vec<(egui::Color32, String)> = Vec::new();
+        if self.current.is_some() {
+            entries.push((self.config.colors.track, self.phone_label()));
+        }
+        if self.beacon_on_map().is_some() {
+            entries.push((self.config.colors.fixed, self.beacon_label()));
+        }
+        for (&addr, node) in &self.remotes {
+            if node.last_pos().is_some() || node.heard.is_some() {
+                entries.push((remote_color(addr), self.config.lora.label_of(addr)));
+            }
+        }
+        if entries.is_empty() {
+            return;
+        }
+        let top = self.top_inset(ctx) + self.controls_height + px(ctx, Key::MapKeyUnderBar);
+        let margin = corner_margin(ctx);
+        let radius = px(ctx, Key::MapKeyDot);
+        let fill = self.bar_fill(ctx);
+        let outline = self.config.colors.outline;
+        let area = egui::Area::new(egui::Id::new("map_key"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(screen.left() + margin, top))
+            .pivot(egui::Align2::LEFT_TOP)
+            .movable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).fill(fill).show(ui, |ui| {
+                    for (color, name) in &entries {
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(2.0 * radius, em(ui)),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().circle_filled(rect.center(), radius, *color);
+                            ui.painter()
+                                .circle_stroke(rect.center(), radius, egui::Stroke::new(1.0, outline));
+                            ui.label(name);
+                        });
+                    }
+                });
+            });
+        probe(
+            ctx,
+            area.response.rect,
+            "Map key",
+            &[Key::MapKeyDot, Key::MapKeyUnderBar, Key::CornerMargin],
+        );
+    }
+
     /// The floating controls bar: one icon button per thing the map can do.
     ///
     /// Every button whose glyph changes shows the state the press switches
     /// *to*, which is what a toolbar icon without a label has to do to be
-    /// readable.
-    fn controls(&mut self, ui: &mut egui::Ui) {
+    /// readable. `reserve` is the width at the right end the corner tab
+    /// covers, which the row keeps clear of.
+    fn controls(&mut self, ui: &mut egui::Ui, reserve: f32) {
         let ctx = ui.ctx().clone();
         // Taken off the icon rather than left on the style's text-derived
         // spacing, so enlarging the page text does not shrink the toolbar.
@@ -201,13 +374,14 @@ impl MyApp {
         // sizes the row - and reused where the buttons are drawn, so the count
         // cannot disagree with what ends up in the bar.
         let show_rotate = self.has_direction() && self.tracking_beacon.is_none();
-        let zoom_buttons = if cfg!(target_os = "android") { 0 } else { 2 };
-        // Center, track, layer, paths and the page menu are always there.
-        let buttons = 5 + usize::from(show_rotate) + zoom_buttons;
+        // Center, track, layer, paths and the page menu are always there; the
+        // zoom buttons live in the corner column now.
+        let buttons = 5 + usize::from(show_rotate);
+        let avail = (ui.available_width() - reserve).max(1.0);
         // No button may take more than a 1/buttons share of the bar, padding and
         // spacing included, so a full row always fits the screen instead of
         // running off the right edge when the set grows.
-        let icon = icon_size_for_row(&ctx, ui.available_width(), spacing, buttons);
+        let icon = icon_size_for_row(&ctx, avail, spacing, buttons);
         // The padding follows the row's icon rather than the usual one, so a
         // row squeezed to fit keeps its proportions.
         let squeeze = icon / icon_size(&ctx);
@@ -222,7 +396,7 @@ impl MyApp {
         // the button set is fixed). `add_space` counts as an item, so drop one
         // item spacing to keep the gap even on both sides.
         let pad = if self.controls_width > 0.0 {
-            ((ui.available_width() - self.controls_width) * 0.5 - spacing).max(0.0)
+            ((avail - self.controls_width) * 0.5 - spacing).max(0.0)
         } else {
             0.0
         };
@@ -239,22 +413,6 @@ impl MyApp {
                 }
                 self.track_button(ui, icon);
                 self.layer_button(ui, icon);
-                // Zoom buttons are desktop-only; on mobile pinch-zoom handles
-                // it, so the buttons would only crowd the small toolbar.
-                if !cfg!(target_os = "android") {
-                    if icon_button(ui, icon, icons::zoom_in())
-                        .on_hover_text(text::ZOOM_IN)
-                        .clicked()
-                    {
-                        let _ = self.map_memory.zoom_in();
-                    }
-                    if icon_button(ui, icon, icons::zoom_out())
-                        .on_hover_text(text::ZOOM_OUT)
-                        .clicked()
-                    {
-                        let _ = self.map_memory.zoom_out();
-                    }
-                }
                 self.paths_button(ui, icon);
                 // The region download is started from the Settings page, which
                 // jumps back here with the box selection already active.
@@ -435,19 +593,21 @@ impl MyApp {
         }
     }
 
-    /// Handle double-click/tap selection of a map marker and draw the info
-    /// popup (name + time since last update) for the selected one.
+    /// Handle tap selection of a map marker and draw the info popup (name +
+    /// time since last update) for the selected one.
     ///
     /// Marker screen positions are computed the same way the `GpsLayer` plugin
     /// draws them: project with the map's projector, then apply the heading-up
-    /// rotation (about the screen center) when the map is rotated. A double-click
-    /// that misses every marker dismisses the popup.
+    /// rotation (about the screen center) when the map is rotated. `tapped` is
+    /// where the map itself was tapped this frame, and a tap that misses
+    /// every marker dismisses the popup.
     fn marker_info(
         &mut self,
         ctx: &egui::Context,
         screen: egui::Rect,
         map_rect: egui::Rect,
         rotation: Option<Rot2>,
+        tapped: Option<egui::Pos2>,
     ) {
         let my_position = self.current.unwrap_or_else(default_position);
         let projector = Projector::new(map_rect, &self.map_memory, my_position);
@@ -472,24 +632,18 @@ impl MyApp {
                 .map(|(&addr, node)| (MarkerKind::Remote(addr), node.last_pos())),
         );
 
-        // On a double-click, pick the closest marker within the hit radius; a
-        // miss clears the current selection.
-        let double = ctx.input(|i| {
-            i.pointer
-                .button_double_clicked(egui::PointerButton::Primary)
-        });
-        if double {
+        // On a tap, pick the closest marker within the hit radius; a miss
+        // clears the current selection.
+        if let Some(click) = tapped {
             let reach = marker_hit_radius(ctx);
-            if let Some(click) = ctx.input(|i| i.pointer.interact_pos()) {
-                self.selected_marker = markers
-                    .iter()
-                    .filter_map(|(kind, pos)| {
-                        pos.as_ref().map(|p| (*kind, to_screen(*p).distance(click)))
-                    })
-                    .filter(|(_, dist)| *dist <= reach)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(kind, _)| kind);
-            }
+            self.selected_marker = markers
+                .iter()
+                .filter_map(|(kind, pos)| {
+                    pos.as_ref().map(|p| (*kind, to_screen(*p).distance(click)))
+                })
+                .filter(|(_, dist)| *dist <= reach)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(kind, _)| kind);
         }
 
         let Some(kind) = self.selected_marker else {

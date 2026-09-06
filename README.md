@@ -87,6 +87,15 @@ and `"system"`; the `background`, `button` and `text` keys override whichever
 one is drawn. Text is 0xProto at every size, embedded so a phone with no such
 face still lays out as designed.
 
+## Settings
+
+`app-settings.toml` beside the tile cache (the repo's copy is the generated
+default). `[phone]` names this device and says whether its own receiver runs;
+`[ble] location` lets the connected node's GPS be the position instead, which
+is the default. The node's own settings, including its mode (stored, idle,
+tracking, or listening beside the phone), live on the node and are edited on
+the Bluetooth page.
+
 ## Look sheet
 
 Every size and spacing on the pages is a fraction - of the screen, of the text

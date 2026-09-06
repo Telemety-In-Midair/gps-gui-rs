@@ -20,6 +20,10 @@ pub struct RemoteDraw {
     pub track: Vec<Position>,
     /// The node's palette color, from its LoRa address.
     pub color: Color32,
+    /// Heartbeat phase (0..1) while the node was heard recently, so a marker
+    /// that is where the node is now reads apart from one left where it
+    /// last was. `None` leaves the marker still.
+    pub pulse: Option<f32>,
 }
 
 /// A walkers [`Plugin`] rendering the live position marker and its trail.
@@ -126,33 +130,36 @@ impl Plugin for GpsLayer {
             }
         }
 
-        // The connected board's marker, with the heartbeat ring while the BLE
-        // link is up.
+        // Heartbeat: a ring expanding out of a marker and fading as it goes,
+        // drawn under the marker so it reads as coming from it. One ring per
+        // beat says the node is alive without moving the marker.
+        let heartbeat = |center: egui::Pos2, phase: f32, color: Color32| {
+            let radius = sizes.beacon * (1.0 + phase * PULSE_REACH);
+            // Fade out over the beat, and thin the ring as it grows.
+            let fade = 1.0 - phase;
+            let width = sizes.beacon * 0.35 * fade;
+            painter.circle_stroke(center, radius, Stroke::new(width, color.gamma_multiply(fade)));
+        };
+
+        // The connected node's marker, with the heartbeat while the BLE link
+        // is up.
         if let Some(beacon) = self.beacon {
             let beacon_screen = projector.project(beacon).to_pos2();
-            // Heartbeat: a ring expanding out of the marker and fading as it
-            // goes, drawn under the marker so it reads as coming from it. One
-            // ring per beat says the link is alive without moving the marker.
             if let Some(phase) = self.beacon_pulse {
-                let radius = sizes.beacon * (1.0 + phase * PULSE_REACH);
-                // Fade out over the beat, and thin the ring as it grows.
-                let fade = 1.0 - phase;
-                let width = sizes.beacon * 0.35 * fade;
-                painter.circle_stroke(
-                    beacon_screen,
-                    radius,
-                    Stroke::new(width, beacon_color.gamma_multiply(fade)),
-                );
+                heartbeat(beacon_screen, phase, beacon_color);
             }
             painter.circle_filled(beacon_screen, sizes.beacon, beacon_color);
             painter.circle_stroke(beacon_screen, sizes.beacon, Stroke::new(2.0, outline_color));
         }
 
-        // Each remote node's marker, in its own palette color. No heartbeat:
-        // a relayed node has no live BLE link of its own to pulse.
+        // Each remote node's marker, in its own palette color, with the
+        // heartbeat while it was heard recently.
         for remote in &self.remotes {
             if let Some(pos) = remote.pos {
                 let screen = projector.project(pos).to_pos2();
+                if let Some(phase) = remote.pulse {
+                    heartbeat(screen, phase, remote.color);
+                }
                 painter.circle_filled(screen, sizes.beacon, remote.color);
                 painter.circle_stroke(screen, sizes.beacon, Stroke::new(2.0, outline_color));
             }
