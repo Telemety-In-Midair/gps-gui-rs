@@ -5,11 +5,11 @@
 //! darkest ground to the lightest. The two themes are that run read in
 //! opposite directions - a light page is `base3` down to `base00`, a dark one
 //! `base03` up to `base0` - which is why both are built here from one set of
-//! roles ([`Roles`]) rather than written out twice. The accents keep their
+//! roles (`Roles`) rather than written out twice. The accents keep their
 //! values in both: the palette is picked so they read against either end.
 //!
 //! [`visuals`] is a whole theme in the form egui wants it.
-//! [`crate::app::MyApp::apply_ui_style`] pushes it in whenever the theme
+//! `MyApp::apply_ui_style` pushes it in whenever the theme
 //! changes and lays the `[ui]` color overrides on top, so an override is a
 //! change *to* solarized rather than a replacement of it.
 //!

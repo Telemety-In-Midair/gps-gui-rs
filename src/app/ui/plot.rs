@@ -24,7 +24,7 @@ const Y_TICKS: usize = 4;
 
 /// What shapes the plot, for the adjuster: its height, the room its labels
 /// need, and the marks.
-const PLOT_KEYS: [Key; 7] = [
+const PLOT_KEYS: [Key; 11] = [
     Key::PlotHeight,
     Key::PlotPadLeft,
     Key::PlotPadBottom,
@@ -32,6 +32,10 @@ const PLOT_KEYS: [Key; 7] = [
     Key::PlotPadRight,
     Key::PlotDot,
     Key::PlotLine,
+    Key::PlotGrid,
+    Key::PlotTickSize,
+    Key::PlotTickGap,
+    Key::PlotTickDrop,
 ];
 
 /// One drawn series: a source, its color, and the points that had both axes.
@@ -98,6 +102,9 @@ pub(super) fn draw(
     let height = px(&ctx, Key::PlotHeight);
     let dot_r = px(&ctx, Key::PlotDot);
     let line_w = px(&ctx, Key::PlotLine);
+    let grid_w = px(&ctx, Key::PlotGrid);
+    let tick_gap = px(&ctx, Key::PlotTickGap);
+    let tick_drop = px(&ctx, Key::PlotTickDrop);
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
@@ -153,21 +160,21 @@ pub(super) fn draw(
 
     let grid = visuals.weak_text_color().gamma_multiply(0.35);
     let label_color = visuals.weak_text_color();
-    let font = egui::FontId::proportional(em * 0.8);
+    let font = egui::FontId::proportional(px(&ctx, Key::PlotTickSize) * em);
     for i in 0..=X_TICKS {
         let t = i as f64 / X_TICKS as f64;
         let value = x_min + t * x_span;
         let x = plot.left() + t as f32 * plot.width();
         painter.line_segment(
             [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-            egui::Stroke::new(1.0, grid),
+            egui::Stroke::new(grid_w, grid),
         );
         let text = match x_axis {
             LogAxis::Time => time_tick_text(value - x_origin),
             LogAxis::Stat(_) => tick_text(value, x_span),
         };
         painter.text(
-            egui::pos2(x, plot.bottom() + em * 0.15),
+            egui::pos2(x, plot.bottom() + tick_drop),
             egui::Align2::CENTER_TOP,
             text,
             font.clone(),
@@ -180,10 +187,10 @@ pub(super) fn draw(
         let y = plot.bottom() - t as f32 * plot.height();
         painter.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0, grid),
+            egui::Stroke::new(grid_w, grid),
         );
         painter.text(
-            egui::pos2(plot.left() - em * 0.3, y),
+            egui::pos2(plot.left() - tick_gap, y),
             egui::Align2::RIGHT_CENTER,
             tick_text(value, y_span),
             font.clone(),

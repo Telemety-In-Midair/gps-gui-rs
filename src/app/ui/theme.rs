@@ -118,7 +118,7 @@ pub(super) fn px(ctx: &egui::Context, key: Key) -> f32 {
 }
 
 /// Square icon side length in points for the current screen: the sheet's
-/// `icon.size` held between a fingertip and the cap.
+/// `type.icon.size` held between a fingertip and the cap.
 pub(super) fn icon_size(ctx: &egui::Context) -> f32 {
     published(ctx).scale.icon
 }
@@ -158,7 +158,7 @@ pub(super) fn bar_margin(ctx: &egui::Context) -> (i8, i8) {
 /// Largest icon side that keeps a row of `count` icon buttons within `avail`
 /// points, so no button may claim more than its equal share of the width.
 ///
-/// A button is wider than its icon by `bar.button.pad.x` on each side, and
+/// A button is wider than its icon by `type.bar.button.pad.x` on each side, and
 /// the buttons are separated by `spacing`; `avail` is expected to already
 /// have the enclosing frame's margin taken off. The result is capped at the
 /// usual [`icon_size`], so the row only shrinks below it on a screen too
@@ -230,7 +230,7 @@ pub(super) fn probes(ctx: &egui::Context) -> Vec<Probe> {
 ///   doubling the text size gave big letters in the same cramped rows, next to
 ///   a checkbox that had not moved.
 ///
-/// The measures are the sheet's `control` block, taken off the body font size
+/// The measures are the sheet's `type.control` block, taken off the body font size
 /// rather than the row height so the controls follow the font exactly.
 /// Applied to the whole style rather than per page, so it reaches the dropdown
 /// popups, the color pickers and the map's own popups as well as the pages.

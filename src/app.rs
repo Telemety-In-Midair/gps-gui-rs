@@ -1689,6 +1689,13 @@ impl MyApp {
         self.look_gen += 1;
     }
 
+    /// Drop a key's own measure, so it takes the one above it in the cascade
+    /// again. The adjuster's way back out of an override.
+    fn clear_measure(&mut self, key: Key) {
+        Arc::make_mut(&mut self.look).clear(key);
+        self.look_gen += 1;
+    }
+
     /// Read the sheet at `look_path` over the defaults. A sheet with lines it
     /// did not understand still loads, but says so in the error color.
     fn load_look(&mut self) {

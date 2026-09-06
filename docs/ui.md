@@ -277,8 +277,8 @@ than a point count:
 
 - `px(ctx, key)` - a key in points for this frame. Everything else here is
   written on it.
-- `gap(ui, key)` - vertical space of one of the sheet's `page.gap` keys.
-- `icon_size(ctx)` - the sheet's `icon.size`, held between a fingertip and
+- `gap(ui, key)` - vertical space of one of the sheet's `type.gap` keys.
+- `icon_size(ctx)` - the sheet's `type.icon.size`, held between a fingertip and
   the icon cap.
 - `icon_size_for_row(ctx, avail, spacing, count)` - the same size, but capped
   so `count` buttons still fit `avail` points: no button may exceed a `1/count`
@@ -303,18 +303,20 @@ page holds its proportions on a phone and on a desktop. The sheet's units are
 the whole vocabulary, and there is no unit for points:
 
 - **Fractions of the screen** (`%` of the smaller side, `%w`, `%h`) for the
-  layout frame - the icon size (`icon.size`), the page and bar margins
-  (`page.margin`, `bar.margin`), the corner inset (`corner.margin`), the
-  smallest drag that counts as a region box (`map.drag_min`), and the widths
-  of the path fields (`settings.path` and friends, each held between two text
-  widths with `min`/`max`).
+  layout frame - the icon size (`type.icon.size`), the page and bar margins
+  (`type.page.margin`, `type.bar.margin`), the corner inset
+  (`type.corner.margin`), the smallest drag that counts as a region box
+  (`id.map.drag_min`), and the width of a path field (`class.path.width`,
+  held between two text widths with `min`/`max`).
 - **Fractions of the icon side** (`icon`) for anything sitting beside the
-  toolbar: the button padding (`bar.button.pad`), the menu page's buttons
-  (`menu.row`), and how far the map's popups hang below the bar (`map.*`).
+  toolbar: the button padding (`type.bar.button.pad`), the menu page's buttons
+  (`type.menu.row`), and how far the map's popups hang below the bar
+  (`id.map.*`).
 - **Text heights** (`em`) for everything inside a page: the vertical rhythm
-  (`page.gap`, five steps from `hair` to `section`), the insides of a control
-  (`control.*`) and the narrow inputs (`beacon.name`, `radio.enum_field`).
-  Spacing written this way follows the font rather than fighting it.
+  (`type.gap`, five steps from `hair` to `section`), the insides of a control
+  (`type.control.*`) and the narrow inputs (`class.number.width`,
+  `id.radio.enum_field.width`). Spacing written this way follows the font
+  rather than fighting it.
 - **Plain ratios** (`x`) for the few things that are a share of something
   else: the status bar's bar gap, the radio page's glyph as a share of its
   button.
@@ -375,29 +377,68 @@ conditions, no bindings - so the in-app adjuster can read and write it and a
 hand edit can too:
 
 ```text
-page
-    margin  2.5%        # of the smaller screen side
+type
+    page
+        margin  2.5%        # of the smaller screen side
     gap
-        item   0.5em    # of the body text height
-bar
-    gap     0.15icon    # of the toolbar icon side
-settings
-    path    50%w min 8em max 22em
+        item    0.5em       # of the body text height
+    bar.gap     0.15icon    # of the toolbar icon side
+    field.width 12em
+class
+    path.width  50%w min 8em max 22em
+id
+    logging
+        path.width      inherit
+        reference.width 45%w min 8em max 22em
 ```
 
-Indentation nests; a dotted name (`page.gap.item`) is the same as nesting.
+Indentation nests; a dotted name (`type.gap.item`) is the same as nesting.
 Comments run from `#`. A missing key keeps its default, an unknown one is
 reported and skipped, a key set twice is an error, and a measure may be held
 in a range in other units. The file is `gps-gui.look` beside the config (the
 one directory writable on both platforms); `cargo run --example print-look`
 prints the documented default sheet.
 
-In code, `Key` is the enum of every measure with its path, default and note
-(`look.rs` declares them in one place); `Look` is the full set, `Measure` one
-value, and `Scale` the screen, text height and icon side a frame is measured
-against. `Look::save` edits an existing sheet in place - only the values that
-differ are rewritten, so comments and alignment survive - and generates a
-documented one where there is none.
+### The three levels
+
+The sheet cascades the way a stylesheet does, and for the same reason: four
+pages had a path field, four keys held the same measure, and widening a path
+field meant finding all four.
+
+| block   | what it holds                   | example                      |
+|---------|---------------------------------|------------------------------|
+| `type`  | a kind of thing, wherever it is | `type.field.width`           |
+| `class` | a variant of that kind          | `class.path.width`           |
+| `id`    | one element on one page         | `id.logging.reference.width` |
+
+Every key declares its parent (`Key::parent`), so the chain is static and
+known at compile time: `id.manual.field.width` -> `class.path.width` ->
+`type.field.width`. `Look` stores what each key holds *of its own* - an
+`Option<Measure>` - and `Look::get` walks the chain and takes the first one
+that is set. `Look::source` says which key that was, which is what the
+adjuster shows and what tells "pinned here" from "taken from above".
+
+Two consequences worth knowing:
+
+- **Most specific wins, wherever it came from.** A class the app ships beats a
+  type the sheet sets, exactly as a `.path` rule beats an `input` rule in CSS.
+  So `type.field.width` is the floor of the cascade rather than a lever -
+  every field on a page carries a class or an id of its own.
+- **`inherit` is a value.** It is what the sheet writes for a key with no
+  measure of its own, and what the adjuster's Inherit button writes to give
+  one back. That is why the file round-trips: an inheriting key is on the
+  sheet by name, not missing from it.
+
+Names from before the levels (`page.margin`, `settings.path`, …) still load:
+`Key::renamed` maps each to the key it became and the load warns with the new
+name, so an old sheet on a phone keeps working instead of silently reverting.
+
+In code, `Key` is the enum of every measure with its path, parent, default and
+note (`look.rs` declares them in one place); `Look` is the full set, `Measure`
+one value, and `Scale` the screen, text height and icon side a frame is
+measured against. `Look::save` edits an existing sheet in place - only the
+values that differ are rewritten, so comments and alignment survive - and
+generates a documented one where there is none.
 
 The adjuster (Settings, "Adjust the look", or `cargo run -- --adjust` on
 desktop) floats over every page:
@@ -413,8 +454,20 @@ desktop) floats over every page:
   the size stays put), a reset per measure, and the app redraws with every
   move: an edit bumps the look's generation, which is what makes
   `apply_ui_style` rewrite the control spacing.
+- **Each measure names the level it is editing.** A key with a cascade behind
+  it gets a dropdown of its chain, so picking a path field on the Settings
+  page offers `id.settings.config_path.width`, `class.path.width` and
+  `type.field.width` - this one, every path field, every field. It opens on
+  whichever level the measure is actually coming from (`Look::source`),
+  because a drag on a level that is being overridden would appear to do
+  nothing. **Inherit** drops the chosen level's own measure so it takes the
+  one above it again; **Reset** puts back what the app ships, which for a
+  level that ships nothing is the same thing.
 - **Save** writes the sheet in place, **Reload** reads it back, **Defaults**
-  drops every measure to what the app ships with.
+  drops every measure to what the app ships with. Because the sheet stores
+  what each key holds of its own, a level handed back up is saved as
+  `inherit` rather than as the value it resolved to - so the file keeps saying
+  "follow the class" instead of freezing today's answer.
 
 Everything it draws lives in one `Area` at the `Debug` order: the full-screen
 catcher that takes the pointer away from the pages while picking, then the

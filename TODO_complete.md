@@ -2,6 +2,17 @@
 
 Items struck through in `TODO.md`, summarized. Newest first.
 
+## 2026-09-06
+
+- **Unify the sizes / CSS-like type, class and id.** The look sheet now
+  cascades: `type` a kind of thing, `class` a variant of it, `id` one element
+  on one page, most specific first. Every `Key` declares its parent, `Look`
+  stores what each key holds of its own, and `Look::get` walks the chain.
+  Four identical path-field keys became one class. `inherit` is a value the
+  sheet carries, and the adjuster gained a level picker plus an Inherit
+  button. Old paths still load through a rename table. The plot's grid width
+  and tick labels and the adjuster's outline moved into the sheet with it.
+
 ## 2026-09-05
 
 - **Set font.** 0xProto (SIL OFL 1.1) embedded in the binary and installed at

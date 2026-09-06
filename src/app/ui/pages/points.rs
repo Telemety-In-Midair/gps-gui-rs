@@ -26,7 +26,7 @@ impl MyApp {
                     ui,
                     &mut self.points_search,
                     text::SEARCH_HINT,
-                    Key::PointsSearch,
+                    Key::PointsSearchWidth,
                 );
                 if ui.button("Clear").clicked() {
                     self.points_search.clear();

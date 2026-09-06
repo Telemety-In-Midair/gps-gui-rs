@@ -9,14 +9,19 @@
 //! A measure is a number with a unit, and every unit is relative:
 //!
 //! ```text
-//! page
-//!     margin  2.5%        # of the smaller screen side
+//! type
+//!     page
+//!         margin  2.5%        # of the smaller screen side
 //!     gap
-//!         item   0.5em    # of the body text height
-//! bar
-//!     gap     0.15icon    # of the toolbar icon side
-//! settings
-//!     path    50%w min 8em max 22em
+//!         item    0.5em       # of the body text height
+//!     bar.gap     0.15icon    # of the toolbar icon side
+//!     field.width 12em
+//! class
+//!     path.width  50%w min 8em max 22em
+//! id
+//!     logging
+//!         path.width      inherit
+//!         reference.width 45%w min 8em max 22em
 //! ```
 //!
 //! `%w` and `%h` are of the screen width and height, and `x` is a plain
@@ -25,10 +30,30 @@
 //! a fingertip under every control, and a cap on the icon - are physical
 //! rather than a look, and stay in code as [`TOUCH_MIN`] and [`ICON_MAX`].
 //!
+//! # The three levels
+//!
+//! The sheet cascades the way a stylesheet does, and for the same reason:
+//! four pages had a path field, and four keys held the same measure, so
+//! widening a path field meant finding all four. Now there is one - the
+//! class - and a page's own key exists to *depart* from it.
+//!
+//! | block   | what it holds                    | example                          |
+//! |---------|----------------------------------|----------------------------------|
+//! | `type`  | a kind of thing, wherever it is  | `type.field.width`               |
+//! | `class` | a variant of that kind           | `class.path.width`               |
+//! | `id`    | one element on one page          | `id.logging.reference.width`     |
+//!
+//! Most specific wins, and where it came from does not enter into it: a
+//! class the app ships beats a type the sheet sets, exactly as a `.path`
+//! rule beats an `input` rule in CSS. A key with no measure of its own takes
+//! its parent's ([`Key::chain`]); [`INHERIT`] is how a key gives one back,
+//! and is what the sheet writes for a key that has none.
+//!
 //! Indentation nests: a name alone on a line opens a block, and a dotted name
 //! is the same as nesting. Comments run from `#` to the end of the line. A
-//! missing key keeps its default, an unknown one is reported and skipped, and
-//! a key set twice is an error.
+//! missing key keeps its default, an unknown one is reported and skipped, a
+//! name from before the three levels is read as the key it became, and a key
+//! set twice is an error.
 //!
 //! [`Look::save`] edits an existing file in place - comments, alignment and
 //! unknown keys survive, only the changed values are rewritten - and
@@ -308,8 +333,69 @@ fn parse_measure(tokens: &[&str]) -> Result<Measure, String> {
     Ok(m)
 }
 
+/// Which level of the cascade a key sits at, taken from the first segment of
+/// its path. More specific wins: an `id` beats a `class` beats a `type`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Level {
+    /// A kind of thing, wherever it appears: `type.field.width`.
+    Type,
+    /// A variant of a kind: `class.path.width`.
+    Class,
+    /// One element on one page: `id.logging.reference.width`.
+    Id,
+}
+
+impl Level {
+    /// The path segment that opens the level's block.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Level::Type => "type",
+            Level::Class => "class",
+            Level::Id => "id",
+        }
+    }
+
+    /// How the adjuster names the reach of an edit at this level.
+    pub fn reach(self) -> &'static str {
+        match self {
+            Level::Type => "every one of its kind",
+            Level::Class => "every one of its class",
+            Level::Id => "this one",
+        }
+    }
+
+    fn of_path(path: &str) -> Level {
+        match path.split('.').next() {
+            Some("class") => Level::Class,
+            Some("id") => Level::Id,
+            _ => Level::Type,
+        }
+    }
+}
+
+/// One key's shipped default: the measure the app ships, or `inherit` for a
+/// key that takes its parent's until something gives it one of its own.
+macro_rules! key_default {
+    (inherit) => {
+        None
+    };
+    ($text:literal) => {
+        Some($text)
+    };
+}
+
+/// One key's parent in the cascade, `_` for a key that is the top of one.
+macro_rules! key_parent {
+    (_) => {
+        None
+    };
+    ($variant:ident) => {
+        Some(Key::$variant)
+    };
+}
+
 macro_rules! keys {
-    ($( $variant:ident : $path:literal = $default:literal , $doc:literal ; )*) => {
+    ($( $variant:ident : $path:literal = $default:tt , $parent:tt , $doc:literal ; )*) => {
         /// Every measure in the sheet, by name. The order here is the order
         /// of the generated sheet.
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -332,139 +418,263 @@ macro_rules! keys {
                 match self { $( Key::$variant => $doc, )* }
             }
 
-            fn default_text(self) -> &'static str {
-                match self { $( Key::$variant => $default, )* }
+            /// The key one step less specific than this one: the class a
+            /// field's id falls back to, and the type that class falls back
+            /// to. `None` at the top of a cascade.
+            pub fn parent(self) -> Option<Key> {
+                match self { $( Key::$variant => key_parent!($parent), )* }
+            }
+
+            fn default_text(self) -> Option<&'static str> {
+                match self { $( Key::$variant => key_default!($default), )* }
             }
         }
     };
 }
 
 keys! {
-    PageMargin: "page.margin" = "2.5%",
+    PageMargin: "type.page.margin" = "2.5%", _,
         "Between a page's body and the screen edge.";
-    GapHair: "page.gap.hair" = "0.25em",
-        "The vertical rhythm of a page, in text heights. A hair: between a control and the note under it.";
-    GapTight: "page.gap.tight" = "0.4em",
+    GapHair: "type.gap.hair" = "0.25em", _,
+        "The vertical rhythm of a page, in text heights. A hair: between a control \
+        and the note under it.";
+    GapTight: "type.gap.tight" = "0.4em", _,
         "Between a title and the line explaining it.";
-    GapItem: "page.gap.item" = "0.5em",
+    GapItem: "type.gap.item" = "0.5em", _,
         "Between two controls.";
-    GapBlock: "page.gap.block" = "0.75em",
+    GapBlock: "type.gap.block" = "0.75em", _,
         "Between two blocks of controls.";
-    GapSection: "page.gap.section" = "1em",
+    GapSection: "type.gap.section" = "1em", _,
         "Before a section title.";
-    IconSize: "icon.size" = "5%",
-        "Side of a toolbar icon. A fingertip is the floor and about two fingertips the ceiling whatever this says: those are physical, not a look.";
-    BarMarginX: "bar.margin.x" = "2%",
-        "Inner side margin of a bar spanning the screen: the map's controls at the top and its status read-out at the bottom.";
-    BarMarginY: "bar.margin.y" = "1%",
+    IconSize: "type.icon.size" = "5%", _,
+        "Side of a toolbar icon. A fingertip is the floor and about two fingertips \
+        the ceiling whatever this says: those are physical, not a look.";
+    BarMarginX: "type.bar.margin.x" = "2%", _,
+        "Inner side margin of a bar spanning the screen: the map's controls at the \
+        top and its status read-out at the bottom.";
+    BarMarginY: "type.bar.margin.y" = "1%", _,
         "Inner top and bottom margin of those bars.";
-    BarButtonPadX: "bar.button.pad.x" = "0.7icon",
-        "Side padding around the glyph in a toolbar button. Doubles as the space that keeps the buttons apart.";
-    BarButtonPadY: "bar.button.pad.y" = "0.45icon",
+    BarButtonPadX: "type.bar.button.pad.x" = "0.7icon", _,
+        "Side padding around the glyph in a toolbar button. Doubles as the space \
+        that keeps the buttons apart.";
+    BarButtonPadY: "type.bar.button.pad.y" = "0.45icon", _,
         "Top and bottom padding around the glyph in a toolbar button.";
-    BarGap: "bar.gap" = "0.15icon",
+    BarGap: "type.bar.gap" = "0.15icon", _,
         "Between two buttons in the controls bar.";
-    CornerMargin: "corner.margin" = "3%",
+    CornerMargin: "type.corner.margin" = "3%", _,
         "Inset of the floating corner toggle from the screen edge.";
-    CornerPad: "corner.pad" = "0.2icon",
-        "Padding around the corner toggle's glyph. Tighter than the toolbar's: alone over the page, wide padding reads as a slab.";
-    FieldPadX: "field.pad.x" = "0.3em",
-        "Side padding inside a text input. The vertical padding is whatever brings the field up to the height of the button beside it.";
-    ControlPadX: "control.pad.x" = "0.6em",
-        "Side padding inside a text button. Everything under control is measured off the body font size.";
-    ControlPadY: "control.pad.y" = "0.3em",
+    CornerPad: "type.corner.pad" = "0.2icon", _,
+        "Padding around the corner toggle's glyph. Tighter than the toolbar's: \
+        alone over the page, wide padding reads as a slab.";
+    FieldWidth: "type.field.width" = "12em", _,
+        "How wide a text input is when nothing more specific says otherwise. The \
+        floor of the cascade rather than a size much used directly: nearly every \
+        field on a page carries a class.";
+    FieldPadX: "type.field.pad.x" = "0.3em", _,
+        "Side padding inside a text input. The vertical padding is whatever brings \
+        the field up to the height of the button beside it.";
+    ControlPadX: "type.control.pad.x" = "0.6em", _,
+        "Side padding inside a text button. Everything under control is measured \
+        off the body font size.";
+    ControlPadY: "type.control.pad.y" = "0.3em", _,
         "Top and bottom padding inside a text button.";
-    ControlSpacingX: "control.spacing.x" = "0.55em",
+    ControlSpacingX: "type.control.spacing.x" = "0.55em", _,
         "Between two controls on a row.";
-    ControlSpacingY: "control.spacing.y" = "0.35em",
+    ControlSpacingY: "type.control.spacing.y" = "0.35em", _,
         "Between two rows of controls.";
-    ControlHeight: "control.height" = "2.6em",
-        "The height every button, checkbox, dropdown and number box is laid out at. A fingertip is the floor.";
-    ControlWidth: "control.width" = "3.2em",
+    ControlHeight: "type.control.height" = "2.6em", _,
+        "The height every button, checkbox, dropdown and number box is laid out at. \
+        A fingertip is the floor.";
+    ControlWidth: "type.control.width" = "3.2em", _,
         "The narrowest a number box or a color swatch is drawn.";
-    ControlCheckSize: "control.check.size" = "1.2em",
+    ControlCheckSize: "type.control.check.size" = "1.2em", _,
         "The checkbox and radio glyph.";
-    ControlCheckMark: "control.check.mark" = "0.7em",
+    ControlCheckMark: "type.control.check.mark" = "0.7em", _,
         "The mark inside it.";
-    ControlIndent: "control.indent" = "1.4em",
+    ControlIndent: "type.control.indent" = "1.4em", _,
         "Indentation of a nested group.";
-    ControlCombo: "control.combo" = "8em",
+    ControlCombo: "type.control.combo" = "8em", _,
         "Width of a dropdown.";
-    ControlScrollbar: "control.scrollbar" = "0.55em",
+    ControlScrollbar: "type.control.scrollbar" = "0.55em", _,
         "Width of a scroll bar. Floored in code at a width a finger can catch.";
-    MenuRowHeight: "menu.row.height" = "1.3icon",
-        "Height of a button on the menu page. Off the icon rather than the text: these are touch targets first.";
-    MenuRowWidth: "menu.row.width" = "5icon",
+    MenuRowHeight: "type.menu.row.height" = "1.3icon", _,
+        "Height of a button on the menu page. Off the icon rather than the text: \
+        these are touch targets first.";
+    MenuRowWidth: "type.menu.row.width" = "5icon", _,
         "Width of a menu button.";
-    MenuRowGap: "menu.row.gap" = "0.3icon",
+    MenuRowGap: "type.menu.row.gap" = "0.3icon", _,
         "Between two menu buttons.";
-    MenuText: "menu.text" = "0.45icon",
+    MenuText: "type.menu.text" = "0.45icon", _,
         "Text size on a menu button, which its glyph is sized to as well.";
-    MapPopupPadX: "map.popup.pad.x" = "0.35icon",
+
+    PathWidth: "class.path.width" = "50%w min 8em max 22em", FieldWidth,
+        "A field holding a filesystem path: wide, because the interesting end of a \
+        path is the end, and held between a floor and a ceiling so it neither \
+        vanishes on a phone nor runs the width of a desktop.";
+    NumberWidth: "class.number.width" = "5em", FieldWidth,
+        "A field holding a number: an interval, a window, a timeout. Room for the \
+        digits and no more.";
+    NameWidth: "class.name.width" = "7em", FieldWidth,
+        "A field holding a short name, such as a board's.";
+
+    MapPopupPadX: "id.map.popup.pad.x" = "0.35icon", _,
         "Side padding of a button in the map's popups.";
-    MapPopupPadY: "map.popup.pad.y" = "0.25icon",
+    MapPopupPadY: "id.map.popup.pad.y" = "0.25icon", _,
         "Top and bottom padding of a button in the map's popups.";
-    MapCenterGap: "map.center.gap" = "0.12icon",
+    MapCenterGap: "id.map.center.gap" = "0.12icon", _,
         "Between two entries of the center button's marker list.";
-    MapCenterWidth: "map.center.width" = "3.5icon",
+    MapCenterWidth: "id.map.center.width" = "3.5icon", _,
         "The narrowest that list is drawn.";
-    MapUnderBar: "map.under_bar" = "1.8icon",
+    MapUnderBar: "id.map.under_bar" = "1.8icon", _,
         "How far below the controls bar the center menu hangs.";
-    MapHintUnderBar: "map.hint_under_bar" = "1.6icon",
+    MapHintUnderBar: "id.map.hint_under_bar" = "1.6icon", _,
         "How far below the controls bar the region-select hint hangs.";
-    MapMarkerLift: "map.marker_lift" = "0.35icon",
+    MapMarkerLift: "id.map.marker_lift" = "0.35icon", _,
         "How far above a marker its info bubble floats.";
-    MapDragMin: "map.drag_min" = "2.5%",
-        "The smallest drag that counts as a region box rather than a tap. Also how far a held finger may wander and still count as a hold.";
-    StatusGraphWidth: "status.graph.width" = "28%w",
+    MapDragMin: "id.map.drag_min" = "2.5%", _,
+        "The smallest drag that counts as a region box rather than a tap. Also how \
+        far a held finger may wander and still count as a hold.";
+    StatusGraphWidth: "id.status.graph.width" = "28%w", _,
         "Width of the status bar's signal graph.";
-    StatusGraphHeight: "status.graph.height" = "1.7em",
-        "Height of that graph, in text heights so it stays in proportion with the read-out beside it.";
-    StatusBarGap: "status.bar.gap" = "0.25x",
+    StatusGraphHeight: "id.status.graph.height" = "1.7em", _,
+        "Height of that graph, in text heights so it stays in proportion with the \
+        read-out beside it.";
+    StatusBarGap: "id.status.bar.gap" = "0.25x", _,
         "Space between two bars of the graph, as a ratio of the slot each bar gets.";
-    StatusBarMin: "status.bar.min" = "0.05x",
-        "The shortest a bar is drawn, as a ratio of the graph height, so a barely heard node still shows.";
-    PlotHeight: "plot.height" = "34%h",
-        "Height of the Logging page's graph. Off the screen rather than the text: it is a picture, and keeps its shape when the text is scaled.";
-    PlotPadLeft: "plot.pad.left" = "3.4em",
-        "Room inside the graph frame for the value axis labels, in text heights: that side of it is text.";
-    PlotPadBottom: "plot.pad.bottom" = "1.6em",
+    StatusBarMin: "id.status.bar.min" = "0.05x", _,
+        "The shortest a bar is drawn, as a ratio of the graph height, so a barely \
+        heard node still shows.";
+    PlotHeight: "id.plot.height" = "34%h", _,
+        "Height of the Logging page's graph. Off the screen rather than the text: \
+        it is a picture, and keeps its shape when the text is scaled.";
+    PlotPadLeft: "id.plot.pad.left" = "3.4em", _,
+        "Room inside the graph frame for the value axis labels, in text heights: \
+        that side of it is text.";
+    PlotPadBottom: "id.plot.pad.bottom" = "1.6em", _,
         "Room under the graph for the time axis.";
-    PlotPadTop: "plot.pad.top" = "0.6em",
+    PlotPadTop: "id.plot.pad.top" = "0.6em", _,
         "Room above the graph.";
-    PlotPadRight: "plot.pad.right" = "1.2em",
+    PlotPadRight: "id.plot.pad.right" = "1.2em", _,
         "Room to the right of the graph.";
-    PlotDot: "plot.dot" = "0.16em",
+    PlotDot: "id.plot.dot" = "0.16em", _,
         "Radius of a scatter dot.";
-    PlotLine: "plot.line" = "0.12em",
+    PlotLine: "id.plot.line" = "0.12em", _,
         "Width of a plotted line.";
-    PointsSearch: "points.search" = "60%w min 8em max 22em",
+    PlotGrid: "id.plot.grid" = "0.08em", _,
+        "Width of a grid line behind the plot.";
+    PlotTickSize: "id.plot.tick.size" = "0.8x", _,
+        "Size of an axis label, as a ratio of the body text.";
+    PlotTickGap: "id.plot.tick.gap" = "0.3em", _,
+        "Between the value axis and its labels.";
+    PlotTickDrop: "id.plot.tick.drop" = "0.15em", _,
+        "Between the time axis and its labels.";
+    PointsSearchWidth: "id.points.search.width" = "60%w min 8em max 22em", FieldWidth,
         "The Points page's search box, leaving room for the Clear button beside it.";
-    PointsListMin: "points.list.min" = "4em",
-        "The shortest the points list may be squeezed to. Below this the page would show filters over nothing.";
-    SettingsPath: "settings.path" = "50%w min 8em max 22em",
+    PointsListMin: "id.points.list.min" = "4em", _,
+        "The shortest the points list may be squeezed to. Below this the page would \
+        show filters over nothing.";
+    SettingsConfigPath: "id.settings.config_path.width" = inherit, PathWidth,
         "The config path field on the Settings page.";
-    SettingsSlider: "settings.slider" = "45%w",
-        "The text-size slider. Off the screen rather than the text: its own label grows while it is dragged, and a width in text heights would walk out from under the finger.";
-    LoggingPath: "logging.path" = "50%w min 8em max 22em",
+    SettingsLookPath: "id.settings.look_path.width" = inherit, PathWidth,
+        "The look sheet path field on the Settings page.";
+    SettingsSlider: "id.settings.slider.width" = "45%w", _,
+        "The text-size slider. Off the screen rather than the text: its own label \
+        grows while it is dragged, and a width in text heights would walk out from \
+        under the finger.";
+    LoggingPath: "id.logging.path.width" = inherit, PathWidth,
         "The log path field on the Logging page.";
-    LoggingReference: "logging.reference" = "45%w min 8em max 22em",
-        "The reference coordinate field on the Logging page.";
-    RadioPath: "radio.path" = "50%w min 8em max 22em",
+    LoggingReference: "id.logging.reference.width" = "45%w min 8em max 22em", PathWidth,
+        "The reference coordinate field on the Logging page. Narrower than a path: \
+        it holds two numbers.";
+    RadioPath: "id.radio.path.width" = inherit, PathWidth,
         "The file path field on the Radio page.";
-    RadioGlyph: "radio.glyph" = "0.55x",
-        "The set and cancel glyphs beside a radio setting being edited, as a ratio of the control height.";
-    RadioEnumField: "radio.enum_field" = "12em",
+    RadioGlyph: "id.radio.glyph" = "0.55x", _,
+        "The set and cancel glyphs beside a radio setting being edited, as a ratio \
+        of the control height.";
+    RadioEnumField: "id.radio.enum_field.width" = "12em", FieldWidth,
         "A radio setting's text input while it is being edited.";
-    RadioConfirm: "radio.confirm" = "18em",
+    RadioConfirm: "id.radio.confirm.width" = "18em", _,
         "The widest the send-to-board confirmation grows.";
-    BeaconName: "beacon.name" = "7em",
+    BeaconName: "id.beacon.name.width" = inherit, NameWidth,
         "A board name input on the Beacon page.";
-    BeaconNumber: "beacon.number" = "5em",
+    BeaconNumber: "id.beacon.number.width" = inherit, NumberWidth,
         "A number input on the Beacon page: an interval, a window, a timeout.";
-    ManualField: "manual.field" = "50%w min 8em max 22em",
+    ManualField: "id.manual.field.width" = inherit, PathWidth,
         "The desktop position entry field.";
+    AdjustOutline: "id.adjust.outline" = "0.12em", _,
+        "Width of the outline the adjuster draws around a picked element.";
 }
+ 
+/// The names an earlier sheet used, before the measures were sorted into
+/// types, classes and ids. A sheet written by that version still loads: the
+/// old name is read as the key it became, with a warning naming the new one.
+///
+/// `settings.path` was one key behind two fields; it lands on the config one,
+/// and the look sheet's field goes back to the class.
+const RENAMED: &[(&str, Key)] = &[
+    ("page.margin", Key::PageMargin),
+    ("page.gap.hair", Key::GapHair),
+    ("page.gap.tight", Key::GapTight),
+    ("page.gap.item", Key::GapItem),
+    ("page.gap.block", Key::GapBlock),
+    ("page.gap.section", Key::GapSection),
+    ("icon.size", Key::IconSize),
+    ("bar.margin.x", Key::BarMarginX),
+    ("bar.margin.y", Key::BarMarginY),
+    ("bar.button.pad.x", Key::BarButtonPadX),
+    ("bar.button.pad.y", Key::BarButtonPadY),
+    ("bar.gap", Key::BarGap),
+    ("corner.margin", Key::CornerMargin),
+    ("corner.pad", Key::CornerPad),
+    ("field.pad.x", Key::FieldPadX),
+    ("control.pad.x", Key::ControlPadX),
+    ("control.pad.y", Key::ControlPadY),
+    ("control.spacing.x", Key::ControlSpacingX),
+    ("control.spacing.y", Key::ControlSpacingY),
+    ("control.height", Key::ControlHeight),
+    ("control.width", Key::ControlWidth),
+    ("control.check.size", Key::ControlCheckSize),
+    ("control.check.mark", Key::ControlCheckMark),
+    ("control.indent", Key::ControlIndent),
+    ("control.combo", Key::ControlCombo),
+    ("control.scrollbar", Key::ControlScrollbar),
+    ("menu.row.height", Key::MenuRowHeight),
+    ("menu.row.width", Key::MenuRowWidth),
+    ("menu.row.gap", Key::MenuRowGap),
+    ("menu.text", Key::MenuText),
+    ("map.popup.pad.x", Key::MapPopupPadX),
+    ("map.popup.pad.y", Key::MapPopupPadY),
+    ("map.center.gap", Key::MapCenterGap),
+    ("map.center.width", Key::MapCenterWidth),
+    ("map.under_bar", Key::MapUnderBar),
+    ("map.hint_under_bar", Key::MapHintUnderBar),
+    ("map.marker_lift", Key::MapMarkerLift),
+    ("map.drag_min", Key::MapDragMin),
+    ("status.graph.width", Key::StatusGraphWidth),
+    ("status.graph.height", Key::StatusGraphHeight),
+    ("status.bar.gap", Key::StatusBarGap),
+    ("status.bar.min", Key::StatusBarMin),
+    ("plot.height", Key::PlotHeight),
+    ("plot.pad.left", Key::PlotPadLeft),
+    ("plot.pad.bottom", Key::PlotPadBottom),
+    ("plot.pad.top", Key::PlotPadTop),
+    ("plot.pad.right", Key::PlotPadRight),
+    ("plot.dot", Key::PlotDot),
+    ("plot.line", Key::PlotLine),
+    ("points.search", Key::PointsSearchWidth),
+    ("points.list.min", Key::PointsListMin),
+    ("settings.path", Key::SettingsConfigPath),
+    ("settings.slider", Key::SettingsSlider),
+    ("logging.path", Key::LoggingPath),
+    ("logging.reference", Key::LoggingReference),
+    ("radio.path", Key::RadioPath),
+    ("radio.glyph", Key::RadioGlyph),
+    ("radio.enum_field", Key::RadioEnumField),
+    ("radio.confirm", Key::RadioConfirm),
+    ("beacon.name", Key::BeaconName),
+    ("beacon.number", Key::BeaconNumber),
+    ("manual.field", Key::ManualField),
+];
 
 impl Key {
     /// The key a sheet line names, if any.
@@ -472,29 +682,64 @@ impl Key {
         Key::ALL.iter().copied().find(|k| k.path() == path)
     }
 
-    /// The measure the app ships with.
-    pub fn default_measure(self) -> Measure {
-        self.default_text()
-            .parse()
-            .unwrap_or_else(|e| panic!("default for {}: {e}", self.path()))
+    /// The key an old sheet's name became.
+    pub fn renamed(path: &str) -> Option<Key> {
+        RENAMED
+            .iter()
+            .find(|(old, _)| *old == path)
+            .map(|&(_, key)| key)
+    }
+
+    /// Which level of the cascade the key sits at.
+    pub fn level(self) -> Level {
+        Level::of_path(self.path())
+    }
+
+    /// The path without its level prefix: what the key is called once you
+    /// already know which block it is in.
+    pub fn name(self) -> &'static str {
+        self.path()
+            .split_once('.')
+            .map_or(self.path(), |(_, rest)| rest)
+    }
+
+    /// The measure the app ships for this key, or `None` for one that
+    /// inherits until something sets it.
+    pub fn default_measure(self) -> Option<Measure> {
+        self.default_text().map(|text| {
+            text.parse()
+                .unwrap_or_else(|e| panic!("default for {}: {e}", self.path()))
+        })
+    }
+
+    /// This key, then the one it falls back to, and so on to the top of its
+    /// cascade. Always at least one long.
+    pub fn chain(self) -> impl Iterator<Item = Key> {
+        std::iter::successors(Some(self), |k| k.parent())
     }
 }
 
 const KEY_COUNT: usize = Key::ALL.len();
 
 /// Every measure, as the app is drawing with them right now.
+///
+/// A key holds a measure of its *own* or nothing at all; nothing at all means
+/// it takes its parent's ([`Key::chain`]). That is the whole of the cascade -
+/// [`Look::get`] walks the chain and the first own measure wins - and it is
+/// why the sheet can leave `id.settings.config_path.width` out and still have
+/// the field come out the width of every other path field.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Look {
-    values: [Measure; KEY_COUNT],
+    own: [Option<Measure>; KEY_COUNT],
 }
 
 impl Default for Look {
     fn default() -> Self {
-        let mut values = [Measure::new(0.0, Unit::Times); KEY_COUNT];
+        let mut own = [None; KEY_COUNT];
         for &key in Key::ALL {
-            values[key as usize] = key.default_measure();
+            own[key as usize] = key.default_measure();
         }
-        Self { values }
+        Self { own }
     }
 }
 
@@ -515,10 +760,11 @@ impl fmt::Display for SheetError {
 impl std::error::Error for SheetError {}
 
 /// One assignment in a sheet, with where its value sits so it can be
-/// rewritten in place.
+/// rewritten in place. `None` is the word `inherit`: the key is named, and
+/// what it says is "take the parent's".
 struct Entry {
     path: String,
-    measure: Measure,
+    measure: Option<Measure>,
     /// Zero-based line index.
     line: usize,
     /// Byte span of the measure text within that line.
@@ -542,6 +788,10 @@ struct Scan {
     entries: Vec<Entry>,
     blocks: Vec<Block>,
 }
+
+/// The value that says "take the parent's measure" - what a key writes when
+/// it has none of its own, and what clears one that has.
+pub const INHERIT: &str = "inherit";
 
 /// Leading whitespace in columns, a tab counting as four.
 fn indent_of(line: &str) -> usize {
@@ -619,7 +869,11 @@ fn scan(text: &str) -> Result<Scan, SheetError> {
                 prev.line + 1
             )));
         }
-        let measure = parse_measure(&tokens).map_err(|e| fail(format!("{path}: {e}")))?;
+        let measure = if tokens == [INHERIT] {
+            None
+        } else {
+            Some(parse_measure(&tokens).map_err(|e| fail(format!("{path}: {e}")))?)
+        };
         let value_start = after_name + (value_text.len() - value_text.trim_start().len());
         let value_end = content.trim_end().len();
         entries.push(Entry {
@@ -642,8 +896,18 @@ const HEADER: &str = "\
 #   34%h    of the screen height            0.25x    a plain ratio (see the note)
 #
 # A measure may be held in a range: `50%w min 8em max 22em`. A name alone on
-# a line opens a block; `page.gap.item` and `item` under `gap` under `page`
+# a line opens a block; `type.gap.item` and `item` under `gap` under `type`
 # are the same key. A missing key keeps its default.
+#
+# Three blocks, most specific first, the way a stylesheet does it:
+#
+#   type    a kind of thing wherever it appears  - every text input
+#   class   a variant of that kind               - every path field
+#   id      one element on one page              - the Logging page's log path
+#
+# An id takes its class's measure and a class its type's, until it is given
+# one of its own; `inherit` gives one back. So widening class.path.width
+# widens every path field that has not been pinned to something else.
 ";
 
 /// Break `text` into lines no wider than `width`, on spaces.
@@ -666,13 +930,41 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 impl Look {
-    /// The measure behind a key.
-    pub fn get(&self, key: Key) -> Measure {
-        self.values[key as usize]
+    /// The measure a key holds *of its own*, `None` for one that is
+    /// inheriting. This is what the sheet round-trips and what the adjuster
+    /// reads to tell "set here" from "taken from above".
+    pub fn own(&self, key: Key) -> Option<Measure> {
+        self.own[key as usize]
     }
 
+    /// Which key in `key`'s chain actually supplies its measure: `key` itself
+    /// when it has one of its own, otherwise the nearest parent that does.
+    ///
+    /// Falls back to the top of the chain, which cannot happen with the keys
+    /// the app ships - every chain ends at a `type` key with a default, and a
+    /// test holds that - and would mean a measure of zero if it did.
+    pub fn source(&self, key: Key) -> Key {
+        key.chain()
+            .find(|&k| self.own[k as usize].is_some())
+            .unwrap_or_else(|| key.chain().last().unwrap_or(key))
+    }
+
+    /// The measure behind a key, cascade applied.
+    pub fn get(&self, key: Key) -> Measure {
+        self.own[self.source(key) as usize].unwrap_or(Measure::new(0.0, Unit::Times))
+    }
+
+    /// Give a key a measure of its own, which is what stops it inheriting.
     pub fn set(&mut self, key: Key, measure: Measure) {
-        self.values[key as usize] = measure;
+        self.own[key as usize] = Some(measure);
+    }
+
+    /// Drop a key's own measure, so it takes its parent's again. A key with
+    /// no parent has nothing to fall back to, so this leaves it alone.
+    pub fn clear(&mut self, key: Key) {
+        if key.parent().is_some() {
+            self.own[key as usize] = None;
+        }
     }
 
     /// The scale for a frame: the screen, the text height, and the icon side
@@ -702,15 +994,40 @@ impl Look {
         let mut look = Look::default();
         let mut warnings = Vec::new();
         for e in &scan.entries {
-            match Key::from_path(&e.path) {
-                Some(Key::IconSize) if e.measure.uses(Unit::Icon) => {
+            let key = match Key::from_path(&e.path) {
+                Some(key) => key,
+                None => match Key::renamed(&e.path) {
+                    Some(key) => {
+                        warnings.push(format!(
+                            "line {}: `{}` is now `{}`",
+                            e.line + 1,
+                            e.path,
+                            key.path()
+                        ));
+                        key
+                    }
+                    None => {
+                        warnings
+                            .push(format!("line {}: unknown key `{}`", e.line + 1, e.path));
+                        continue;
+                    }
+                },
+            };
+            match e.measure {
+                Some(m) if key == Key::IconSize && m.uses(Unit::Icon) => {
                     return Err(SheetError {
                         line: e.line + 1,
-                        message: "icon.size cannot be measured in icons".to_string(),
+                        message: "type.icon.size cannot be measured in icons".to_string(),
                     });
                 }
-                Some(key) => look.set(key, e.measure),
-                None => warnings.push(format!("line {}: unknown key `{}`", e.line + 1, e.path)),
+                Some(m) => look.set(key, m),
+                None if key.parent().is_none() => {
+                    return Err(SheetError {
+                        line: e.line + 1,
+                        message: format!("`{}` has nothing to inherit from", key.path()),
+                    });
+                }
+                None => look.clear(key),
             }
         }
         Ok((look, warnings))
@@ -720,6 +1037,13 @@ impl Look {
     pub fn load(path: &str) -> Result<(Look, Vec<String>), String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
         Look::from_sheet(&text).map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// How a key's own value is written in a sheet: the measure, or the word
+    /// that says it takes its parent's.
+    fn written(&self, key: Key) -> String {
+        self.own(key)
+            .map_or_else(|| INHERIT.to_string(), |m| m.to_string())
     }
 
     /// The whole sheet, documented, as the app would write it fresh.
@@ -748,6 +1072,11 @@ impl Look {
             for line in wrap(key.doc(), 78usize.saturating_sub(indent.len() + 2)) {
                 out.push_str(&format!("{indent}# {line}\n"));
             }
+            // Where a key falls back to, on its own line above the value: a
+            // trailing comment would be in the way of the in-place rewrite.
+            if let Some(parent) = key.parent() {
+                out.push_str(&format!("{indent}# {INHERIT}s {}\n", parent.path()));
+            }
             // Values line up within a block: pad each name to the longest
             // leaf that shares its parents.
             let width = Key::ALL
@@ -756,7 +1085,7 @@ impl Look {
                 .map(|k| k.path().rsplit('.').next().unwrap_or("").len())
                 .max()
                 .unwrap_or(0);
-            out.push_str(&format!("{indent}{leaf:<width$}  {}\n", self.get(key)));
+            out.push_str(&format!("{indent}{leaf:<width$}  {}\n", self.written(key)));
         }
         out
     }
@@ -770,7 +1099,7 @@ impl Look {
         let mut inserts: Vec<(usize, String)> = Vec::new();
         let mut tail: Vec<String> = Vec::new();
         for &key in keys {
-            let value = self.get(key).to_string();
+            let value = self.written(key);
             if let Some(e) = scan.entries.iter().find(|e| e.path == key.path()) {
                 let raw = &lines[e.line];
                 lines[e.line] = format!("{}{}{}", &raw[..e.span.start], value, &raw[e.span.end..]);
@@ -826,8 +1155,8 @@ impl Look {
                     .iter()
                     .copied()
                     .filter(|&k| match scan.entries.iter().find(|e| e.path == k.path()) {
-                        Some(e) => e.measure != self.get(k),
-                        None => self.get(k) != defaults.get(k),
+                        Some(e) => e.measure != self.own(k),
+                        None => self.own(k) != defaults.own(k),
                     })
                     .collect();
                 let out = self
@@ -864,12 +1193,86 @@ mod tests {
     #[test]
     fn every_default_parses_and_icon_size_is_not_circular() {
         for &key in Key::ALL {
-            let d = key.default_measure();
             assert!(!key.doc().is_empty(), "{} has no note", key.path());
-            assert!(!d.uses(Unit::Icon) || key != Key::IconSize);
+            if let Some(d) = key.default_measure() {
+                assert!(!d.uses(Unit::Icon) || key != Key::IconSize);
+            }
         }
-        assert_eq!(Key::from_path("page.gap.item"), Some(Key::GapItem));
-        assert_eq!(Key::from_path("page.gap"), None);
+        assert_eq!(Key::from_path("type.gap.item"), Some(Key::GapItem));
+        assert_eq!(Key::from_path("type.gap"), None);
+    }
+
+    /// The cascade has to bottom out, or a key would resolve to nothing. A
+    /// key that inherits must have a parent, every chain must end at a key
+    /// that ships a measure, and no chain may loop.
+    #[test]
+    fn every_chain_ends_at_a_measure() {
+        for &key in Key::ALL {
+            assert!(
+                key.default_measure().is_some() || key.parent().is_some(),
+                "{} has neither a default nor a parent",
+                key.path()
+            );
+            let chain: Vec<Key> = key.chain().collect();
+            assert!(
+                chain.len() <= Level::Id as usize + 2,
+                "{} has a chain {} long - a loop?",
+                key.path(),
+                chain.len()
+            );
+            let top = chain.last().copied().expect("a chain holds its own key");
+            assert!(
+                top.default_measure().is_some(),
+                "{} ends at {}, which ships nothing",
+                key.path(),
+                top.path()
+            );
+            // Specificity only ever increases toward the leaf.
+            for pair in chain.windows(2) {
+                assert!(
+                    pair[0].level() > pair[1].level(),
+                    "{} inherits from {}, which is no less specific",
+                    pair[0].path(),
+                    pair[1].path()
+                );
+            }
+        }
+    }
+
+    /// The three levels resolve most-specific first, and clearing a level
+    /// hands the measure back to the one above it.
+    #[test]
+    fn an_id_beats_a_class_beats_a_type() {
+        let mut look = Look::default();
+        // Shipped: the id inherits, the class is set, the type is the floor.
+        assert_eq!(look.own(Key::ManualField), None);
+        assert_eq!(look.source(Key::ManualField), Key::PathWidth);
+        assert_eq!(look.get(Key::ManualField), look.get(Key::PathWidth));
+
+        // Setting the class moves every path field that has no measure of
+        // its own - which is what one class is for.
+        look.set(Key::PathWidth, m("30em"));
+        assert_eq!(look.get(Key::ManualField), m("30em"));
+        assert_eq!(look.get(Key::LoggingPath), m("30em"));
+        // And not one that has: the reference field ships its own.
+        assert_ne!(look.get(Key::LoggingReference), m("30em"));
+
+        // Setting the id beats the class.
+        look.set(Key::ManualField, m("6em"));
+        assert_eq!(look.source(Key::ManualField), Key::ManualField);
+        assert_eq!(look.get(Key::ManualField), m("6em"));
+        assert_eq!(look.get(Key::LoggingPath), m("30em"));
+
+        // Clearing it hands the field back to the class.
+        look.clear(Key::ManualField);
+        assert_eq!(look.get(Key::ManualField), m("30em"));
+        // Clearing the class hands every one of them to the type.
+        look.clear(Key::PathWidth);
+        assert_eq!(look.get(Key::ManualField), look.get(Key::FieldWidth));
+        // A key at the top of a cascade has nothing to fall back to, so it
+        // keeps what it has rather than resolving to nothing.
+        look.clear(Key::FieldWidth);
+        assert_eq!(look.get(Key::FieldWidth), Key::FieldWidth.default_measure().unwrap());
     }
 
     #[test]
@@ -965,10 +1368,26 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn regenerate_the_shipped_sheet() {
+        std::fs::write("gps-gui.look", Look::default().to_sheet()).unwrap();
+    }
+
+    /// The sheet the repo ships is the generated one, so it documents the
+    /// keys as they are rather than as they were. `cargo test
+    /// regenerate_the_shipped_sheet -- --ignored` writes it again.
+    #[test]
     fn the_shipped_sheet_reads_clean() {
         let text = include_str!("../gps-gui.look");
-        let (_, warnings) = Look::from_sheet(text).unwrap_or_else(|e| panic!("gps-gui.look: {e}"));
+        let (look, warnings) =
+            Look::from_sheet(text).unwrap_or_else(|e| panic!("gps-gui.look: {e}"));
         assert!(warnings.is_empty(), "gps-gui.look: {warnings:?}");
+        assert_eq!(look, Look::default());
+        assert_eq!(
+            text,
+            Look::default().to_sheet(),
+            "gps-gui.look is out of date - regenerate it"
+        );
     }
 
     #[test]
@@ -978,15 +1397,61 @@ mod tests {
         let (back, warnings) = Look::from_sheet(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(back, look);
-        // Every key is on the sheet by its leaf name under its block.
-        assert!(text.contains("\npage\n"));
-        assert!(text.contains("    margin  2.5%\n"));
+        // Every key is on the sheet by its leaf name under its block, and
+        // the three levels are the blocks they sit in.
+        assert!(text.contains("\ntype\n"));
+        assert!(text.contains("\nclass\n"));
+        assert!(text.contains("\nid\n"));
+        assert!(text.contains("        margin  2.5%\n"));
         assert!(text.contains("        item     0.5em\n"));
+        // An inheriting key is on the sheet as the word, with a note above
+        // it naming what it takes.
+        assert!(text.contains("# inherits class.path.width\n"), "{text}");
+        assert!(text.contains("width  inherit\n"), "{text}");
+    }
+
+    /// An old sheet still loads: every name it could hold is read as the key
+    /// it became, and the warning says so rather than dropping the line.
+    #[test]
+    fn the_old_flat_names_still_load() {
+        let (look, warnings) =
+            Look::from_sheet("page\n    margin 4%\nsettings\n    path 30em\n").unwrap();
+        assert_eq!(look.get(Key::PageMargin), m("4%"));
+        assert_eq!(look.get(Key::SettingsConfigPath), m("30em"));
+        assert_eq!(
+            warnings,
+            vec![
+                "line 2: `page.margin` is now `type.page.margin`",
+                "line 4: `settings.path` is now `id.settings.config_path.width`",
+            ]
+        );
+        // Every old name maps to a key that is still there.
+        for (old, key) in RENAMED {
+            assert!(Key::from_path(old).is_none(), "{old} is still a live path");
+            assert!(Key::ALL.contains(key));
+        }
+    }
+
+    /// `inherit` is a value the sheet can carry, so the adjuster's "take the
+    /// class's" survives a save and a load.
+    #[test]
+    fn inherit_round_trips_through_a_sheet() {
+        let text = "id\n    logging\n        reference.width inherit\n";
+        let (look, warnings) = Look::from_sheet(text).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(look.own(Key::LoggingReference), None);
+        assert_eq!(look.get(Key::LoggingReference), look.get(Key::PathWidth));
+        // And writing it back says the same thing.
+        let out = look.edit_sheet(text, &[Key::LoggingReference]).unwrap();
+        assert_eq!(out, text);
+        // A key with nothing above it cannot inherit, and the line says so.
+        let err = Look::from_sheet("type\n    page\n        margin inherit\n").unwrap_err();
+        assert!(err.message.contains("nothing to inherit"), "{err}");
     }
 
     #[test]
     fn blocks_nest_and_dots_do_the_same() {
-        let text = "page\n    gap\n        item 1em\n    margin 3%\nbar.gap 0.2icon\n\ncontrol\n\tpad.x 1em\n";
+        let text = "type\n    gap\n        item 1em\n    page.margin 3%\n    bar.gap 0.2icon\n\ntype.control\n\tpad.x 1em\n";
         let (look, warnings) = Look::from_sheet(text).unwrap();
         assert!(warnings.is_empty());
         assert_eq!(look.get(Key::GapItem), m("1em"));
@@ -994,41 +1459,43 @@ mod tests {
         assert_eq!(look.get(Key::BarGap), m("0.2icon"));
         assert_eq!(look.get(Key::ControlPadX), m("1em"));
         // Untouched keys keep their defaults.
-        assert_eq!(look.get(Key::GapHair), Key::GapHair.default_measure());
+        assert_eq!(look.own(Key::GapHair), Key::GapHair.default_measure());
     }
 
     #[test]
     fn unknown_keys_warn_and_repeats_fail() {
-        let (look, warnings) = Look::from_sheet("page\n    margin 3%\n    wobble 1em\n").unwrap();
+        let (look, warnings) =
+            Look::from_sheet("type.page\n    margin 3%\n    wobble 1em\n").unwrap();
         assert_eq!(look.get(Key::PageMargin), m("3%"));
-        assert_eq!(warnings, vec!["line 3: unknown key `page.wobble`"]);
+        assert_eq!(warnings, vec!["line 3: unknown key `type.page.wobble`"]);
 
-        let err = Look::from_sheet("page.margin 3%\npage\n    margin 4%\n").unwrap_err();
+        let err =
+            Look::from_sheet("type.page.margin 3%\ntype.page\n    margin 4%\n").unwrap_err();
         assert_eq!(err.line, 3);
         assert!(err.message.contains("line 1"), "{err}");
     }
 
     #[test]
     fn malformed_lines_name_their_line() {
-        let err = Look::from_sheet("page\n    margin 3\n").unwrap_err();
+        let err = Look::from_sheet("type.page\n    margin 3\n").unwrap_err();
         assert_eq!(err.line, 2);
         assert!(err.message.contains("no unit"), "{err}");
         let err = Look::from_sheet("pa ge margin 3%\n").unwrap_err();
         assert_eq!(err.line, 1);
-        let err = Look::from_sheet("icon\n    size 1icon\n").unwrap_err();
+        let err = Look::from_sheet("type.icon\n    size 1icon\n").unwrap_err();
         assert_eq!(err.line, 2);
     }
 
     #[test]
     fn comments_and_blank_lines_are_skipped() {
-        let text = "# a sheet\n\npage   # the pages\n    margin 3%  # roomy\n\n";
+        let text = "# a sheet\n\ntype.page   # the pages\n    margin 3%  # roomy\n\n";
         let (look, _) = Look::from_sheet(text).unwrap();
         assert_eq!(look.get(Key::PageMargin), m("3%"));
     }
 
     #[test]
     fn edit_rewrites_only_the_value_and_keeps_the_rest() {
-        let text = "# my sheet\npage\n    margin    2.5%   # roomy\n    gap\n        item 0.5em\n\nbar\n    gap 0.15icon\n";
+        let text = "# my sheet\ntype\n    page.margin    2.5%   # roomy\n    gap\n        item 0.5em\n\n    bar.gap 0.15icon\n";
         let mut look = Look::default();
         look.set(Key::PageMargin, m("4%"));
         look.set(Key::GapHair, m("0.3em"));
@@ -1037,7 +1504,7 @@ mod tests {
         let out = look
             .edit_sheet(text, &[Key::PageMargin, Key::GapHair, Key::BarMarginX, Key::BeaconName])
             .unwrap();
-        let expected = "# my sheet\npage\n    margin    4%   # roomy\n    gap\n        item 0.5em\n        hair  0.3em\n\nbar\n    gap 0.15icon\n    margin.x  3%\nbeacon.name  9em\n";
+        let expected = "# my sheet\ntype\n    page.margin    4%   # roomy\n    gap\n        item 0.5em\n        hair  0.3em\n\n    bar.gap 0.15icon\n    bar.margin.x  3%\nid.beacon.name.width  9em\n";
         assert_eq!(out, expected);
         // And what was written reads back as what was meant.
         let (back, warnings) = Look::from_sheet(&out).unwrap();
@@ -1050,13 +1517,13 @@ mod tests {
 
     #[test]
     fn edit_keeps_a_range_the_file_had() {
-        let text = "settings\n    path 50%w min 8em max 22em\n";
+        let text = "id.settings\n    config_path.width 50%w min 8em max 22em\n";
         let (mut look, _) = Look::from_sheet(text).unwrap();
-        let mut path = look.get(Key::SettingsPath);
+        let mut path = look.get(Key::SettingsConfigPath);
         path.q.value = 60.0;
-        look.set(Key::SettingsPath, path);
-        let out = look.edit_sheet(text, &[Key::SettingsPath]).unwrap();
-        assert_eq!(out, "settings\n    path 60%w min 8em max 22em\n");
+        look.set(Key::SettingsConfigPath, path);
+        let out = look.edit_sheet(text, &[Key::SettingsConfigPath]).unwrap();
+        assert_eq!(out, "id.settings\n    config_path.width 60%w min 8em max 22em\n");
     }
 
     #[test]
@@ -1082,11 +1549,14 @@ mod tests {
 
         // A file that only names a few keys stays short: saving a look that
         // is otherwise at its defaults adds nothing to it.
-        std::fs::write(path, "page\n    margin 3%\n").unwrap();
+        std::fs::write(path, "type.page\n    margin 3%\n").unwrap();
         let mut look = Look::default();
         look.set(Key::PageMargin, m("3%"));
         assert_eq!(look.save(path), Ok(false));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "page\n    margin 3%\n");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "type.page\n    margin 3%\n"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -76,7 +76,7 @@ impl MyApp {
                         ui,
                         &mut self.config_path,
                         "/path/to/config.toml",
-                        Key::SettingsPath,
+                        Key::SettingsConfigPath,
                     );
                     if ui.button("Load").clicked() || submitted(ui, &resp) {
                         self.load_config();
@@ -147,7 +147,7 @@ impl MyApp {
                 ui,
                 &mut self.look_path,
                 "/path/to/gps-gui.look",
-                Key::SettingsPath,
+                Key::SettingsLookPath,
             );
             if ui.button("Load").clicked() || submitted(ui, &resp) {
                 self.load_look();

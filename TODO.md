@@ -37,6 +37,11 @@ overridden pair stays readable - only the themes themselves are contrast-tested.
 
 More color changes.
 
+~~Unify the sizes; type/class/id like CSS.~~
+The look sheet has three blocks and every key declares its parent, so an id
+falls back to a class and a class to a type. The adjuster picks the level:
+this one, every path field, every field.
+
 App needs to read the stats over usb from ESP as well.
 
 Have receiver mode to get info.
@@ -155,3 +160,7 @@ all settings (most) should be dropdowns.
 - Idle -> stored automatically should be off by default.
 
 - `advertising window` should not be for both tracking on period and advertising window, separate these.
+
+- Check if there is a difference with the `Connect` and `Connect to Sleeping`.
+
+- Use gps connected over BLE as current location option.

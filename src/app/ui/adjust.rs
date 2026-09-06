@@ -30,13 +30,11 @@ use crate::app::ui::theme::{probes, px, scale, Key, Probe};
 use crate::app::ui::widgets::{feedback_label, hint};
 use crate::app::MyApp;
 use crate::look::{Measure, Unit};
+use std::collections::HashMap;
 
 /// How long a press is held before it is a hold rather than a tap, in
 /// seconds.
 const HOLD_S: f64 = 0.5;
-
-/// The outline around a highlighted element, in text heights.
-const OUTLINE_EM: f32 = 0.12;
 
 /// The adjuster's state while it is open.
 pub(in crate::app) struct Adjust {
@@ -59,6 +57,11 @@ pub(in crate::app) struct Adjust {
     /// The hold list's rect last frame: its size is what keeps this frame's
     /// list on the screen, and a test reads it.
     list_rect: egui::Rect,
+    /// Which level of a key's cascade the panel is editing, for each key of
+    /// the picked element that has more than one. Absent means the level the
+    /// measure is coming from right now, which is what a fresh pick shows.
+    /// Cleared with the pick, the keys being the old element's.
+    editing: HashMap<Key, Key>,
 }
 
 impl Default for Adjust {
@@ -71,6 +74,7 @@ impl Default for Adjust {
             folded: false,
             panel_height: 0.0,
             list_rect: egui::Rect::NOTHING,
+            editing: HashMap::new(),
         }
     }
 }
@@ -147,6 +151,8 @@ fn describe(p: &Probe) -> String {
 #[derive(Default)]
 struct Asks {
     edits: Vec<(Key, Measure)>,
+    /// Keys handed back to the level above them.
+    clears: Vec<Key>,
     save: bool,
     reload: bool,
     defaults: bool,
@@ -235,6 +241,7 @@ impl MyApp {
                     adjust.list_rect = popup.response.rect;
                     if let Some(p) = choice {
                         adjust.picked = Some(p);
+                        adjust.editing.clear();
                         adjust.picking = false;
                         close = true;
                     }
@@ -270,6 +277,9 @@ impl MyApp {
 
         for (key, measure) in asks.edits {
             self.set_measure(key, measure);
+        }
+        for key in asks.clears {
+            self.clear_measure(key);
         }
         if asks.defaults {
             self.reset_look();
@@ -338,6 +348,7 @@ impl MyApp {
                 .and_then(|pos| under(all, pos).into_iter().next())
             {
                 adjust.picked = Some((&top).into());
+                adjust.editing.clear();
                 adjust.picking = false;
             }
         }
@@ -367,7 +378,7 @@ impl MyApp {
     ) {
         let painter = ctx.debug_painter();
         let em = scale(ctx).em;
-        let width = em * OUTLINE_EM;
+        let width = px(ctx, Key::AdjustOutline);
         if let Some(picked) = &adjust.picked {
             let stroke = egui::Stroke::new(width, self.config.ui.ok);
             for p in all.iter().filter(|p| picked.matches(p)) {
@@ -434,10 +445,39 @@ impl MyApp {
             let scale = scale(ui.ctx());
             let slider_width = px(ui.ctx(), Key::SettingsSlider);
             for &key in &picked.keys {
-                let mut m = self.look.get(key);
+                // Which key of the cascade this row is dragging: whichever
+                // the level picker was left on, or - on a fresh pick - the
+                // one the measure is actually coming from, since that is the
+                // one a drag would otherwise appear to do nothing to.
+                let chain: Vec<Key> = key.chain().collect();
+                let mut level = adjust
+                    .editing
+                    .get(&key)
+                    .copied()
+                    .filter(|k| chain.contains(k))
+                    .unwrap_or_else(|| self.look.source(key));
+                let mut m = self.look.get(level);
                 let mut changed = false;
+                let mut clear = false;
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(key.path()).on_hover_text(key.doc());
+                    // One level, no picker: a measure that nothing else
+                    // shares is named rather than chosen.
+                    if chain.len() == 1 {
+                        ui.label(key.path()).on_hover_text(key.doc());
+                    } else {
+                        egui::ComboBox::from_id_salt(("adjust_level", key))
+                            .selected_text(level.path())
+                            .show_ui(ui, |ui| {
+                                for &k in &chain {
+                                    ui.selectable_value(&mut level, k, k.path())
+                                        .on_hover_text(format!(
+                                            "{}\n\nMoves {}.",
+                                            k.doc(),
+                                            k.level().reach()
+                                        ));
+                                }
+                            });
+                    }
                     ui.spacing_mut().slider_width = slider_width;
                     let range = m.q.unit.range();
                     let slider = egui::Slider::new(&mut m.q.value, range.start..=range.end)
@@ -452,7 +492,7 @@ impl MyApp {
                         .show_ui(ui, |ui| {
                             for u in Unit::ALL {
                                 // The icon cannot be measured in icons.
-                                if key == Key::IconSize && u == Unit::Icon {
+                                if level == Key::IconSize && u == Unit::Icon {
                                     continue;
                                 }
                                 ui.selectable_value(&mut unit, u, u.suffix())
@@ -463,17 +503,40 @@ impl MyApp {
                         m.convert(unit, &scale);
                         changed = true;
                     }
-                    let default = key.default_measure();
+                    // Reset takes the level back to what the app ships for
+                    // it, which for a level that ships nothing is the same
+                    // thing as handing it back up.
+                    let shipped = level.default_measure();
+                    let own = self.look.own(level);
                     let reset = ui
-                        .add_enabled(m != default, egui::Button::new("Reset"))
+                        .add_enabled(own != shipped, egui::Button::new("Reset"))
                         .on_hover_text(text::RESET_HOVER);
                     if reset.clicked() {
-                        m = default;
-                        changed = true;
+                        match shipped {
+                            Some(d) => {
+                                m = d;
+                                changed = true;
+                            }
+                            None => clear = true,
+                        }
+                    }
+                    // And Inherit drops it whatever the app ships, which is
+                    // how a level that ships a measure of its own is handed
+                    // back to the one above it.
+                    if level.parent().is_some() {
+                        let inherit = ui
+                            .add_enabled(own.is_some(), egui::Button::new("Inherit"))
+                            .on_hover_text(text::INHERIT_HOVER);
+                        if inherit.clicked() {
+                            clear = true;
+                        }
                     }
                 });
-                if changed {
-                    asks.edits.push((key, m));
+                adjust.editing.insert(key, level);
+                if clear {
+                    asks.clears.push(level);
+                } else if changed {
+                    asks.edits.push((level, m));
                 }
             }
         } else {
@@ -523,7 +586,7 @@ mod tests {
             probe("Button", &[Key::ControlHeight], 10.0, 110.0, 80.0, 40.0),
             probe(
                 "Text field",
-                &[Key::SettingsPath],
+                &[Key::SettingsConfigPath],
                 100.0,
                 110.0,
                 200.0,
@@ -555,7 +618,7 @@ mod tests {
         );
         assert_eq!(
             describe(&p),
-            "Checkbox (control.check.size, control.height)"
+            "Checkbox (type.control.check.size, type.control.height)"
         );
         let picked = Picked::from(&p);
         assert!(picked.matches(&p));

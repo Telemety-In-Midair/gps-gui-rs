@@ -76,16 +76,13 @@ pub(crate) mod settings {
          beacon and its distance stay drawn either way.";
 
     pub(crate) const COMPASS: &str =
-        "Heading-up always runs the compass at full rate. These are for the other modes, where \
-         it only points the arrow on your marker.";
+        "Phone compass tracking for marker arrow.";
     pub(crate) const ARROW_HZ_HOVER: &str =
         "Lower is cheaper: the sensor is fused from the accelerometer, gyroscope and \
          magnetometer, so it keeps all three awake";
 
     pub(crate) const STATUS_BAR: &str =
-        "A strip along the bottom of the map: the last few receptions as a bar graph, one bar \
-         per node in that node's map color, and beside it one node's signal, age, satellites \
-         and speed.";
+        "A status bar along the bottom of the map.";
     pub(crate) const STATUS_BAR_SHOW_HOVER: &str =
         "Covers a strip of the map, so it is worth having only while nodes are being heard";
     pub(crate) const STATUS_CYCLE_HOVER: &str =
@@ -442,6 +439,8 @@ pub(crate) mod adjust {
         "Nothing picked yet. Pick something to see the measures that shape it.";
     pub(crate) const UNDER_FINGER: &str = "Under the finger, smallest first";
     pub(crate) const RESET_HOVER: &str = "This measure back to its default";
+    pub(crate) const INHERIT_HOVER: &str =
+        "Drop this level's own measure and take the one above it";
     pub(crate) const SAVE_HOVER: &str =
         "Saves the changed measures.";
     pub(crate) const RELOAD_HOVER: &str = "Read the look sheet back, dropping unsaved changes";
