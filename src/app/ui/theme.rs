@@ -25,10 +25,11 @@ use crate::look::{Look, Scale, TOUCH_MIN};
 /// like [`TOUCH_MIN`], and so not in the sheet.
 const SCROLL_BAR_MIN: f32 = 8.0;
 
-/// egui's own body font size. Only a fallback: the style always has a `Body`
-/// entry, [`crate::app::MyApp::apply_ui_style`] writing the whole set before
-/// any of this runs.
-const DEFAULT_BODY_PT: f32 = 12.5;
+/// egui's own body font size (`egui::style::default_text_styles`). Only a
+/// fallback: the style always has a `Body` entry,
+/// [`crate::app::MyApp::apply_ui_style`] writing the whole set before any of
+/// this runs.
+const DEFAULT_BODY_PT: f32 = 13.0;
 
 /// What this frame is drawn with: the look, its scale for this screen, and
 /// whether the adjuster wants to know where things land.
