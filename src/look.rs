@@ -508,7 +508,7 @@ keys! {
         "Side margin of a menu button, inside the page margin.";
     MenuRowGap: "type.menu.row.gap" = "0.3icon", _,
         "Between two menu buttons.";
-    MenuText: "type.menu.text" = "0.5icon", _,
+    MenuText: "type.menu.text" = "0.7icon", _,
         "Text size on a menu button, which its glyph is sized to as well.";
 
     PathWidth: "class.path.width" = "50%w min 8em max 22em", FieldWidth,
