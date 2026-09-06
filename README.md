@@ -9,8 +9,10 @@ position and the track behind it.
 - **Type**: [0xProto](https://github.com/0xType/0xProto), embedded in the binary
   (SIL OFL 1.1, `assets/fonts/0xProto-OFL.txt`)
 - **Map**: [walkers](https://github.com/podusowski/walkers) slippy-map widget
-- **Tiles**: OpenStreetMap over HTTP, cached to disk (`.cache/`) so previously
-  viewed areas keep rendering offline
+- **Tiles**: OpenStreetMap (standard and OpenTopoMap) or, with `[map] tiles =
+  "arcgis"`, Esri's ArcGIS basemaps (streets, outdoor and satellite imagery)
+  under an API key. Fetched over HTTP and cached to disk (`.cache/`) so
+  previously viewed areas keep rendering offline
 - **GPS**: the phone's built-in GNSS (Android LocationManager over JNI) on
   device; a simulated source on desktop. Both feed the same channel, so an
   external BLE ([btleplug](https://github.com/deviceplug/btleplug)) source could
@@ -92,7 +94,9 @@ face still lays out as designed.
 `app-settings.toml` beside the tile cache (the repo's copy is the generated
 default). `[phone]` names this device and says whether its own receiver runs;
 `[ble] location` lets the connected node's GPS be the position instead, which
-is the default. The node's own settings, including its mode (stored, idle,
+is the default. `[map] tiles` picks OpenStreetMap or ArcGIS; the map's layer
+button cycles the layers the provider has, satellite among them on ArcGIS,
+and `[map] arcgis_key` replaces the built-in key with one of your own. The node's own settings, including its mode (stored, idle,
 tracking, or listening beside the phone), live on the node and are edited on
 the Bluetooth page.
 
@@ -108,5 +112,7 @@ moves the measures behind it live, then writes the sheet back in place. See
 ## Offline maps
 
 HTTP tiles are cached to `.cache/`, so areas you have already viewed load
-without a network. For fully offline use, walkers also supports a local tile
-directory (`LocalTiles`) or a bundled `.pmtiles` file.
+without a network. Settings > Offline maps > Download region fetches every
+tile of a box drawn on the map down to a chosen zoom, on whichever provider
+and layer is showing, into the same cache. For fully offline use, walkers also
+supports a local tile directory (`LocalTiles`) or a bundled `.pmtiles` file.

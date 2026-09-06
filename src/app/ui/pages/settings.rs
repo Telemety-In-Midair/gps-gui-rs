@@ -22,6 +22,7 @@ use crate::config::{
     DistanceUnits, ThemeChoice, COMPASS_HZ_MAX, COMPASS_HZ_MIN, RSSI_DBM_MAX, RSSI_DBM_MIN,
     STATUS_CYCLE_MAX, STATUS_CYCLE_MIN, TEXT_SCALE_MAX, TEXT_SCALE_MIN,
 };
+use crate::tiles::TileProvider;
 
 /// The step the text-size slider moves in.
 const TEXT_SCALE_STEP: f64 = 0.05;
@@ -146,6 +147,7 @@ impl MyApp {
                 self.theme_ui(ui);
                 self.colors_ui(ui);
                 self.overlays_ui(ui);
+                self.map_tiles_ui(ui);
                 self.map_bars_ui(ui);
                 self.compass_ui(ui);
                 self.status_bar_ui(ui);
@@ -378,6 +380,34 @@ impl MyApp {
                 ui.selectable_value(&mut self.config.distance.units, units, label);
             }
         });
+    }
+
+    /// Who serves the map's tiles. ArcGIS is the provider with satellite
+    /// imagery, which the map's layer button then cycles to; its key field
+    /// is only shown while it is picked, an OpenStreetMap map having no use
+    /// for one.
+    fn map_tiles_ui(&mut self, ui: &mut egui::Ui) {
+        section!(ui, "Map tiles", text::MAP_TILES);
+        gap(ui, Key::GapTight);
+        ui.horizontal_wrapped(|ui| {
+            for provider in TileProvider::ALL {
+                ui.selectable_value(&mut self.config.map.tiles, provider, provider.label());
+            }
+        });
+        if self.config.map.tiles == TileProvider::ArcGis {
+            gap(ui, Key::GapHair);
+            hint!(ui, text::ARCGIS_LAYERS);
+            row(ui, "API key:", |ui| {
+                text_field(
+                    ui,
+                    &mut self.config.map.arcgis_key,
+                    "built-in key",
+                    Key::SettingsArcGisKey,
+                );
+            })
+            .response
+            .on_hover_text(text::ARCGIS_KEY_HOVER);
+        }
     }
 
     /// The two bars over the map: how see-through they are, and the key

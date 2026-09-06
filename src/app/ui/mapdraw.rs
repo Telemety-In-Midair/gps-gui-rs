@@ -8,13 +8,12 @@
 
 use egui::emath::Rot2;
 use egui::{epaint::TextShape, Pos2, Shape};
-use walkers::{lat_lon, Map, Position, Projector, Tiles};
+use walkers::{lat_lon, HttpTiles, Map, Position, Projector};
 
-use crate::app::{ease_heading, MarkerKind, MyApp, RegionSelect, ARROW_TAU};
+use crate::app::{ease_heading, http_options, MarkerKind, MyApp, RegionSelect, ARROW_TAU};
 use crate::config::remote_color;
 use crate::marker::{GpsLayer, RemoteDraw};
 use crate::points::TrackPoint;
-use crate::tiles::MapLayer;
 
 /// Where the map looks before the first GPS fix arrives.
 pub(super) fn default_position() -> Position {
@@ -182,12 +181,25 @@ impl MyApp {
         let allow_pan = !locked && !pinching && !picking;
 
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(map_rect));
-        // Draw whichever base layer is selected; both share `map_memory` (so the
-        // view is unchanged by the switch) and the on-disk cache.
-        let tiles: &mut dyn Tiles = match self.layer {
-            MapLayer::Standard => &mut self.tiles,
-            MapLayer::Topo => &mut self.topo_tiles,
-        };
+        // Draw whichever source is selected; every source shares `map_memory`
+        // (so the view is unchanged by a switch) and the on-disk cache. The
+        // widget for a source is made the first time it is drawn, and the
+        // ones of another provider or key are dropped then: their tiles stay
+        // on disk, and the decoded ones were for a map no longer shown.
+        let source = self.map_source();
+        // A 512 px source draws map zoom z from tile level z - 1, which zoom 0
+        // has no level for, so the map is held at its first drawable zoom.
+        let floor = f64::from(source.zoom_offset());
+        if self.map_memory.zoom() < floor {
+            let _ = self.map_memory.set_zoom(floor);
+        }
+        self.tile_sets.retain(|s, _| s.same_provider(&source));
+        let cache_dir = self.cache_dir.clone();
+        let ctx = ui.ctx().clone();
+        let tiles = self
+            .tile_sets
+            .entry(source.clone())
+            .or_insert_with(|| HttpTiles::with_options(source, http_options(cache_dir), ctx));
         let map = Map::new(Some(tiles), &mut self.map_memory, my_position)
             .with_plugin(layer)
             // We drive zoom manually above on both platforms (walkers' own zoom

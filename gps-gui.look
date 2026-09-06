@@ -116,7 +116,7 @@ type
             # Between two menu buttons.
             gap     0.3icon
         # Text size on a menu button, which its glyph is sized to as well.
-        text    0.5icon
+        text    0.7icon
 
 class
     path
@@ -227,6 +227,10 @@ id
             width  inherit
         look_path
             # The look sheet path field on the Settings page.
+            # inherits class.path.width
+            width  inherit
+        arcgis_key
+            # The ArcGIS key field on the Settings page.
             # inherits class.path.width
             width  inherit
         slider

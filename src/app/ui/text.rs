@@ -69,6 +69,11 @@ pub(crate) mod settings {
     pub(crate) const REMOTE_PATHS_HOVER: &str = "The LoRa nodes the connected node relays, one color each";
     pub(crate) const PULSE_HOVER: &str = "A node's marker pulses while it was heard within this";
 
+    pub(crate) const MAP_TILES: &str = "Who serves the map.";
+    pub(crate) const ARCGIS_LAYERS: &str =
+        "Streets, outdoor and satellite; the map's layer button cycles them.";
+    pub(crate) const ARCGIS_KEY_HOVER: &str = "Empty uses the key the app ships with";
+
     pub(crate) const MAP_BARS: &str = "The bars over the map.";
     pub(crate) const BAR_OPACITY_HOVER: &str = "0 shows the map through both bars";
     pub(crate) const KEY_HOVER: &str = "One row per marker color, under the top bar";
@@ -341,6 +346,7 @@ pub(crate) mod map {
     pub(crate) const HEADING_UP: &str = "Heading up";
     pub(crate) const TOPO_MAP: &str = "Topographic map";
     pub(crate) const STANDARD_MAP: &str = "Standard map";
+    pub(crate) const SATELLITE_MAP: &str = "Satellite";
     pub(crate) const ZOOM_IN: &str = "Zoom in";
     pub(crate) const ZOOM_OUT: &str = "Zoom out";
     pub(crate) const HIDE_PATHS: &str = "Hide paths";

@@ -589,6 +589,8 @@ keys! {
         "The config path field on the Settings page.";
     SettingsLookPath: "id.settings.look_path.width" = inherit, PathWidth,
         "The look sheet path field on the Settings page.";
+    SettingsArcGisKey: "id.settings.arcgis_key.width" = inherit, PathWidth,
+        "The ArcGIS key field on the Settings page.";
     SettingsSlider: "id.settings.slider.width" = "45%w", _,
         "The text-size slider. Off the screen rather than the text: its own label \
         grows while it is dragged, and a width in text heights would walk out from \

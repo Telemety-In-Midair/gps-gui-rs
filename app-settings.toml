@@ -34,7 +34,9 @@ show = false        # draw the distance label on the line to the node
 units = "metric"    # "metric" (km/m) or "imperial" (mi/ft)
 dotted = true       # draw distance line dotted rather than solid
 
-[map]                # the map page's overlays
+[map]                # the map page: its tiles and its overlays
+tiles = "osm"        # "osm" (OpenStreetMap, OpenTopoMap) or "arcgis" (Esri streets, outdoor, satellite)
+arcgis_key = ""      # your own ArcGIS key; empty uses the built-in one
 bar_opacity = 1.0    # the top bar and the status bar backgrounds, 0 - 1
 show_key = true      # the color key under the top bar
 

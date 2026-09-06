@@ -41,7 +41,10 @@
 //! units = "metric"    # "metric" (km/m) or "imperial" (mi/ft)
 //! dotted = true       # draw the user<->node line dotted rather than solid
 //!
-//! [map]               # the map page's overlays
+//! [map]               # the map page: its tiles and its overlays
+//! tiles = "osm"       # "osm" (OpenStreetMap, OpenTopoMap) or "arcgis" (Esri
+//!                     # streets, outdoor and satellite, under an API key)
+//! arcgis_key = ""     # your own ArcGIS key; empty uses the built-in one
 //! bar_opacity = 1.0   # the top bar and the status bar backgrounds, 0 - 1
 //! show_key = true     # the color key under the top bar
 //!
@@ -91,6 +94,7 @@ use serde::Deserialize;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::solarized;
+use crate::tiles::TileProvider;
 
 /// Colors used to draw the map markers.
 #[derive(Clone, Copy)]
@@ -314,10 +318,16 @@ impl Default for PhoneSettings {
 /// What this device is called when nobody has named it.
 pub const DEFAULT_PHONE_NAME: &str = "Phone";
 
-/// The map page's own overlays: how see-through its two bars are, and
-/// whether the color key is drawn.
-#[derive(Clone, Copy)]
+/// The map page: who serves its tiles, and its own overlays - how
+/// see-through its two bars are, and whether the color key is drawn.
+#[derive(Clone)]
 pub struct MapSettings {
+    /// Who serves the tiles. ArcGIS is the provider with satellite imagery.
+    pub tiles: TileProvider,
+    /// An ArcGIS API key of your own; empty means the built-in one
+    /// ([`crate::tiles::DEFAULT_ARCGIS_KEY`]). Only read while `tiles` is
+    /// ArcGIS.
+    pub arcgis_key: String,
     /// Opacity of the controls bar and the status bar backgrounds, 0 (the
     /// map shows through) to 1 (solid).
     pub bar_opacity: f32,
@@ -328,6 +338,8 @@ pub struct MapSettings {
 impl Default for MapSettings {
     fn default() -> Self {
         Self {
+            tiles: TileProvider::Osm,
+            arcgis_key: String::new(),
             bar_opacity: 1.0,
             show_key: true,
         }
@@ -748,6 +760,8 @@ struct RawPhone {
 
 #[derive(Deserialize, Default)]
 struct RawMap {
+    tiles: Option<String>,
+    arcgis_key: Option<String>,
     bar_opacity: Option<f32>,
     show_key: Option<bool>,
 }
@@ -1074,6 +1088,15 @@ impl AppConfig {
             self.distance.units.as_str().into(),
         );
         set(&mut doc, "distance", "dotted", self.distance.dotted.into());
+        set(&mut doc, "map", "tiles", self.map.tiles.as_str().into());
+        // Kept as an empty string, like the theme overrides, so the key is
+        // there to paste into.
+        set(
+            &mut doc,
+            "map",
+            "arcgis_key",
+            self.map.arcgis_key.trim().into(),
+        );
         set(
             &mut doc,
             "map",
@@ -1230,7 +1253,9 @@ impl AppConfig {
              units = \"{units}\"    # \"metric\" (km/m) or \"imperial\" (mi/ft)\n\
              dotted = {dotted}       # draw distance line dotted rather than solid\n\
              \n\
-             [map]                # the map page's overlays\n\
+             [map]                # the map page: its tiles and its overlays\n\
+             tiles = \"{tiles}\"        # \"osm\" (OpenStreetMap, OpenTopoMap) or \"arcgis\" (Esri streets, outdoor, satellite)\n\
+             arcgis_key = \"{arcgis_key}\"      # your own ArcGIS key; empty uses the built-in one\n\
              bar_opacity = {bar_opacity:?}    # the top bar and the status bar backgrounds, 0 - 1\n\
              show_key = {show_key}      # the color key under the top bar\n\
              \n\
@@ -1293,6 +1318,8 @@ impl AppConfig {
             show = self.distance.show,
             units = self.distance.units.as_str(),
             dotted = self.distance.dotted,
+            tiles = self.map.tiles.as_str(),
+            arcgis_key = self.map.arcgis_key.trim(),
             bar_opacity = self.map.bar_opacity,
             show_key = self.map.show_key,
             enabled = self.ble.enabled,
@@ -1398,6 +1425,12 @@ impl AppConfig {
         }
         if let Some(v) = raw.distance.dotted {
             config.distance.dotted = v;
+        }
+        if let Some(s) = raw.map.tiles {
+            config.map.tiles = TileProvider::parse(&s)?;
+        }
+        if let Some(s) = raw.map.arcgis_key {
+            config.map.arcgis_key = s.trim().to_string();
         }
         if let Some(v) = raw.map.bar_opacity {
             if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -1591,6 +1624,8 @@ mod tests {
         assert_eq!(back.phone.location, cfg.phone.location);
         assert_eq!(back.map.bar_opacity, cfg.map.bar_opacity);
         assert_eq!(back.map.show_key, cfg.map.show_key);
+        assert_eq!(back.map.tiles, cfg.map.tiles);
+        assert_eq!(back.map.arcgis_key, cfg.map.arcgis_key);
         assert_eq!(back.lora.pulse_secs, cfg.lora.pulse_secs);
         assert_eq!(back.status_bar.rssi_top_dbm, cfg.status_bar.rssi_top_dbm);
         assert_eq!(back.status_bar.rssi_bottom_dbm, cfg.status_bar.rssi_bottom_dbm);
@@ -1651,6 +1686,33 @@ mod tests {
         assert!(!cfg.map.show_key);
         assert_eq!(cfg.lora.pulse_secs, 0.0);
         assert_eq!(AppConfig::default().lora.pulse_secs, 10.0);
+    }
+
+    /// The tile provider and its key read back from a file, a file that
+    /// predates them stays on OpenStreetMap, and a key is stored trimmed so
+    /// a pasted newline never reaches a URL.
+    #[test]
+    fn map_tiles_and_key_are_read_and_default_to_osm() {
+        let cfg = AppConfig::from_toml("[map]\ntiles = \"ArcGIS\"\narcgis_key = \" abc \"\n").unwrap();
+        assert_eq!(cfg.map.tiles, TileProvider::ArcGis);
+        assert_eq!(cfg.map.arcgis_key, "abc");
+        let old = AppConfig::from_toml("[map]\nshow_key = false\n").unwrap();
+        assert_eq!(old.map.tiles, TileProvider::Osm);
+        assert_eq!(old.map.arcgis_key, "");
+        assert!(AppConfig::from_toml("[map]\ntiles = \"google\"").is_err());
+
+        let path = std::env::temp_dir().join(format!("gps-gui-tiles-{}.toml", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        let mut cfg = AppConfig::default();
+        cfg.map.tiles = TileProvider::ArcGis;
+        cfg.map.arcgis_key = "mine".to_string();
+        cfg.save(&path).unwrap();
+        cfg.save(&path).unwrap();
+        let back = AppConfig::load(&path).unwrap();
+        assert_eq!(back.map.tiles, TileProvider::ArcGis);
+        assert_eq!(back.map.arcgis_key, "mine");
+        let _ = std::fs::remove_file(path);
     }
 
     /// The map switch for the connected board reads back from a file, and a

@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use egui::emath::Rot2;
+use walkers::sources::TileSource;
 use walkers::{Position, Projector};
 
 use crate::app::ui::icons;
@@ -28,9 +29,6 @@ use crate::tiles::MapLayer;
 /// Refuse offline downloads bigger than this many tiles (tile-server
 /// courtesy; shrink the box or lower the max zoom instead).
 const MAX_REGION_TILES: u64 = 10_000;
-
-/// Rough average size of a cached OSM tile, for the download estimate.
-const TILE_SIZE_ESTIMATE_KB: u64 = 15;
 
 /// Zoom levels past the current view a region download offers, and the highest
 /// it will ever reach.
@@ -191,6 +189,7 @@ impl MyApp {
         // before the transient popups so a confirmation still lands on top of
         // it.
         self.map_status_bar(ctx, screen);
+        self.attribution_ui(ctx, screen);
 
         // Selection hint / download confirmation, floating over everything.
         self.select_ui(ctx, screen);
@@ -483,11 +482,15 @@ impl MyApp {
         }
     }
 
-    /// Base-layer toggle between the standard map and the topographic one.
+    /// Base-layer button: cycles the layers the tile provider has (standard
+    /// and topographic; satellite too under ArcGIS), showing the one a press
+    /// goes to.
     fn layer_button(&mut self, ui: &mut egui::Ui, icon: f32) {
-        let (glyph, hint, next) = match self.layer {
-            MapLayer::Standard => (icons::topo(), text::TOPO_MAP, MapLayer::Topo),
-            MapLayer::Topo => (icons::map(), text::STANDARD_MAP, MapLayer::Standard),
+        let next = self.layer.next(self.config.map.tiles);
+        let (glyph, hint) = match next {
+            MapLayer::Standard => (icons::map(), text::STANDARD_MAP),
+            MapLayer::Topo => (icons::topo(), text::TOPO_MAP),
+            MapLayer::Satellite => (icons::satellite(), text::SATELLITE_MAP),
         };
         if icon_button(ui, icon, glyph).on_hover_text(hint).clicked() {
             self.layer = next;
@@ -829,8 +832,12 @@ impl MyApp {
             RegionSelect::Confirm { a, b, mut max_zoom } => {
                 let mut close = false;
                 let error_color = self.config.ui.error;
-                // Topo tiles stop at zoom 17; don't offer levels the server 404s.
-                let layer_max = self.layer.max_zoom();
+                // The stepper counts map zooms, which is what the zoom buttons
+                // show; the source turns them into the tile levels it fetches
+                // (one lower on a 512 px source). Topo tiles stop at zoom 17;
+                // don't offer levels the server 404s.
+                let source = self.map_source();
+                let layer_max = source.download_max_zoom();
                 let rect = floating(
                     ctx,
                     "select_confirm",
@@ -852,10 +859,11 @@ impl MyApp {
                                 max_zoom += 1;
                             }
                         });
-                        let count = offline::tile_count(a, b, max_zoom);
+                        let max_level = source.tile_level(max_zoom);
+                        let count = offline::tile_count(a, b, max_level);
                         ui.label(format!(
                             "{count} tiles, ~{} MB",
-                            (count * TILE_SIZE_ESTIMATE_KB).div_ceil(1024).max(1)
+                            (count * source.tile_kb()).div_ceil(1024).max(1)
                         ));
                         if count > MAX_REGION_TILES {
                             ui.colored_label(error_color, text::TOO_MANY_TILES);
@@ -868,8 +876,8 @@ impl MyApp {
                                 if let Some(dir) = &self.cache_dir {
                                     self.download = Some(offline::spawn_download(
                                         dir.clone(),
-                                        self.layer,
-                                        offline::region_tiles(a, b, max_zoom),
+                                        source.clone(),
+                                        offline::region_tiles(a, b, max_level),
                                         ctx.clone(),
                                     ));
                                 }
@@ -894,6 +902,38 @@ impl MyApp {
                 };
             }
         }
+    }
+
+    /// The tile source's credit line, bottom left over the map, as every
+    /// source's terms ask for. Small, on the bar fill so it reads over any
+    /// tiles, and not interactable so the map under it still pans. It gives
+    /// way to the download read-out, which floats in the same corner and
+    /// matters more for as long as it is there.
+    fn attribution_ui(&self, ctx: &egui::Context, screen: egui::Rect) {
+        if self.download.is_some() {
+            return;
+        }
+        let credit = self.map_source().attribution().text;
+        let bottom = self.bottom_overlay_inset(ctx);
+        let margin = corner_margin(ctx);
+        let fill = self.bar_fill(ctx);
+        let pad_x = px(ctx, Key::FieldPadX) as i8;
+        let pad_y = px(ctx, Key::GapHair) as i8;
+        egui::Area::new(egui::Id::new("attribution"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.left_bottom() + egui::vec2(margin, -(margin + bottom)))
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .movable(false)
+            .interactable(false)
+            .constrain(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(fill)
+                    .inner_margin(egui::Margin::symmetric(pad_x, pad_y))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(credit).small().weak());
+                    });
+            });
     }
 
     /// Progress readout for the offline tile download, floating bottom-left

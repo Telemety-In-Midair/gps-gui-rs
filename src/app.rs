@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -8,10 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use egui::Pos2;
 use gps_proto::packet::{self, Ack, PositionPacket};
 use midair_proto::ble;
-use walkers::{
-    lat_lon, sources::OpenStreetMap, HeaderValue, HttpOptions, HttpTiles, MapMemory, Position,
-    Projector,
-};
+use walkers::{lat_lon, HeaderValue, HttpOptions, HttpTiles, MapMemory, Position, Projector};
 
 use crate::ble::{
     board_label, BleCommand, BleEvent, BleHandle, BleRequest, ConfigWrite, Epoch, NodePing,
@@ -27,7 +24,7 @@ use crate::look::{Key, Look, Measure};
 use crate::offline::{self, DownloadProgress};
 use crate::points::{BoardId, PointSource, TrackPoint};
 use crate::radio::{self, EditVal, RadioDoc};
-use crate::tiles::{MapLayer, OpenTopoMap};
+use crate::tiles::{MapLayer, MapSource, MAX_MAP_ZOOM};
 
 /// The view layer (page rendering + shared egui scaffolding). Kept in a
 /// submodule so this file holds only state and the core update logic; the
@@ -561,7 +558,7 @@ impl MarkerKind {
 /// are reused from disk, so previously viewed areas keep working without a
 /// network. `None` disables the cache. The user agent matches the offline
 /// downloader's so both read and write the same cache entries.
-fn http_options(cache_dir: Option<PathBuf>) -> HttpOptions {
+pub(crate) fn http_options(cache_dir: Option<PathBuf>) -> HttpOptions {
     HttpOptions {
         cache: cache_dir,
         user_agent: Some(HeaderValue::from_static(offline::USER_AGENT)),
@@ -709,12 +706,13 @@ fn uptime_text(secs: u16) -> String {
 }
 
 pub struct MyApp {
-    /// Standard OpenStreetMap tiles.
-    tiles: HttpTiles,
-    /// OpenTopoMap topographic tiles, shown when `layer` is `Topo`. Both share
-    /// the same on-disk cache (keyed by URL) and the same `map_memory`.
-    topo_tiles: HttpTiles,
-    /// Which tile layer is currently drawn.
+    /// The tile widget of each source drawn so far, made the first time the
+    /// map shows it (see `MyApp::map`). All share the same on-disk cache
+    /// (keyed by URL) and the same `map_memory`, so a switch between them
+    /// leaves the view where it was.
+    tile_sets: HashMap<MapSource, HttpTiles>,
+    /// Which layer is currently drawn, on whichever provider `[map] tiles`
+    /// names. Session state: the bar's layer button cycles it.
     layer: MapLayer,
     map_memory: MapMemory,
     /// The phone's own GPS source, when the platform has one (Android).
@@ -1022,16 +1020,7 @@ impl MyApp {
         let (zoom_tx, zoom_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
-            tiles: HttpTiles::with_options(
-                OpenStreetMap,
-                http_options(cache_dir.clone()),
-                ctx.clone(),
-            ),
-            topo_tiles: HttpTiles::with_options(
-                OpenTopoMap,
-                http_options(cache_dir.clone()),
-                ctx,
-            ),
+            tile_sets: HashMap::new(),
             layer: MapLayer::Standard,
             map_memory: MapMemory::default(),
             gps,
@@ -2123,16 +2112,27 @@ impl MyApp {
             self.map_memory.center_at(target);
         }
         if let Some(dir) = self.cache_dir.clone() {
-            let current_zoom = self.map_memory.zoom().round().clamp(0.0, 19.0) as u8;
+            let current_zoom = self
+                .map_memory
+                .zoom()
+                .round()
+                .clamp(0.0, f64::from(MAX_MAP_ZOOM)) as u8;
             offline::spawn_offline_zoom(
                 dir,
-                self.layer,
+                self.map_source(),
                 target,
                 current_zoom,
                 self.zoom_tx.clone(),
                 ctx.clone(),
             );
         }
+    }
+
+    /// The tile source on screen: the current layer on the provider the
+    /// settings name, under the configured key. What the map draws, what a
+    /// region download fetches and what the offline probe looks for.
+    pub(crate) fn map_source(&self) -> MapSource {
+        MapSource::new(self.config.map.tiles, self.layer, &self.config.map.arcgis_key)
     }
 
     /// The markers the center button can center on, in menu order: you first
@@ -3058,6 +3058,13 @@ impl eframe::App for MyApp {
         // position sources likewise.
         self.sync_compass_power();
         self.sync_location_sources();
+        // The provider may have changed on the Settings page and taken the
+        // layer on screen with it (satellite is ArcGIS's alone); the map then
+        // starts over from the standard layer rather than drawing a stand-in
+        // under a button that says otherwise.
+        if !self.config.map.tiles.has(self.layer) {
+            self.layer = MapLayer::Standard;
+        }
 
         let ctx = ui.ctx().clone();
         // Before anything is drawn: the pages read these colors and text sizes

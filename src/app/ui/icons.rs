@@ -86,6 +86,10 @@ pub(super) fn radio() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/radio.svg")
 }
 
+pub(super) fn satellite() -> egui::ImageSource<'static> {
+    egui::include_image!("../../../assets/icons/satellite.svg")
+}
+
 pub(super) fn settings() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/settings.svg")
 }

@@ -76,6 +76,8 @@ graph TD
         Solarized["solarized.rs<br/>the two themes"]
         Fonts["fonts.rs<br/>0xProto, embedded"]
         Clipboard["clipboard.rs<br/>Copy buttons"]
+        Tiles["tiles.rs<br/>the tile sources"]
+        Offline["offline.rs<br/>region downloads"]
     end
 
     Loop --> Pages
@@ -97,6 +99,10 @@ graph TD
     MyApp -->|apply_ui_style, on a change| Solarized
     MyApp -->|once, at startup| Fonts
     MyApp -->|on a Copy press| Clipboard
+    MyApp -->|map_source| Tiles
+    MyApp -->|a download, the offline probe| Offline
+    Offline --> Tiles
+    Draw -->|a tile widget per source| Tiles
     Theme -->|reads each frame| Look
     Theme -->|em is the row height of| Fonts
     Loop --> Adjust
@@ -707,6 +713,19 @@ edges. The key wrinkles:
   worth keeping when the map is too busy to read. It replaced the old "clear
   tracks" button; discarding the points moved to the Settings page, off the bar
   used while moving.
+- **The layer button** cycles the base layers the tile provider has
+  (`TileProvider::layers`): standard and topographic on OpenStreetMap; streets,
+  outdoor and satellite on ArcGIS (`[map] tiles`). Its glyph is the layer a
+  press goes to. `MyApp::layer` is session state; the frame loop drops it back
+  to standard when the provider stops having it, so switching to
+  OpenStreetMap while on satellite is not a satellite button over a street
+  map. `MyApp::map_source` is the source those two make, under the configured
+  key, and `MyApp::map` keeps one `HttpTiles` per source drawn (`tile_sets`),
+  made on first use and dropped when the provider or the key changes.
+- **Attribution** (`attribution_ui`) is the source's credit line, small in the
+  bottom left corner on the bar fill, not interactable; every provider's terms
+  ask for it. It gives way to the download read-out, which floats in the same
+  corner.
 - **Marker info.** A single tap projects each marker to screen space (the
   same projection + rotation the marker layer draws with) and selects the
   closest one within a hit radius; a miss dismisses the popup. The tap is
@@ -806,7 +825,10 @@ Confirm`.
 - `select_ui` (Foreground) shows the "drag a box" hint (with a Cancel button,
   since there is no longer a toolbar toggle to cancel) and then the confirm
   panel: a max-zoom stepper and the tile-count/size estimate, gated by
-  `MAX_REGION_TILES`.
+  `MAX_REGION_TILES`. The stepper counts map zooms, up to the source's
+  `download_max_zoom`; the count and the tiles fetched are in the source's
+  tile levels (`MapSource::tile_level`), one below the map zoom on the 512 px
+  ArcGIS styles, and the size estimate is per source (`tile_kb`).
 - Confirming calls `offline::spawn_download`; `download_ui` shows progress
   floating bottom-left on every page until dismissed.
 
@@ -835,9 +857,10 @@ Settings holds what the app owns and can save: the settings file itself, this
 device (`[phone] name`, and which receivers supply the position - see
 "Position sources"), the text size of the pages, the marker colors and overlay
 sizes, what the map draws (the paths, the remote pulse window, the distance
-read-out), the two bars over the map (`[map] bar_opacity`, `show_key`), the
-compass rate behind the marker arrow, the map status bar and its dBm span,
-track recording, and the offline-map download.
+read-out), who serves the map (`[map] tiles`, `arcgis_key`), the two bars
+over the map (`[map] bar_opacity`, `show_key`), the compass rate behind the
+marker arrow, the map status bar and its dBm span, track recording, and the
+offline-map download.
 Everything the *node* owns, plus the link that reaches it, is on the Bluetooth
 page below. The beacon-related app settings (`[ble] enabled`, `mac` and the
 `[ble.names]` nicknames) live there anyway, because they decide how the link is
@@ -850,6 +873,11 @@ sending you back here for it, writing the same file and sharing the same
   about survive, and only the values it owns are replaced (each keeps the decor
   of the value it replaced). With no file there, it generates a documented one
   from `AppConfig::to_toml`, which doubles as the "generate a config" action.
+- **Map tiles** (`map_tiles_ui`) is the provider picker, `TileProvider::ALL`:
+  OpenStreetMap, or ArcGIS with its key field, which only shows while ArcGIS is
+  picked. The key is stored trimmed and empty means the built-in one
+  (`tiles::DEFAULT_ARCGIS_KEY`), so the generated file carries `arcgis_key =
+  ""` the way it carries the theme overrides.
 - **Reset to defaults** drops `AppConfig` back to its built-in defaults in memory
   only; the file is untouched until the next Save, so a Load undoes it.
 - **The default path** (`default_config_path`) is the config file beside the tile

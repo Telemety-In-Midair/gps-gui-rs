@@ -4,6 +4,14 @@ Items struck through in `TODO.md`, summarized. Newest first.
 
 ## 2026-09-06
 
+- **ArcGIS maps.** `[map] tiles = "arcgis"` on the Settings page ("Map
+  tiles") draws Esri's streets and outdoor styles from the static basemap
+  tiles service and satellite imagery from World Imagery, under a built-in
+  API key that `[map] arcgis_key` replaces. The map's layer button cycles
+  the layers the provider has, satellite among them; region downloads and
+  the offline zoom fallback follow the source on screen, converting map zooms
+  to the tile levels a 512 px style is fetched at. Every source now shows its
+  credit line in the map's bottom left corner.
 - **Make top bar a dropdown.** A chevron tab hangs from the top right corner
   and folds the map's controls bar away; the bar's button row centers in the
   width left of it. The zoom buttons moved to a column in the bottom right
