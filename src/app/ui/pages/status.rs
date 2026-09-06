@@ -107,7 +107,7 @@ impl MyApp {
     /// reporting. First on the page because it is the one section that needs
     /// no board at all.
     fn position_ui(&mut self, ui: &mut egui::Ui) {
-        section!(ui, "Position");
+        section!(ui, "Your position");
         match self.current {
             Some(pos) => {
                 ui.monospace(format!("{:.5}, {:.5}", pos.y(), pos.x()));

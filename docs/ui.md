@@ -33,6 +33,11 @@ The UI is [egui](https://docs.rs/egui) in immediate mode, driven each frame by
     page hands it rows and it hands back a picture. `statusbar.rs` is the map's
     optional bottom bar - the recent-signal graph plus one node's read-out.
 
+Two of the pieces the UI is drawn *with* are top-level modules rather than
+`ui` ones, both being pure data with no drawing in them: `src/solarized.rs` is
+the two themes (below) and `src/fonts.rs` is the embedded typeface, 0xProto,
+installed into the context once in `MyApp::new`.
+
 The page renderers read state that lives outside the UI too: `src/config.rs`
 holds the app's own TOML settings, `src/radio.rs` holds the board's RADIO.TOML
 model the Radio page edits (and the airtime estimate the Radio page prints),
@@ -66,6 +71,8 @@ graph TD
         Logging["logging.rs"]
         Points["points.rs"]
         Look["look.rs<br/>the look sheet"]
+        Solarized["solarized.rs<br/>the two themes"]
+        Fonts["fonts.rs<br/>0xProto, embedded"]
     end
 
     Loop --> Pages
@@ -84,7 +91,10 @@ graph TD
     MyApp --> Logging
     MyApp --> Points
     MyApp --> Look
+    MyApp -->|apply_ui_style, on a change| Solarized
+    MyApp -->|once, at startup| Fonts
     Theme -->|reads each frame| Look
+    Theme -->|em is the row height of| Fonts
     Loop --> Adjust
     Adjust --> Theme
 ```
@@ -212,6 +222,51 @@ where are a piece of writing, and having them inline is what turns a page of
 controls into a page of string literals with controls between them. Copy that
 takes a value (`text::beacon::wake_check(min, max)`) is a function, `format!`
 needing a literal pattern.
+
+## Themes and type (`solarized.rs` + `fonts.rs`)
+
+Note the split of names: `ui/theme.rs` is *sizes*, `src/solarized.rs` is
+*colors*. Nothing in the pages reads either directly - a page reads a measure
+through `theme.rs` and a color out of `ui.visuals()`, which is where the theme
+has already been put.
+
+Both themes are [Solarized](https://github.com/altercation/solarized): sixteen
+fixed colors, eight of them a monotone run used in one order for the light
+theme and the reverse for the dark one. That is why `solarized.rs` describes
+the two with one set of `Roles` - `ground`, `surface`, `line`, `text`,
+`strong` - and fills them from either end of the run. The eight accents keep
+their values in both; only three are used (blue for links, the cursor and the
+selection; orange for warnings; red for errors), and the palette's green, red
+and orange are also the defaults of the `[ui] ok` / `error` / `pulse` keys, so
+the page colors that carry meaning belong to the same set as the rest.
+
+`solarized::visuals(theme)` builds on egui's own light or dark visuals, so
+everything that is not a color - corner radii, shadows, handle shapes, the
+transfer function text is rendered with - stays what egui chose for that side.
+Two departures from egui's defaults are deliberate:
+
+- **A resting button gets a frame.** Solarized holds its grounds close together
+  on purpose (`base3` against `base2` is a very small step), and without a
+  1-point frame in `line` a button is hard to find on the page it sits on.
+- **The selection is pulled most of the way back to the page.** The accents are
+  far stronger than the monotones between them, so a full-strength blue fill
+  would swallow the text in it.
+
+`[ui] theme` (`config::ThemeChoice`: `light`, `dark`, `system`) is set into
+egui's *theme preference* by `apply_ui_style` before it reads back which theme
+that resolves to - egui picks the active style through the preference, so
+writing visuals for a theme it is not on would leave them undrawn. `system`
+follows the desktop or phone while the app runs; the default is light.
+
+The face is 0xProto ([0xType/0xProto](https://github.com/0xType/0xProto), SIL
+OFL 1.1), a monospaced face drawn for code, which is close to what these pages
+are: coordinates, signal figures, MAC addresses and timings, where a digit
+lining up with the digit above it is worth more than a proportional one that
+does not. `fonts::install` puts it at the front of both font families -
+egui's own left behind it as fallbacks, which is what still draws the glyphs it
+has no outline for - and `MyApp::new` calls it before the first frame, because
+every measure on the pages is a multiple of the body text height and that
+height is the face's.
 
 ## Measures (`theme.rs`)
 
@@ -612,16 +667,21 @@ sending you back here for it, writing the same file and sharing the same
   be saved. On desktop the cache is relative, leaving the plain filename in the
   working directory. It is both what starts loaded and what Save writes back to.
 - **Colors are in two tables.** `[colors]` is the map (`track`, `fixed`, and the
-  `outline` ring around both dots); `[ui]` is the pages: `ok`, `error` and the
-  `pulse` on a toolbar button with no target, where the color *is* the message,
-  plus `background`, `button` and `text` - the surfaces and the text everything
-  else is drawn with - and `text_scale`, how big that text is.
+  `outline` ring around both dots); `[ui]` is the pages: `theme`, which of the
+  two solarized themes they are drawn in, then `ok`, `error` and the `pulse` on
+  a toolbar button with no target, where the color *is* the message, plus
+  `background`, `button` and `text` - the surfaces and the text everything else
+  is drawn with - and `text_scale`, how big that text is.
+- **`theme` is `light` (the default), `dark` or `system`,** edited by the picker
+  under "Theme". It is a `ThemeChoice` rather than a bool so `system` can mean
+  "follow the desktop or phone", which it then does for as long as the app runs.
+  See "Themes and type" above for what the two themes are.
 - **Those three are theme overrides, and empty means "don't".**
   `Option<Color32>`, written as `""` when unset so the key stays in the file.
   `MyApp::apply_ui_style` pushes them into the visuals before any page is
-  drawn: it starts from `Theme::default_visuals` every time rather than editing
-  what is there, so clearing an override (or switching theme) restores the theme
-  without the app holding a copy of it. It runs only when the theme, one of the
+  drawn: it starts from `solarized::visuals(theme)` every time rather than
+  editing what is there, so clearing an override (or switching theme) restores
+  the theme without the app holding a copy of it. It runs only when the theme, one of the
   colors or the text scale moved - writing the style clones it, and the map
   repaints continuously.
 - **Text size is the fourth key in `[ui]`.** `text_scale` (0.8 - 2.5, edited by

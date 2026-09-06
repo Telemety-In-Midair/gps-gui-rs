@@ -18,8 +18,8 @@ use crate::app::ui::widgets::{
 };
 use crate::app::{MyApp, Page, RegionSelect};
 use crate::config::{
-    DistanceUnits, COMPASS_HZ_MAX, COMPASS_HZ_MIN, STATUS_CYCLE_MAX, STATUS_CYCLE_MIN,
-    TEXT_SCALE_MAX, TEXT_SCALE_MIN,
+    DistanceUnits, ThemeChoice, COMPASS_HZ_MAX, COMPASS_HZ_MIN, STATUS_CYCLE_MAX,
+    STATUS_CYCLE_MIN, TEXT_SCALE_MAX, TEXT_SCALE_MIN,
 };
 
 /// The step the text-size slider moves in.
@@ -96,6 +96,7 @@ impl MyApp {
 
                 self.text_size_ui(ui);
                 self.look_ui(ui);
+                self.theme_ui(ui);
                 self.colors_ui(ui);
                 self.overlays_ui(ui);
                 self.compass_ui(ui);
@@ -174,6 +175,19 @@ impl MyApp {
         });
         gap(ui, Key::GapItem);
         feedback_label(ui, self.config.ui, &self.look_feedback);
+    }
+
+    /// Which theme the pages are drawn in. The three overrides under "Page
+    /// colors" are laid over whichever one this picks, so the order on the page
+    /// is the order they are applied in.
+    fn theme_ui(&mut self, ui: &mut egui::Ui) {
+        section!(ui, "Theme", text::THEME);
+        gap(ui, Key::GapTight);
+        ui.horizontal_wrapped(|ui| {
+            for choice in ThemeChoice::ALL {
+                ui.selectable_value(&mut self.config.ui.theme, choice, choice.label());
+            }
+        });
     }
 
     /// The marker colors, the few page colors that carry meaning, and the

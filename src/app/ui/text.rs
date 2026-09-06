@@ -20,7 +20,7 @@ pub(crate) mod points {
 
 /// The desktop manual-position bar.
 pub(crate) mod manual {
-    pub(crate) const BAD_COORD: &str = "Enter latitude and longitude, example 51.4779, -0.0015";
+    pub(crate) const BAD_COORD: &str = "Enter latitude and longitude, example `51.4779, -0.0015`";
 }
 
 /// The Status page.
@@ -28,37 +28,36 @@ pub(crate) mod status {
     pub(crate) const WAITING_FIX: &str = "Waiting for a GPS fix...";
 
     pub(crate) const WARMING: &str =
-        "Warming up: the board has only just connected, and a GPS that was cold when the board \
-         booted is still working on its first fix.";
+        "Warming up: the board has only just connected.";
 
     pub(crate) const NO_TELEMETRY: &str = "No board telemetry yet.\n\
-         Waiting for the Wio-S3 board (an esp32c3 beacon does not report it).";
+         Waiting for a connection.";
 }
 
 /// The Settings page: the app's own TOML settings.
 pub(crate) mod settings {
-    pub(crate) const INTRO: &str = "What the app draws and records, kept in its own TOML file.";
+    pub(crate) const INTRO: &str = "App style, kept in its own TOML file.";
 
     pub(crate) const SAVE_HOVER: &str =
-        "Write these settings to the file above, generating it if it is not there";
+        "Write these settings to the file above.";
     pub(crate) const RESET_HOVER: &str = "Only in the app until you save";
 
     pub(crate) const TEXT_SCALE: &str =
-        "Scales the text on every page. The gaps and the input widths are measured in text \
-         heights, so they grow with it; the map's icons and overlays keep their own sizes.";
+        "Scales the text on every page.";
     pub(crate) const TEXT_SCALE_RESET_HOVER: &str = "Back to the default text size";
 
     pub(crate) const LOOK: &str =
-        "Every size and spacing on the pages, as fractions of the screen and the text, in a \
-         sheet of its own beside the config. The adjuster edits it live: pick a thing on any \
-         page and move the measures behind it.";
+        "Every size and spacing on the pages. The adjuster edits it live.";
     pub(crate) const LOOK_SAVE_HOVER: &str =
-        "Write the changed measures into the sheet above, generating it if it is not there";
+        "Write changes to file, if not there create it";
     pub(crate) const LOOK_RESET_HOVER: &str =
         "Every measure back to what the app ships with. Only in the app until you save";
     pub(crate) const ADJUST_HOVER: &str =
         "Float the adjuster over the pages: pick a thing, drag its measures, save";
     pub(crate) const ADJUST_OPEN: &str = "Already open. Its Done button closes it";
+
+    pub(crate) const THEME: &str =
+        "Solarized, either way up. System follows the desktop or phone.";
 
     pub(crate) const PAGE_COLORS: &str =
         "The few places off the map that carry meaning by color; the rest follows the theme.";
@@ -69,9 +68,7 @@ pub(crate) mod settings {
     pub(crate) const CENTRAL_PATH_HOVER: &str =
         "This device's own track. Hiding a path never stops it being recorded";
     pub(crate) const BOARD_ON_MAP_HOVER: &str =
-        "Its marker, heartbeat, path and the distance line to it. The link, the recording and \
-         the Status page carry on either way; this is for a board held next to the phone, \
-         where its marker only sits on top of yours";
+        "Its marker, heartbeat, path and the distance line to it. This is for a board held next to the phone.";
     pub(crate) const REMOTE_PATHS_HOVER: &str =
         "The LoRa nodes relayed by the connected board, one color each";
     pub(crate) const PATHS_NOTE: &str =
@@ -110,24 +107,20 @@ pub(crate) mod statusbar {
 pub(crate) mod beacon {
     use crate::app::secs_text;
 
-    pub(crate) const INTRO: &str = "The BLE link to a GPS beacon. One board at a time.";
+    pub(crate) const INTRO: &str = "The BLE link to a GPS beacon.";
 
     // Device picker.
     pub(crate) const SCAN_START_HOVER: &str =
-        "Look for boards nearby. This drops the current link, since only one board is connected \
-         at a time.";
+        "Look for boards nearby. This drops the current link.";
     pub(crate) const SCAN_STOP_HOVER: &str = "Stop looking and leave the list as it stands";
     pub(crate) const NO_BOARDS_SCANNING: &str =
         "No boards yet. A sleeping board only answers during its advertising window.";
     pub(crate) const NO_BOARDS_IDLE: &str =
-        "No boards known yet. Scan to find one, then name it so you can tell it apart later.";
+        "No boards known yet.";
     pub(crate) const ANY_BOARD_HOVER: &str =
-        "Connect to the first board that answers, whichever it is";
+        "Connect to the first board that answers.";
     pub(crate) const NAMES_NOTE: &str =
-        "Names typed here are the app's own and are saved with the rest of its settings; \
-         clearing one forgets the board. A name stored on the board itself (under Board name, \
-         once connected) travels with the board and is what every page calls it, over the \
-         name typed here. A board without one shows its address name in grey.";
+        "Names typed here are the app's own, clearing one forgets the board.";
 
     // Link controls.
     pub(crate) const RECONNECT_HOVER: &str =
@@ -163,11 +156,9 @@ pub(crate) mod beacon {
 
     // Board name.
     pub(crate) const BOARD_NAME_INTRO: &str =
-        "What the board calls itself. Stored in its flash, so it survives a power cycle and \
-         travels with the board to any phone; while it is set, it is the board's name on \
-         every page here, over the name typed in the list above.";
+        "What the board calls itself. Stored in flash, survives a power cycle.";
     pub(crate) const BOARD_NO_NAME: &str =
-        "Board: no name reported yet. A board on firmware older than names never reports one.";
+        "Board: no name reported yet.";
     pub(crate) const NAME_CLEAR_HOVER: &str =
         "Forget the stored name; the board goes back to advertising by its address";
 
@@ -241,10 +232,7 @@ pub(crate) mod beacon {
     /// and the sleep an idle board takes when its timeout runs out.
     pub(crate) fn wake_check(min_s: u32, max_s: u32) -> String {
         format!(
-            "How often a stored board wakes to ask whether anyone wants it, and the sleep an \
-             idle board takes when its timeout runs out. A tracking board ignores it. 0 means \
-             the board never stores itself on its own - though being told to store itself \
-             still works. Clamped to {} - {}.",
+            "How often a stored board wakes. 0 means it never sleeps. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -253,9 +241,7 @@ pub(crate) mod beacon {
     /// What the advertising window does, and the range it is clamped to.
     pub(crate) fn adv_window(min_s: u32, max_s: u32) -> String {
         format!(
-            "How long each wake check advertises before going back to sleep - the whole of \
-             the time a stored board is reachable. While tracking it is the on-half of the \
-             BLE off period instead. Clamped to {} - {}.",
+            "How long each wake check advertises before going back to sleep. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -268,16 +254,12 @@ pub(crate) mod beacon {
     ///
     /// Said in terms of what keeps running, because the name reads like the
     /// board going away: only the BLE controller stops. This is the largest
-    /// power saving the board has - roughly 70 mA of the 126 it draws - and
+    /// power saving the board has and
     /// it is the one setting where the cost is purely reachability rather
     /// than any loss of function.
     pub(crate) fn ble_off(min_s: u32, max_s: u32) -> String {
         format!(
-            "How long BLE is powered down between advertising windows while tracking. Saves \
-             about 70 mA of the board's 126 while down. It keeps beaconing, tracking and \
-             logging throughout - it just cannot be connected to until the next window. Only \
-             tracking reads this: idle exists to be reachable, and a stored board has no \
-             controller to take down. Clamped to {} - {}.",
+            "How long BLE is powered down between advertising windows while tracking. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -295,8 +277,7 @@ pub(crate) mod beacon {
     /// other control on this page is one.
     pub(crate) fn sleep_now(min_s: u32, max_s: u32) -> String {
         format!(
-            "A one-off, not a setting. Nothing is stored and the wake check above is not \
-             touched - the board comes back to exactly what it is doing now. Clamped to {} - {}.",
+            "A one-off, not a setting. Clamped to {} - {}.",
             secs_text(min_s),
             secs_text(max_s)
         )
@@ -391,9 +372,7 @@ pub(crate) mod logging {
     pub(crate) const CLEAR_HOVER: &str = "Empty the graph; the file on disk is untouched";
 
     pub(crate) const REFERENCE: &str =
-        "A fixed coordinate every logged position is also measured against, so a run can be \
-         read against a surveyed point rather than against a control device that is moving \
-         too. Leave it empty to log only the distance to yourself.";
+        "A fixed coordinate every logged position is also measured against. Leave it empty to log only the distance to yourself.";
     pub(crate) const BAD_COORD: &str = "Enter a coordinate as \"lat, lon\".";
 
     pub(crate) const LEGEND_HOVER: &str = "Show or hide this source";
@@ -456,15 +435,15 @@ pub(crate) mod map {
 /// The adjuster.
 pub(crate) mod adjust {
     pub(crate) const PICK_HOVER: &str =
-        "Arm the picker: the next tap picks the smallest thing under it. Hold, or right-click, \
-         for everything under the finger, the page included";
+        "The next tap picks the smallest thing under it. Hold, or right-click, \
+         for everything under the finger.";
     pub(crate) const PICKING: &str = "Tap a thing to pick it. Hold for a list.";
     pub(crate) const NOTHING_PICKED: &str =
         "Nothing picked yet. Pick something to see the measures that shape it.";
     pub(crate) const UNDER_FINGER: &str = "Under the finger, smallest first";
     pub(crate) const RESET_HOVER: &str = "This measure back to its default";
     pub(crate) const SAVE_HOVER: &str =
-        "Write the changed measures into the look sheet, generating it if it is not there";
+        "Saves the changed measures.";
     pub(crate) const RELOAD_HOVER: &str = "Read the look sheet back, dropping unsaved changes";
     pub(crate) const DEFAULTS_HOVER: &str =
         "Every measure back to what the app ships with. Only in the app until you save";

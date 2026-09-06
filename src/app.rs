@@ -916,6 +916,10 @@ impl MyApp {
     ) -> Self {
         // SVG loader for the button icons.
         egui_extras::install_image_loaders(&ctx);
+        // Before the first frame: every measure on the pages is a multiple of
+        // the body text height, so the face has to be in place before anything
+        // is sized off it.
+        crate::fonts::install(&ctx);
 
         let (zoom_tx, zoom_rx) = std::sync::mpsc::channel();
 
@@ -1183,11 +1187,12 @@ impl MyApp {
         }
     }
 
-    /// Push the `[ui]` table into the egui style: the surface and text colors
-    /// (`background`, `button` and `text`) into the visuals for the active
-    /// theme, and `text_scale` into the text styles.
+    /// Push the `[ui]` table into the egui style: `theme` into egui's theme
+    /// preference, the surface and text colors (`background`, `button` and
+    /// `text`) into the visuals for whichever theme that resolves to, and
+    /// `text_scale` into the text styles.
     ///
-    /// Each application starts from `Theme::default_visuals` and
+    /// Each application starts from [`crate::solarized::visuals`] and
     /// `default_text_styles` rather than editing what is already there, so
     /// clearing an override restores the theme without the app keeping a copy of
     /// it, and a scale is applied to the base sizes rather than compounding on
@@ -1198,6 +1203,17 @@ impl MyApp {
     /// that repaints continuously would pay for that every frame.
     fn apply_ui_style(&mut self, ctx: &egui::Context) {
         let colors = self.config.ui;
+        // The preference is set every frame, before the theme it resolves to is
+        // read: egui picks the active style through it, so writing the visuals
+        // for a theme it is not on would leave them undrawn. It costs a lock
+        // and a field, and the work below is still gated on the result moving.
+        ctx.options_mut(|o| {
+            o.theme_preference = colors.theme.preference();
+            // What "system" resolves to before the window manager has said
+            // (and on a platform that never does). egui's own fallback is
+            // dark; the app's default is light, so follow the app.
+            o.fallback_theme = egui::Theme::Light;
+        });
         let theme = ctx.theme();
         let wanted = AppliedStyle {
             theme,
@@ -1227,7 +1243,7 @@ impl MyApp {
             ui::apply_spacing(style, &look, screen);
         });
 
-        let mut visuals = theme.default_visuals();
+        let mut visuals = crate::solarized::visuals(theme);
         if let Some(c) = colors.background {
             visuals.panel_fill = c;
             visuals.window_fill = c;

@@ -4,6 +4,10 @@ A GPS tracking GUI written in Rust: an interactive slippy map that plots a live
 position and the track behind it.
 
 - **GUI**: [egui](https://github.com/emilk/egui) / eframe
+- **Theme**: [Solarized](https://github.com/altercation/solarized), light and
+  dark; light by default (`[ui] theme`)
+- **Type**: [0xProto](https://github.com/0xType/0xProto), embedded in the binary
+  (SIL OFL 1.1, `assets/fonts/0xProto-OFL.txt`)
 - **Map**: [walkers](https://github.com/podusowski/walkers) slippy-map widget
 - **Tiles**: OpenStreetMap over HTTP, cached to disk (`.cache/`) so previously
   viewed areas keep rendering offline
@@ -74,6 +78,14 @@ the other's list is short, so edit both.
   source, map state, current position, and track.
 - `src/marker.rs` - a walkers `Plugin` that draws the track polyline and the
   current-position marker.
+
+## Theme and type
+
+Both themes are Solarized, the same palette read either way up, built in
+`src/solarized.rs`. `[ui] theme` picks between `"light"` (the default), `"dark"`
+and `"system"`; the `background`, `button` and `text` keys override whichever
+one is drawn. Text is 0xProto at every size, embedded so a phone with no such
+face still lays out as designed.
 
 ## Look sheet
 

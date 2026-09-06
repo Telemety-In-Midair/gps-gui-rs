@@ -2,7 +2,8 @@
 
 Persist beacon notify interval in firmware flash?
 
-Set font?
+~~Set font?~~
+0xProto, embedded (`src/fonts.rs`), in front of egui's own for both families.
 
 Set interval for accelerometer, gps, BLE updates. 
 
@@ -28,11 +29,11 @@ bar graph of the last 10 receptions colored per node, and one node's signal,
 age, satellites (red/green on fix) and speed, cycling every `cycle_secs` when
 several are heard. Still missing: anything about our own link or the board.
 
-Toml color theme control. (partly done)
-`[colors] outline` and a new `[ui]` table (`ok`, `error`, `pulse`) replaced the
-hardcoded colors, and `[ui] background` / `button` / `text` override the theme
-(empty = follow it). What is left: the text-edit fill, the faint stripe and the
-selection color, and nothing checks that an overridden pair stays readable.
+~~Toml color theme control.~~
+`[ui] theme` picks solarized light (default), dark, or the system's, and the
+theme now owns the text-edit fill, the faint stripe and the selection as well.
+`background` / `button` / `text` still override it. Still unchecked: whether an
+overridden pair stays readable - only the themes themselves are contrast-tested.
 
 More color changes.
 
@@ -122,33 +123,19 @@ Where is default pulled from firmware.
 
 Only save edits?
 
-~~Connecting for, not properly resetting.~~
-The clock now restarts on every request (even a re-sent one) and when a live
-link drops, so the count is this attempt's rather than the whole session's.
+
 
 Add heartbeat on radio while no fix?
 
 Get address from esp over BLE.
 
-~~If no current point marker at last.~~
-A remote node's marker (and its popup/center/track targets) falls back to the
-last recorded track point when the live position is gone (board switch), so a
-known tracker never draws as a bare path.
+
 
 all settings (most) should be dropdowns.
 
-~~"Connected. The board stays awake until you disconnect." Status message can be even when not true.~~
-While connected but nothing has come off any characteristic for 3 notify
-intervals (min 10 s), the line says "Connected, but nothing from the board for
-X." instead, and is not painted in the all-well color.
 
-~~Need to make a logging mode, CSV with all stats for graphing. (Logging page with graph?)~~
-A Logging page (`src/logging.rs` + `src/app/ui/logging.rs`) records one CSV row
-per report - phone fix, board fix, node position or ping, telemetry - with the
-distance to you and to a configurable fixed reference filled in on the same row
-as the RSSI. The graph plots any stat against time or against another stat, so
-distance-vs-RSSI is a scatter. Export copies the CSV into the phone's Downloads
-through MediaStore (`src/export.rs`, no dex shim needed).
+
+
 
 - BLE scan should always show time scanning seconds. Seconds should show even when minutes show.
 - Make a transparency slider for this and the maps top bars backgrounds.
@@ -158,10 +145,13 @@ through MediaStore (`src/export.rs`, no dex shim needed).
 
 - On mobile: needs to get automatic place to save/load radio config. Also path copy button.
 
-- ~~Load radio settings from board not working?~~
-Android only, and nothing to do with the Radio page. The three connect-time
-reads (settings, radio config, name) were issued back to back, and Android
-refuses a GATT read while another is outstanding - so only the settings one
-ever answered, `board_radio_config` stayed empty and the button stayed grey.
-The reads now go one at a time, waiting for each value. Desktop already
-awaited each read and was never affected. Not yet confirmed on a device.
+- Make extras menu. Reduce normal menu count
+
+- Make status more separate, needs to be clear what is what. User vs node location.
+
+- Get rid of temporary BLE names under scan for board.
+- Board name should be last item in beacon settings.
+
+- Idle -> stored automatically should be off by default.
+
+- `advertising window` should not be for both tracking on period and advertising window, separate these.

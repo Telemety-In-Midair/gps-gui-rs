@@ -15,9 +15,10 @@
 //! outline = "#ffffff" # ring around the position and beacon dots
 //!
 //! [ui]                # the pages rather than the map: their colors and text
-//! ok = "#3cb44b"      # "yes" and the green feedback lines
-//! error = "#dc503c"   # "no", errors, and the red feedback lines
-//! pulse = "#c82828"   # a toolbar button flagging that it has no target
+//! theme = "light"     # "light", "dark" (both solarized) or "system"
+//! ok = "#859900"      # "yes" and the green feedback lines
+//! error = "#dc322f"   # "no", errors, and the red feedback lines
+//! pulse = "#cb4b16"   # a toolbar button flagging that it has no target
 //! background = ""     # pages, map bar and popups; empty follows the theme
 //! button = ""         # a button at rest; empty follows the theme
 //! text = ""           # body text and the toolbar glyphs; empty follows the theme
@@ -76,6 +77,8 @@ use egui::Color32;
 use serde::Deserialize;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
+use crate::solarized;
+
 /// Colors used to draw the map markers.
 #[derive(Clone, Copy)]
 pub struct MarkerColors {
@@ -121,17 +124,83 @@ pub fn remote_color(addr: u8) -> Color32 {
     REMOTE_PALETTE[addr as usize % REMOTE_PALETTE.len()]
 }
 
-/// The pages rather than the map: the feedback and status lines, the pulse on a
-/// toolbar button that has nothing to act on, the surfaces and text everything
-/// else is drawn with, and how big that text is.
+/// Which theme the pages are drawn in. Both are solarized
+/// ([`crate::solarized`]); the choice is which end of its monotone run is the
+/// page and which is the text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ThemeChoice {
+    /// Solarized light, and the app's default: these pages are read outdoors
+    /// more often than not.
+    #[default]
+    Light,
+    /// Solarized dark.
+    Dark,
+    /// Whichever of the two the desktop or the phone is set to, and it follows
+    /// that setting while the app runs.
+    System,
+}
+
+impl ThemeChoice {
+    /// Every choice, in the order the Settings page offers them.
+    pub const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::System];
+
+    /// The TOML spelling, the one [`Self::parse`] reads back.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+            ThemeChoice::System => "system",
+        }
+    }
+
+    /// The label on the Settings page's picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeChoice::Light => "Light",
+            ThemeChoice::Dark => "Dark",
+            ThemeChoice::System => "System",
+        }
+    }
+
+    /// What egui resolves the drawn theme through. `System` is the only one
+    /// that can change without the setting changing, the window manager owning
+    /// the answer.
+    pub fn preference(self) -> egui::ThemePreference {
+        match self {
+            ThemeChoice::Light => egui::ThemePreference::Light,
+            ThemeChoice::Dark => egui::ThemePreference::Dark,
+            ThemeChoice::System => egui::ThemePreference::System,
+        }
+    }
+
+    /// Parse the TOML `ui.theme` string (case-insensitive).
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_lowercase().as_str() {
+            "light" => Ok(ThemeChoice::Light),
+            "dark" => Ok(ThemeChoice::Dark),
+            "system" | "auto" => Ok(ThemeChoice::System),
+            other => Err(format!(
+                "invalid ui.theme {other:?}, expected \"light\", \"dark\" or \"system\""
+            )),
+        }
+    }
+}
+
+/// The pages rather than the map: which theme they are drawn in, the feedback
+/// and status lines, the pulse on a toolbar button that has nothing to act on,
+/// the surfaces and text everything else is drawn with, and how big that text
+/// is.
 ///
-/// The first three colors carry meaning by color and so are always set. The
-/// next three are overrides of the light/dark theme and default to `None`, which
-/// leaves the theme's own. They are independent, so setting only one of them is
-/// a way to end up with text that cannot be read on its background - the theme
-/// is what keeps them in step, and an override is a promise to do that by hand.
+/// `theme` picks the ground everything else sits on. The three colors after it
+/// carry meaning by color and so are always set. The three after those are
+/// overrides of that theme and default to `None`, which leaves the theme's own.
+/// They are independent, so setting only one of them is a way to end up with
+/// text that cannot be read on its background - the theme is what keeps them in
+/// step, and an override is a promise to do that by hand.
 #[derive(Clone, Copy)]
 pub struct UiSettings {
+    /// Which of the two themes the pages are drawn in.
+    pub theme: ThemeChoice,
     /// "yes" on the Status page, and the `Ok` feedback lines.
     pub ok: Color32,
     /// "no" on the Status page, error text, and the `Err` feedback lines.
@@ -160,9 +229,13 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
-            ok: Color32::from_rgb(60, 180, 75),
-            error: Color32::from_rgb(220, 80, 60),
-            pulse: Color32::from_rgb(200, 40, 40),
+            theme: ThemeChoice::Light,
+            // The palette's own green, red and orange: these three are the
+            // only page colors the theme does not reach, so leaving them on
+            // an unrelated set of primaries is what would look wrong.
+            ok: solarized::GREEN,
+            error: solarized::RED,
+            pulse: solarized::ORANGE,
             background: None,
             button: None,
             text: None,
@@ -568,6 +641,7 @@ struct RawColors {
 
 #[derive(Deserialize, Default)]
 struct RawUi {
+    theme: Option<String>,
     ok: Option<String>,
     error: Option<String>,
     pulse: Option<String>,
@@ -841,6 +915,7 @@ impl AppConfig {
             "outline",
             hex(self.colors.outline).into(),
         );
+        set(&mut doc, "ui", "theme", self.ui.theme.as_str().into());
         set(&mut doc, "ui", "ok", hex(self.ui.ok).into());
         set(&mut doc, "ui", "error", hex(self.ui.error).into());
         set(&mut doc, "ui", "pulse", hex(self.ui.pulse).into());
@@ -980,6 +1055,7 @@ impl AppConfig {
              outline = \"{outline}\" # ring around the position and beacon dots\n\
              \n\
              [ui]                 # the pages, not the map: their colors and text\n\
+             theme = \"{theme}\"      # \"light\", \"dark\" (both solarized) or \"system\"\n\
              ok = \"{ok}\"      # \"yes\" and the green feedback lines\n\
              error = \"{error}\"   # \"no\", errors, and the red feedback lines\n\
              pulse = \"{pulse}\"   # a toolbar button flagging that it has no target\n\
@@ -1036,6 +1112,7 @@ impl AppConfig {
             track = hex(self.colors.track),
             fixed = hex(self.colors.fixed),
             outline = hex(self.colors.outline),
+            theme = self.ui.theme.as_str(),
             ok = hex(self.ui.ok),
             error = hex(self.ui.error),
             pulse = hex(self.ui.pulse),
@@ -1085,6 +1162,9 @@ impl AppConfig {
         }
         if let Some(s) = raw.colors.outline {
             config.colors.outline = parse_hex(&s)?;
+        }
+        if let Some(s) = raw.ui.theme {
+            config.ui.theme = ThemeChoice::parse(&s)?;
         }
         if let Some(s) = raw.ui.ok {
             config.ui.ok = parse_hex(&s)?;
@@ -1271,6 +1351,7 @@ mod tests {
         let back = AppConfig::from_toml(&cfg.to_toml()).unwrap();
         assert_eq!(back.colors.fixed, cfg.colors.fixed);
         assert_eq!(back.colors.outline, cfg.colors.outline);
+        assert_eq!(back.ui.theme, cfg.ui.theme);
         assert_eq!(back.ui.ok, cfg.ui.ok);
         assert_eq!(back.ui.error, cfg.ui.error);
         assert_eq!(back.ui.pulse, cfg.ui.pulse);
@@ -1513,6 +1594,31 @@ mod tests {
         assert_eq!(back.ui.background, None);
         assert_eq!(back.ui.text, None);
         assert_eq!(back.ui.button, Some(Color32::from_rgb(32, 32, 32)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The default is the light theme, not the system's: this is an app that
+    /// gets read outdoors, and following a phone that is on dark at noon is
+    /// the wrong default for it.
+    #[test]
+    fn theme_defaults_to_light_and_round_trips() {
+        assert_eq!(AppConfig::default().ui.theme, ThemeChoice::Light);
+        assert!(AppConfig::from_toml("[ui]\ntheme = \"midnight\"").is_err());
+        assert_eq!(
+            AppConfig::from_toml("[ui]\ntheme = \"DARK\"").unwrap().ui.theme,
+            ThemeChoice::Dark
+        );
+        assert_eq!(
+            AppConfig::from_toml("[ui]\ntheme = \"auto\"").unwrap().ui.theme,
+            ThemeChoice::System
+        );
+
+        let cfg = AppConfig::from_toml("[ui]\ntheme = \"dark\"").unwrap();
+        let path = std::env::temp_dir().join("gps-gui-rs-config-theme-test.toml");
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(cfg.save(path).unwrap());
+        assert_eq!(AppConfig::load(path).unwrap().ui.theme, ThemeChoice::Dark);
         let _ = std::fs::remove_file(path);
     }
 

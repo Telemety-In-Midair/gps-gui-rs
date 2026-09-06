@@ -7,6 +7,8 @@ pub mod config;
 // Getting a recorded file off the control device. Cross-platform type; the
 // Android MediaStore path behind it is the only implementation so far.
 pub mod export;
+// The app's typeface, embedded: 0xProto, in front of egui's own.
+pub mod fonts;
 pub mod gps;
 pub mod logging;
 // The look sheet: every size in the UI as a fraction, read from a text file
@@ -16,6 +18,9 @@ pub mod marker;
 pub mod offline;
 pub mod points;
 pub mod radio;
+// The two themes the pages are drawn in: solarized, light and dark. Pure
+// color data, so it tests without a window.
+pub mod solarized;
 pub mod tiles;
 
 /// Android entry point.
