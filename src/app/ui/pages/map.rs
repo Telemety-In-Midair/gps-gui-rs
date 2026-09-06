@@ -146,13 +146,12 @@ impl MyApp {
         // Controls float on top in the foreground layer, so they keep pointer
         // priority over the (interactive) map behind them. The fill spans the
         // status-bar area; the top inset pushes the buttons clear of it. The
-        // tab in the corner folds the whole bar away, and the zoom column
-        // and the key go with it.
+        // tab hanging under the bar's right end folds the whole bar away, and
+        // the zoom column and the key go with it.
         let top = self.top_inset(ctx);
         let (margin_x, margin_y) = bar_margin(ctx);
         if self.map_bar_open {
             let fill = self.bar_fill(ctx);
-            let reserve = self.tab_reserve(ctx);
             let bar = egui::Area::new(egui::Id::new("controls"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(egui::Pos2::ZERO)
@@ -169,7 +168,7 @@ impl MyApp {
                             // past the right edge by the margin.
                             ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
                             ui.add_space(top);
-                            self.controls(ui, reserve);
+                            self.controls(ui);
                         });
                 });
             probe(
@@ -209,32 +208,27 @@ impl MyApp {
             .gamma_multiply(self.config.map.bar_opacity)
     }
 
-    /// How much of the bar's width the corner tab covers, past the bar's own
-    /// side margin, so the button row centers in the space left of it.
-    fn tab_reserve(&self, ctx: &egui::Context) -> f32 {
-        let (margin_x, _) = bar_margin(ctx);
-        (icon_size(ctx) + 2.0 * px(ctx, Key::MapTabPad) + corner_margin(ctx)
-            - f32::from(margin_x))
-        .max(0.0)
-    }
-
-    /// The tab hanging from the top right corner that folds the controls bar
-    /// away and brings it back. Drawn on top of the bar when the bar is up,
-    /// alone at the edge when it is not, so it is always in the one place.
+    /// The tab at the right edge that folds the controls bar away and brings
+    /// it back. It hangs under the bar while the bar is up, and moves up to
+    /// the top corner once the bar is folded: below the bar rather than over
+    /// it, so it never covers the menu button at the row's right end when a
+    /// narrow screen pushes the row out to the edge.
     fn bar_tab(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let icon = icon_size(ctx);
-        let top = self.top_inset(ctx);
         let margin = corner_margin(ctx);
         let pad = px(ctx, Key::MapTabPad);
         let fill = self.bar_fill(ctx);
-        let (glyph, hint) = if self.map_bar_open {
-            (icons::chevron_up(), text::FOLD_BAR)
+        // The bar is drawn before the tab each frame, so its height is this
+        // frame's. It starts at the top of the screen with the inset inside
+        // it, so its height is also where its bottom edge is.
+        let (glyph, hint, top) = if self.map_bar_open {
+            (icons::chevron_up(), text::FOLD_BAR, self.controls_height)
         } else {
-            (icons::chevron_down(), text::UNFOLD_BAR)
+            (icons::chevron_down(), text::UNFOLD_BAR, self.top_inset(ctx))
         };
         let area = egui::Area::new(egui::Id::new("map_bar_tab"))
-            // Over the bar, which is Foreground, so the tab wins the press
-            // where the two overlap.
+            // Over the popups that hang under the bar, which are Foreground,
+            // so the tab wins the press should one drift under it.
             .order(egui::Order::Tooltip)
             .fixed_pos(egui::pos2(screen.right() - margin, top))
             .pivot(egui::Align2::RIGHT_TOP)
@@ -359,9 +353,8 @@ impl MyApp {
     ///
     /// Every button whose glyph changes shows the state the press switches
     /// *to*, which is what a toolbar icon without a label has to do to be
-    /// readable. `reserve` is the width at the right end the corner tab
-    /// covers, which the row keeps clear of.
-    fn controls(&mut self, ui: &mut egui::Ui, reserve: f32) {
+    /// readable.
+    fn controls(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         // Taken off the icon rather than left on the style's text-derived
         // spacing, so enlarging the page text does not shrink the toolbar.
@@ -377,7 +370,7 @@ impl MyApp {
         // Center, track, layer, paths and the page menu are always there; the
         // zoom buttons live in the corner column now.
         let buttons = 5 + usize::from(show_rotate);
-        let avail = (ui.available_width() - reserve).max(1.0);
+        let avail = ui.available_width().max(1.0);
         // No button may take more than a 1/buttons share of the bar, padding and
         // spacing included, so a full row always fits the screen instead of
         // running off the right edge when the set grows.

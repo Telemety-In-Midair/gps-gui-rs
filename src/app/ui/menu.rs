@@ -184,12 +184,6 @@ impl MyApp {
             let used = 2.0 * margin + safe.top + safe.bottom + item_gap;
             ui.add_space(((screen.height() - used - content) / 2.0).max(0.0));
 
-            // The button font, which the glyph beside it is sized to as well,
-            // so label and icon keep their proportions on any screen.
-            ui.style_mut().text_styles.insert(
-                egui::TextStyle::Button,
-                egui::FontId::proportional(text_size),
-            );
             ui.spacing_mut().item_spacing.y = row_gap;
             // Drawn in the theme's strong text rather than its body text,
             // frame included: solarized holds its monotones close together,
@@ -206,10 +200,18 @@ impl MyApp {
             // makes `min_size` alone enough to size a row.
             ui.vertical_centered(|ui| {
                 for (page, label, src) in items {
+                    // The label carries its own size and the glyph beside it
+                    // is sized to match, so the two keep their proportions on
+                    // any screen. The size is on the text rather than in the
+                    // style's `Button` entry because egui's button takes its
+                    // font from the style's body text (or `override_font_id`)
+                    // and drops the `Button` entry on the way; a size set on
+                    // the `RichText` wins over both.
                     let image = egui::Image::new(src.clone())
                         .fit_to_exact_size(egui::vec2(text_size, text_size))
                         .tint(strong);
-                    let button = egui::Button::image_and_text(image, *label)
+                    let label = egui::RichText::new(*label).size(text_size);
+                    let button = egui::Button::image_and_text(image, label)
                         .selected(self.menu_marks(*page))
                         .min_size(row);
                     let resp = ui.add(button);

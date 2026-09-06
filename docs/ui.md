@@ -141,7 +141,7 @@ controlled by `egui::Order`, lowest first:
 - `Foreground` - the controls bar, the bottom status bar, floating popups, the
   manual GPS bar.
 - `Tooltip` - the floating corner page toggle on non-map pages, and the
-  map's bar tab, which sits over the bar it folds.
+  map's bar tab, which hangs under the bar it folds.
 - `Debug` - the adjuster, over everything, in one `Area` (below).
 
 Pointer priority follows the same order: a higher layer under the pointer wins
@@ -393,7 +393,9 @@ Because the pages are measured in text units, one setting resizes them:
 grows and the gaps, the input widths and now the controls grow with it - larger
 text is not larger glyphs in the same cramped rows. What it does not touch is anything measured off
 the screen or the icon: the toolbar, the menu page's buttons (sized to the icon,
-text included, so a scaled label would not fit them) and the map overlays, whose
+text included, so a scaled label would not fit them; the size rides on the
+label's `RichText`, since egui's `Button` reads the body font and ignores a
+`TextStyle::Button` entry) and the map overlays, whose
 sizes are `[sizes]` and are set separately.
 
 ## The look sheet and the adjuster (`look.rs` + `adjust.rs`)
@@ -617,13 +619,14 @@ neither receiver is on.
 The map is a full-bleed `Background` area so it can overscan past the screen
 edges. The key wrinkles:
 
-- **The bar folds.** A tab hangs from the top right corner
-  (`MyApp::bar_tab`, at the `Tooltip` order so it wins the press where it
-  overlaps the bar): a chevron up folds the controls bar away, a chevron down
-  brings it back. `MyApp::map_bar_open` is session state. The zoom column
-  and the color key go with the bar; the tab and the status bar stay. While
-  the bar is up its button row centers in the width left of the tab
-  (`tab_reserve`), so the tab never sits on a button.
+- **The bar folds.** A tab at the right edge (`MyApp::bar_tab`, at the
+  `Tooltip` order so it wins the press over any popup that drifts under it)
+  hangs under the bar while the bar is up: a chevron up folds the controls
+  bar away, and the tab moves up to the top corner, where a chevron down
+  brings the bar back. `MyApp::map_bar_open` is session state. The zoom
+  column and the color key go with the bar; the tab and the status bar stay.
+  The tab is under the bar rather than over it so it never covers the menu
+  button at the row's right end on a narrow screen.
 - **The zoom buttons are a column in the bottom right corner**
   (`zoom_column`): in on top, out below, above the status bar
   (`bottom_overlay_inset`). On every platform now that they are out of the
