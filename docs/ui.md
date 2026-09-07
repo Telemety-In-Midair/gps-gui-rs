@@ -179,7 +179,11 @@ The scaffolding, as functions:
   line and widens the page instead of wrapping, and it never shrinks back.
   Pinning the width to the screen less the two margins is what makes the
   paragraphs on Status, Beacon and Settings wrap - and it also makes the frame
-  exactly screen-wide.
+  exactly screen-wide. The height is pinned the same way (`set_height`), and
+  for the same reason in the other direction: with only a floor under it the
+  page grew with a bigger window and, handed last frame's size to fill, never
+  came back down when the window shrank, so its scroll viewport stayed taller
+  than the window and the last rows could not be scrolled to.
 - `floating(ctx, id, order, pos, pivot, constrain, add)` - a popup `Frame` in
   its own area, for the transient overlays (selection hint, download confirm
   and progress, marker info bubble).

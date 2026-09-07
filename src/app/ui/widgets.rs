@@ -231,18 +231,23 @@ pub(super) fn content_page(
                     bottom: foot,
                 })
                 .show(ui, |ui| {
-                    // An Area sizes itself to whatever it held last frame, so
-                    // its Ui has no width to wrap against until something pins
-                    // one: without this a long label lays out as one endless
-                    // line and widens the page instead of wrapping. `set_width`
-                    // pins both bounds, which is also what makes the frame
-                    // (content plus its two margins) exactly screen-wide.
+                    // An Area hands its content last frame's size to lay out
+                    // against, so its Ui has no width to wrap against until
+                    // something pins one: without this a long label lays out
+                    // as one endless line and widens the page instead of
+                    // wrapping. `set_width` pins both bounds, which is also
+                    // what makes the frame (content plus its two margins)
+                    // exactly screen-wide.
                     let margin = f32::from(margin);
                     ui.set_width(screen.width() - 2.0 * margin);
-                    // Content plus the frame's two margins is then exactly
-                    // screen-tall, which is what leaves the Area measuring a
-                    // full screen for the next frame to lay out against.
-                    ui.set_min_height(screen.height() - margin - f32::from(foot));
+                    // Both bounds of the height too, so content plus the
+                    // frame's two margins is exactly screen-tall this frame,
+                    // whichever way the window just went. A floor alone
+                    // ratchets: the page grows with a bigger window and, given
+                    // last frame's size to fill, never comes back down, and a
+                    // scroll viewport taller than the window puts the last
+                    // rows out of reach.
+                    ui.set_height(screen.height() - margin - f32::from(foot));
                     ui.add_space(safe.top);
                     gap(ui, Key::GapItem);
                     add(ui);
@@ -565,3 +570,54 @@ macro_rules! grid {
 }
 
 pub(super) use {button, check, grid, heading, hint, section};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One frame of a scrolling page at `screen`, answering with the rect the
+    /// page's area settled on.
+    fn page_frame(ctx: &egui::Context, screen: egui::Rect) -> egui::Rect {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let safe = SafeArea {
+            top: 0.0,
+            bottom: 0.0,
+        };
+        let _ = ctx.run_ui(input, |ctx| {
+            content_page(ctx, "page", screen, safe, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for i in 0..200 {
+                        ui.label(format!("row {i}"));
+                    }
+                });
+            });
+        });
+        ctx.memory(|m| m.area_rect(egui::Id::new("page")))
+            .expect("the page was laid out")
+    }
+
+    /// An area hands its content last frame's size to lay out against, so a
+    /// page that only pins a floor under its height grows with the window
+    /// and never comes back down - and a scroll viewport taller than the
+    /// window puts the last rows out of reach. The page has to be exactly
+    /// the window, frame after frame, whichever way the window went.
+    #[test]
+    fn a_page_is_the_size_of_its_window_after_it_shrinks() {
+        let ctx = egui::Context::default();
+        let big = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 1200.0));
+        let small = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 600.0));
+        page_frame(&ctx, small);
+        page_frame(&ctx, big);
+        let grown = page_frame(&ctx, big);
+        assert!((grown.height() - big.height()).abs() < 1.0, "{grown:?}");
+        let shrunk = page_frame(&ctx, small);
+        assert!(
+            (shrunk.height() - small.height()).abs() < 1.0,
+            "the page kept the bigger window's height: {shrunk:?}"
+        );
+        assert!((shrunk.width() - small.width()).abs() < 1.0, "{shrunk:?}");
+    }
+}

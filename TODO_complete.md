@@ -11,6 +11,10 @@ Items struck through in `TODO.md`, summarized. Newest first.
   session starts folded. The zoom column and the key still go with the
   buttons; the key moved to the top left corner and the region-select hint
   to the top. This supersedes the top-bar dropdown below.
+- **Window resize.** A scrolling page follows the desktop window down as
+  well as up: the page frame pins both bounds of its height, where a floor
+  alone had let it keep a bigger window's height and put the last rows out
+  of scrolling reach.
 - **Bar follow-ups.** The button row is sized stroke and all and centered
   in a rect rather than behind a spacer, so it never runs past the screen
   and sits symmetrically; the fold strip is painted on a fixed rect, so a
