@@ -11,6 +11,15 @@ Items struck through in `TODO.md`, summarized. Newest first.
   session starts folded. The zoom column and the key still go with the
   buttons; the key moved to the top left corner and the region-select hint
   to the top. This supersedes the top-bar dropdown below.
+- **Bar follow-ups.** The button row is sized stroke and all and centered
+  in a rect rather than behind a spacer, so it never runs past the screen
+  and sits symmetrically; the fold strip is painted on a fixed rect, so a
+  press no longer nudges the bar up; the paths switch left the bar (the
+  per-path settings remain); the desktop "Position:" entry moved from the
+  map to the Settings page's Phone section; the status bar's "No nodes
+  heard" sits at the bar's right end, set in by the bar margin; a text
+  field the phone's keyboard rises under scrolls itself into view; "Load
+  from node" says beside itself why it is grey.
 - **Concise menus.** Every page lost the line under its heading and under
   each section title, and every line that restated a control: the node
   settings' "Node: ..." echoes (the value now sits in the section title,

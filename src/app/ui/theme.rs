@@ -158,13 +158,14 @@ pub(super) fn bar_margin(ctx: &egui::Context) -> (i8, i8) {
 /// Largest icon side that keeps a row of `count` icon buttons within `avail`
 /// points, so no button may claim more than its equal share of the width.
 ///
-/// A button is wider than its icon by `type.bar.button.pad.x` on each side, and
-/// the buttons are separated by `spacing`; `avail` is expected to already
-/// have the enclosing frame's margin taken off. The result is capped at the
-/// usual [`icon_size`], so the row only shrinks below it on a screen too
-/// narrow to hold the whole set - the share of the width is a ceiling, not a
-/// target. The fingertip floor does not apply here: a button that overflows
-/// the screen is worse than a small one.
+/// A button is wider than its icon by `type.bar.button.pad.x` on each side
+/// and by its frame's stroke outside that, and the buttons are separated by
+/// `spacing`; `avail` is expected to already have the enclosing frame's
+/// margin taken off. The result is capped at the usual [`icon_size`], so the
+/// row only shrinks below it on a screen too narrow to hold the whole set -
+/// the share of the width is a ceiling, not a target. The fingertip floor
+/// does not apply here: a button that overflows the screen is worse than a
+/// small one.
 pub(super) fn icon_size_for_row(
     ctx: &egui::Context,
     avail: f32,
@@ -180,9 +181,25 @@ pub(super) fn icon_size_for_row(
     // default, and a fair approximation in any other unit.
     let pad = px(ctx, Key::BarButtonPadX) / base;
     let count = count as f32;
-    let per_button = (avail - (count - 1.0) * spacing) / count;
+    // The frame egui draws around a button is laid out stroke and all, in
+    // every state, so a row sized without it runs over by two strokes a
+    // button. The widest state counts, so a hover or a press cannot push
+    // the last button off the edge.
+    let stroke = button_stroke(ctx);
+    let per_button = (avail - (count - 1.0) * spacing) / count - 2.0 * stroke;
     let fit = per_button / (1.0 + 2.0 * pad);
     base.min(fit.max(1.0))
+}
+
+/// The widest stroke a button's frame is drawn with in any state it can be
+/// in, which is how much wider than its content egui lays a button out.
+fn button_stroke(ctx: &egui::Context) -> f32 {
+    let w = &ctx.global_style().visuals.widgets;
+    w.inactive
+        .bg_stroke
+        .width
+        .max(w.hovered.bg_stroke.width)
+        .max(w.active.bg_stroke.width)
 }
 
 /// The height every interactive control is laid out at, in points.
@@ -290,10 +307,10 @@ mod tests {
         assert_eq!(base, 40.0);
         // Plenty of room: the cap is the usual size.
         assert_eq!(icon_size_for_row(&ctx, 1200.0, 6.0, 7), base);
-        // Seven buttons in 300 points, each 2.4 icons wide with 6 between:
-        // (300 - 36) / 7 / 2.4.
+        // Seven buttons in 300 points, each 2.4 icons wide plus a one-point
+        // stroke each side, with 6 between: ((300 - 36) / 7 - 2) / 2.4.
         let fit = icon_size_for_row(&ctx, 300.0, 6.0, 7);
-        assert!((fit - 15.714).abs() < 0.01, "{fit}");
+        assert!((fit - 14.881).abs() < 0.01, "{fit}");
         assert_eq!(icon_size_for_row(&ctx, 300.0, 6.0, 0), base);
     }
 

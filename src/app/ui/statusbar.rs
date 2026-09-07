@@ -129,9 +129,9 @@ impl MyApp {
     /// its top edge and needs no inset of its own.
     ///
     /// Records its own height in [`MyApp::status_bar_height`] so what floats
-    /// above the two bars - the zoom column, the desktop manual position bar -
-    /// can clear them. Measured after the fact because the read-out wraps:
-    /// how tall it is depends on the text size and what is being reported.
+    /// above the two bars - the zoom column, the credit line - can clear
+    /// them. Measured after the fact because the read-out wraps: how tall it
+    /// is depends on the text size and what is being reported.
     pub(crate) fn map_status_bar(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         if !self.config.status_bar.show {
             self.status_bar_height = 0.0;
@@ -166,7 +166,9 @@ impl MyApp {
         self.status_bar_height = area.response.rect.height();
     }
 
-    /// The bar's one row: the graph, then the node the cycle is currently on.
+    /// The bar's one row: the graph, then the node the cycle is currently on -
+    /// or, with none heard, a note at the far end of the bar, where it reads
+    /// as the state of the bar rather than as a node's figures.
     fn status_bar_row(&self, ui: &mut egui::Ui) {
         let em = em(ui);
         let samples = self.rssi_samples();
@@ -200,8 +202,14 @@ impl MyApp {
                 Some((addr, status)) => self.status_bar_readout(ui, addr, status),
                 // Either no node has been heard yet, or the connected board
                 // was just switched and what the last one heard went with it.
+                // Set in from the right edge by the bar's own side margin, as
+                // the graph is from the left.
                 None => {
-                    ui.label(egui::RichText::new(text::NO_NODES).weak());
+                    let (margin_x, _) = bar_margin(&ctx);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(f32::from(margin_x));
+                        ui.label(egui::RichText::new(text::NO_NODES).weak());
+                    });
                 }
             }
         });

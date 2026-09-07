@@ -716,7 +716,8 @@ pub struct MyApp {
     layer: MapLayer,
     map_memory: MapMemory,
     /// The phone's own GPS source, when the platform has one (Android).
-    /// `None` on desktop, where the manual position bar is shown instead.
+    /// `None` on desktop, where the Settings page offers a position row
+    /// instead.
     /// Its receiver runs only while `[phone] location` says so.
     gps: Option<GpsHandle>,
     /// Device-facing compass, when the platform has one (Android only). The
@@ -741,14 +742,6 @@ pub struct MyApp {
     compass_heading: Option<f32>,
     /// When set, the map is rotated so the current heading points up.
     heading_up: bool,
-    /// Master switch for the recorded paths on the map, from the bar's toggle.
-    /// It only hides: which of the two paths a shown map draws is
-    /// `config.track.show_path` / `config.ble.show_path`. The line to the
-    /// beacon and its distance label are not paths and stay either way.
-    ///
-    /// Session state, like `heading_up` and the base layer: it clears the map
-    /// for a moment, and the settings it overrides are the saved ones.
-    show_paths: bool,
     /// Tracking mode: which beacon is being kept in frame (user near the
     /// bottom, beacon near the top). `None` is off. The track button cycles it;
     /// the heading button exits.
@@ -932,7 +925,8 @@ pub struct MyApp {
     points_search: String,
     /// Source filter on the points page.
     points_filter: PointFilter,
-    /// Text in the manual position bar (shown only when `gps_rx` is `None`).
+    /// Text in the Settings page's position row (shown only when `gps` is
+    /// `None`).
     manual_gps_text: String,
     /// The last manual position entry failed to parse.
     manual_gps_bad: bool,
@@ -972,6 +966,10 @@ pub struct MyApp {
     /// Height the map's bottom status bar took last frame, so what floats
     /// above the bottom bars can clear it. `0.0` while the bar is off.
     status_bar_height: f32,
+    /// The bottom safe-area inset as of last frame. The on-screen keyboard
+    /// shows up as this growing, and the frame it grows is the one the
+    /// focused field is scrolled back into view on.
+    last_bottom_inset: f32,
     /// The CSV recorder behind the Logging page.
     logger: Logger,
     /// The log path typed on the Logging page. Seeded from `[log] file`, or a
@@ -1045,7 +1043,6 @@ impl MyApp {
             speed: None,
             compass_heading: None,
             heading_up: false,
-            show_paths: true,
             tracking_beacon: None,
             smoothed_heading: None,
             smoothed_arrow: None,
@@ -1138,6 +1135,7 @@ impl MyApp {
             bar_row_height: 0.0,
             map_bar_open: false,
             status_bar_height: 0.0,
+            last_bottom_inset: 0.0,
             logger: Logger::default(),
             // Replaced below once the config has been loaded, which is what
             // may name a log file of its own.
@@ -1953,10 +1951,11 @@ impl MyApp {
     fn load_radio_from_board(&mut self) {
         let Some(cfg) = self.board_radio_config else {
             self.radio_feedback = Some(Err(if self.radio_config_unsupported {
-                "The board's config format is newer than this app can read.".to_string()
+                "The node's config format is newer than this app can read.".to_string()
             } else {
-                "No config from the board yet. Connect on the Bluetooth page and \
-                 wait for it to report (the GPS/LoRa rail must be on).".to_string()
+                "No config from the node yet. Connect on the Bluetooth page and wait \
+                 for it to report."
+                    .to_string()
             }));
             return;
         };
@@ -2050,9 +2049,10 @@ impl MyApp {
         }
     }
 
-    /// The clearance a bottom-anchored overlay needs: the gesture-bar inset,
-    /// or on the map the two bars stacked at the foot of the screen - the
-    /// controls bar and the status bar on top of it.
+    /// The clearance a bottom-anchored overlay - the zoom column, the credit
+    /// line, the download read-out - needs: the gesture-bar inset, or on the
+    /// map the two bars stacked at the foot of the screen - the controls bar
+    /// and the status bar on top of it.
     ///
     /// The larger of the two rather than their sum - the controls bar's own
     /// frame already covers the inset - and only on the map, which is the one
@@ -3084,6 +3084,13 @@ impl eframe::App for MyApp {
         // out of the style rather than being handed them.
         self.apply_ui_style(&ctx);
         let screen = ctx.input(|i| i.viewport_rect());
+        // The phone's keyboard is not reported as such: it arrives as the
+        // bottom inset growing, the window's content being resized to clear
+        // it. The text fields read this note and scroll the focused one back
+        // into view on that frame, before the keyboard covers it.
+        let bottom = self.bottom_inset(&ctx);
+        ui::note_keyboard_rise(&ctx, bottom > self.last_bottom_inset + 0.5);
+        self.last_bottom_inset = bottom;
         // The look the pages measure themselves against, put up for this
         // frame. With the adjuster open they also record where they land.
         ui::publish(&ctx, self.look.clone(), self.adjust.is_some());
@@ -3108,13 +3115,6 @@ impl eframe::App for MyApp {
         }
         // Offline download progress floats above every page too.
         self.download_ui(&ctx, screen);
-
-        // With no live GPS source (desktop), let a position be typed in. Only
-        // on the map, where the bar can float at the bottom without landing on
-        // top of a scrolling page.
-        if self.gps.is_none() && matches!(self.page, Page::Map) {
-            self.manual_gps_bar(&ctx, screen);
-        }
 
         // Last, over everything, so every probe of the frame is in before the
         // picker searches them.

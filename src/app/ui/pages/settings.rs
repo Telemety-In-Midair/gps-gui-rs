@@ -163,7 +163,8 @@ impl MyApp {
 
     /// This device: its name, and which receiver the current position comes
     /// from - its own, the connected node's, or both with the node's
-    /// winning.
+    /// winning. On a desktop, with no receiver, a position can be typed in
+    /// here instead.
     fn phone_ui(&mut self, ui: &mut egui::Ui) {
         section!(ui, "Phone");
         gap(ui, Key::GapTight);
@@ -186,6 +187,7 @@ impl MyApp {
             "Position from the node",
             hover: text::NODE_LOCATION_HOVER,
         );
+        self.manual_position_row(ui);
     }
 
     fn text_size_ui(&mut self, ui: &mut egui::Ui) {

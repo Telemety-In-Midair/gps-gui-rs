@@ -7,8 +7,8 @@ use crate::app::ui::icons;
 use crate::app::ui::text::radio as text;
 use crate::app::ui::theme::{control_height, gap, probe, px, Key};
 use crate::app::ui::widgets::{
-    button, confirm_popup, content_page, feedback_label, heading, hint, icon_button, submitted,
-    text_field,
+    button, confirm_popup, content_page, feedback_label, heading, hint, icon_button,
+    keep_above_keyboard, submitted, text_field,
 };
 use crate::app::{MyApp, RadioEdit};
 use crate::radio::{self, EditVal, FieldType};
@@ -48,6 +48,7 @@ fn radio_input(ui: &mut egui::Ui, key: &str, ty: &FieldType, val: &mut EditVal) 
                 let width = px(ui.ctx(), Key::RadioEnumField);
                 let resp = ui.add(egui::TextEdit::singleline(s).desired_width(width));
                 probe(ui.ctx(), resp.rect, "Text field", &[Key::RadioEnumField]);
+                keep_above_keyboard(ui, &resp);
             }
         }
     }
@@ -144,21 +145,29 @@ impl MyApp {
 
             // Fill the editor with the connected board's own settings, the
             // read-back counterpart to Send. Enabled once the board has
-            // reported a config it can decode.
-            let fetch_why = if self.radio_config_unsupported {
+            // reported a config it can decode. The reason it is not is said
+            // beside it as well as in the hover: a phone has no hover, and a
+            // button that is simply grey looks broken rather than early.
+            let fetch_why = if !self.ble_connected {
+                text::FETCH_NEEDS_LINK
+            } else if self.radio_config_unsupported {
                 text::FETCH_TOO_NEW
             } else {
-                text::FETCH_NEEDS_LINK
+                text::FETCH_WAITING
             };
+            let can_fetch = self.board_radio_config.is_some();
             let fetch = button!(
                 ui,
                 "Load from node",
-                enabled: self.board_radio_config.is_some(),
+                enabled: can_fetch,
                 hover: text::FETCH_HOVER,
                 disabled: fetch_why,
             );
             if fetch.clicked() {
                 self.load_radio_from_board();
+            }
+            if !can_fetch && self.ble_connected {
+                ui.label(egui::RichText::new(fetch_why).weak());
             }
         });
     }

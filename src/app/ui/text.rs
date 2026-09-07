@@ -150,6 +150,7 @@ pub(crate) mod radio {
     pub(crate) const FETCH_HOVER: &str = "The node's config, into the editor";
     pub(crate) const FETCH_TOO_NEW: &str = "The node's config is newer than the app";
     pub(crate) const FETCH_NEEDS_LINK: &str = "Connect first";
+    pub(crate) const FETCH_WAITING: &str = "Waiting for the node's config";
 
     pub(crate) const EMPTY: &str = "No config loaded.";
     pub(crate) const GENERATE_HOVER: &str = "The firmware defaults, unsaved";
@@ -223,8 +224,6 @@ pub(crate) mod map {
     pub(crate) const SATELLITE_MAP: &str = "Satellite";
     pub(crate) const ZOOM_IN: &str = "Zoom in";
     pub(crate) const ZOOM_OUT: &str = "Zoom out";
-    pub(crate) const HIDE_PATHS: &str = "Hide paths";
-    pub(crate) const SHOW_PATHS: &str = "Show paths";
     pub(crate) const MENU_OPEN: &str = "Menu";
     pub(crate) const MENU_CLOSE: &str = "Close menu";
     pub(crate) const FOLD_BAR: &str = "Hide the buttons";

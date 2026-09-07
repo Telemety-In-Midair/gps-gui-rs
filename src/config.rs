@@ -45,8 +45,8 @@
 //! tiles = "osm"       # "osm" (OpenStreetMap, OpenTopoMap) or "arcgis" (Esri
 //!                     # streets, outdoor and satellite, under an API key)
 //! arcgis_key = ""     # your own ArcGIS key; empty uses the built-in one
-//! bar_opacity = 1.0   # the top bar and the status bar backgrounds, 0 - 1
-//! show_key = true     # the color key under the top bar
+//! bar_opacity = 1.0   # the bottom bar and the status bar backgrounds, 0 - 1
+//! show_key = true     # the color key in the top left corner
 //!
 //! [ble]
 //! enabled = true      # master switch for the BLE GPS source
@@ -516,8 +516,8 @@ pub fn normalize_mac(mac: &str) -> String {
 /// address, and the two never meet in one table.
 #[derive(Clone)]
 pub struct LoraSettings {
-    /// Draw the remote nodes' paths on the map. The map bar's path button and
-    /// the per-node color are separate; this only hides the lines.
+    /// Draw the remote nodes' paths on the map. The per-node color is
+    /// separate; this only hides the lines.
     pub show_path: bool,
     /// How long after a node was last heard its marker keeps pulsing, in
     /// seconds; 0 never pulses. The pulse is what says "on the air now"
@@ -1256,8 +1256,8 @@ impl AppConfig {
              [map]                # the map page: its tiles and its overlays\n\
              tiles = \"{tiles}\"        # \"osm\" (OpenStreetMap, OpenTopoMap) or \"arcgis\" (Esri streets, outdoor, satellite)\n\
              arcgis_key = \"{arcgis_key}\"      # your own ArcGIS key; empty uses the built-in one\n\
-             bar_opacity = {bar_opacity:?}    # the top bar and the status bar backgrounds, 0 - 1\n\
-             show_key = {show_key}      # the color key under the top bar\n\
+             bar_opacity = {bar_opacity:?}    # the bottom bar and the status bar backgrounds, 0 - 1\n\
+             show_key = {show_key}      # the color key in the top left corner\n\
              \n\
              [ble]\n\
              enabled = {enabled}       # master switch for the BLE GPS source\n\

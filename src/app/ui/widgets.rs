@@ -393,7 +393,39 @@ pub(super) fn text_field(
         "Text field",
         &[width, Key::FieldPadX, Key::ControlHeight],
     );
+    keep_above_keyboard(ui, &resp);
     resp
+}
+
+/// Where the frame notes that the on-screen keyboard has just risen, for the
+/// text fields to read.
+fn keyboard_rise_id() -> egui::Id {
+    egui::Id::new("keyboard_rise")
+}
+
+/// Note for this frame whether the bottom inset has just grown, which is the
+/// phone's keyboard coming up under a focused field. The app loop calls it
+/// once per frame, before the pages, and it is false every frame the inset
+/// holds still.
+pub(in crate::app) fn note_keyboard_rise(ctx: &egui::Context, rising: bool) {
+    ctx.data_mut(|d| d.insert_temp(keyboard_rise_id(), rising));
+}
+
+/// Keep a text field in view when the keyboard rises under it. The page's
+/// viewport has just lost the keyboard's height off its foot - the inset is
+/// part of the page frame - and the field the keyboard was opened for is
+/// likely in what was lost, a field near the foot being the one a thumb
+/// reaches for. So on the frame the inset grows, the focused field scrolls to
+/// the middle of what is left, once; after that the page is the user's to
+/// scroll.
+pub(super) fn keep_above_keyboard(ui: &egui::Ui, resp: &egui::Response) {
+    let rising = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(keyboard_rise_id()))
+        .unwrap_or(false);
+    if rising && resp.has_focus() {
+        resp.scroll_to_me(Some(egui::Align::Center));
+    }
 }
 
 /// Whether a text field was just committed with Enter, so a page can treat it

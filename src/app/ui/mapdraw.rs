@@ -78,17 +78,16 @@ impl MyApp {
         }
 
         // A hidden path is an empty one: the plugin draws whatever it is given,
-        // so the map page is the only place that decides what is visible. The
-        // bar's toggle is a master switch over both per-path settings.
+        // so the map page is the only place that decides what is visible.
         let paths = |shown: bool, points: &[TrackPoint]| -> Vec<Position> {
-            if self.show_paths && shown {
+            if shown {
                 points.iter().map(|t| t.pos).collect()
             } else {
                 Vec::new()
             }
         };
         // Each remote node draws in its address palette color; its path follows
-        // the single `[lora] show_path` toggle under the same master switch.
+        // the single `[lora] show_path` toggle.
         // The marker falls back to the last recorded point when the live view
         // is gone (a board switch), so a known node never draws as a bare path.
         let remotes: Vec<RemoteDraw> = self

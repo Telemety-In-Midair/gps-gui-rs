@@ -270,39 +270,45 @@ impl MyApp {
     /// thumb anywhere along it will do, and the chevron at its right end
     /// points the way a press moves the buttons: up while they are folded
     /// away, turning over as they rise.
+    ///
+    /// Painted by hand rather than as an egui button: a button's frame is
+    /// laid out stroke and all, and one drawn without a frame at rest grows
+    /// by its stroke the moment it is hovered or pressed - which, at the foot
+    /// of a bar placed by its height, is the bar jumping up a pixel or two on
+    /// every press. This one is a fixed rect, with the highlight painted
+    /// inside it.
     fn bar_strip(&mut self, ui: &mut egui::Ui, openness: f32) {
         let ctx = ui.ctx().clone();
         let icon = icon_size(&ctx);
         let pad = px(&ctx, Key::MapTabPad);
-        ui.spacing_mut().button_padding = egui::Vec2::splat(pad);
-        let tint = ui.visuals().text_color();
-        let chevron = egui::Image::new(icons::chevron_up())
-            .fit_to_exact_size(egui::Vec2::splat(icon))
-            .tint(tint)
-            .rotate(openness * PI, egui::Vec2::splat(0.5));
+        let size = egui::vec2(ui.available_width(), icon + 2.0 * pad);
+        let (rect, strip) = ui.allocate_exact_size(size, egui::Sense::click());
         let hint = if self.map_bar_open {
             text::FOLD_BAR
         } else {
             text::UNFOLD_BAR
         };
-        let strip = ui
-            .add(
-                // The grow atom takes the width, which puts the glyph at the
-                // right end. No frame at rest: the bar's own fill is the strip.
-                egui::Button::new((egui::Atom::grow(), chevron))
-                    .frame_when_inactive(false)
-                    .min_size(egui::vec2(ui.available_width(), 0.0)),
-            )
-            .on_hover_text(hint);
+        let strip = strip.on_hover_text(hint);
         if strip.clicked() {
             self.map_bar_open = !self.map_bar_open;
         }
-        probe(
-            &ctx,
-            strip.rect,
-            "Bar strip",
-            &[Key::MapTabPad, Key::IconSize],
-        );
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.style().interact(&strip);
+            if strip.hovered() || strip.is_pointer_button_down_on() {
+                ui.painter()
+                    .rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
+            }
+            let glyph = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - pad - icon / 2.0, rect.center().y),
+                egui::Vec2::splat(icon),
+            );
+            egui::Image::new(icons::chevron_up())
+                .fit_to_exact_size(egui::Vec2::splat(icon))
+                .tint(ui.visuals().text_color())
+                .rotate(openness * PI, egui::Vec2::splat(0.5))
+                .paint_at(ui, glyph);
+        }
+        probe(&ctx, rect, "Bar strip", &[Key::MapTabPad, Key::IconSize]);
     }
 
     /// The zoom buttons, stacked in the bottom right corner above the bars:
@@ -405,7 +411,8 @@ impl MyApp {
         );
     }
 
-    /// The floating controls bar: one icon button per thing the map can do.
+    /// The bar's button row: one icon button per thing the map can do,
+    /// centered in the bar and never wider than it.
     ///
     /// Every button whose glyph changes shows the state the press switches
     /// *to*, which is what a toolbar icon without a label has to do to be
@@ -417,41 +424,51 @@ impl MyApp {
         // Derived from the *uncapped* icon size, which is the ceiling
         // `icon_size_for_row` starts from, so the two are not circular.
         let spacing = px(&ctx, Key::BarGap);
-        ui.spacing_mut().item_spacing.x = spacing;
         // Which of the optional buttons are in the row this frame. Decided up
         // front, before anything is laid out, because the button count is what
         // sizes the row - and reused where the buttons are drawn, so the count
         // cannot disagree with what ends up in the bar.
         let show_rotate = self.has_direction() && self.tracking_beacon.is_none();
-        // Center, track, layer, paths and the page menu are always there; the
-        // zoom buttons live in the corner column now.
-        let buttons = 5 + usize::from(show_rotate);
+        // Center, track, layer and the page menu are always there; the zoom
+        // buttons live in the corner column.
+        let buttons = 4 + usize::from(show_rotate);
         let avail = ui.available_width().max(1.0);
-        // No button may take more than a 1/buttons share of the bar, padding and
-        // spacing included, so a full row always fits the screen instead of
-        // running off the right edge when the set grows.
+        // No button may take more than a 1/buttons share of the bar, padding,
+        // frame and spacing included, so a full row always fits the screen
+        // instead of running off the right edge when the set grows.
         let icon = icon_size_for_row(&ctx, avail, spacing, buttons);
         // The padding follows the row's icon rather than the usual one, so a
         // row squeezed to fit keeps its proportions.
         let squeeze = icon / icon_size(&ctx);
-        ui.spacing_mut().button_padding = egui::vec2(
+        let padding = egui::vec2(
             px(&ctx, Key::BarButtonPadX) * squeeze,
             px(&ctx, Key::BarButtonPadY) * squeeze,
         );
-        // egui lays a horizontal row out left-to-right and can't center it in a
-        // single pass: its `main_align` is ignored and the row just fills the
-        // width of any centering parent. So pad the left by half the leftover
-        // space, using the row width measured last frame (it stays constant once
-        // the button set is fixed). `add_space` counts as an item, so drop one
-        // item spacing to keep the gap even on both sides.
-        let pad = if self.controls_width > 0.0 {
-            ((avail - self.controls_width) * 0.5 - spacing).max(0.0)
+        // egui lays a row out from the left and cannot center it in a single
+        // pass, so the row is laid out in a rect set in from the left by half
+        // of what it left over last frame (its width holds still once the
+        // button set has). A spacer would not do: it counts as an item and
+        // brings an item spacing with it, which pushed a row that just fit
+        // over the edge by one gap. The first frame, with nothing measured,
+        // lays out from the left; so does the one after the set changes.
+        let row_width = self.controls_width.min(avail);
+        let lead = if row_width > 0.0 {
+            ((avail - row_width) * 0.5).floor()
         } else {
             0.0
         };
-        ui.horizontal(|ui| {
-            ui.add_space(pad);
-            let row = ui.horizontal(|ui| {
+        let origin = ui.next_widget_position();
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(origin.x + lead, origin.y),
+            egui::vec2(avail - lead, ui.spacing().interact_size.y),
+        );
+        let row = ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = spacing;
+                ui.spacing_mut().button_padding = padding;
                 self.center_button(ui, icon);
                 if show_rotate {
                     self.rotate_button(ui, icon);
@@ -462,18 +479,16 @@ impl MyApp {
                 }
                 self.track_button(ui, icon);
                 self.layer_button(ui, icon);
-                self.paths_button(ui, icon);
                 // The region download is started from the Settings page, which
                 // jumps back here with the box selection already active.
 
                 // The page menu sits inline, right after the other buttons.
                 self.page_menu(ui, icon);
-            });
-            // Remember the row's own width (the inner group, excluding the pad)
-            // so the next frame can center it.
-            self.controls_width = row.response.rect.width();
-            probe(&ctx, row.response.rect, "Toolbar buttons", &TOOLBAR_KEYS);
-        });
+            },
+        );
+        // Remember the row's own width so the next frame can center it.
+        self.controls_width = row.response.rect.width();
+        probe(&ctx, row.response.rect, "Toolbar buttons", &TOOLBAR_KEYS);
     }
 
     /// Center on the user marker if we have a fix; otherwise fall back to the
@@ -551,23 +566,6 @@ impl MyApp {
         };
         if icon_button(ui, icon, glyph).on_hover_text(hint).clicked() {
             self.layer = next;
-        }
-    }
-
-    /// Paths on/off: a master switch over both recorded paths, which only ever
-    /// hides - the per-path settings decide which of the two a switched-on map
-    /// draws. It leaves the line to the beacon and its distance label alone,
-    /// those being what is worth keeping when the map is too busy to read.
-    /// Session state, so a glance at a clear map does not overwrite either
-    /// setting.
-    fn paths_button(&mut self, ui: &mut egui::Ui, icon: f32) {
-        let (glyph, hint) = if self.show_paths {
-            (icons::path_off(), text::HIDE_PATHS)
-        } else {
-            (icons::path(), text::SHOW_PATHS)
-        };
-        if icon_button(ui, icon, glyph).on_hover_text(hint).clicked() {
-            self.show_paths = !self.show_paths;
         }
     }
 
@@ -1103,6 +1101,12 @@ mod tests {
         let open = app.controls_height;
         assert!(open > folded + 1.0, "the row adds height: {open} over {folded}");
         assert!(app.bar_row_height > 0.0);
+        // The row was sized to the bar, not the other way round.
+        assert!(
+            app.controls_width <= screen.width(),
+            "the row runs off the screen: {}",
+            app.controls_width
+        );
         let bar = area(&ctx, "controls");
         assert!((bar.height() - open).abs() < 1.0);
         let status = area(&ctx, "map_status_bar");

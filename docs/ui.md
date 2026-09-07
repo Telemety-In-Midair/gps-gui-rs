@@ -123,8 +123,7 @@ graph TD
 2. It reads the viewport rect (`screen`) and matches on `self.page` to call the
    one page renderer.
 3. After the page, it draws the always-on overlays: the corner page toggle (on
-   every page but the map), the download-progress readout, and - on desktop
-   only - the manual position bar.
+   every page but the map) and the download-progress readout.
 4. Last of all the adjuster, when it is open, so every probe of the frame is
    in before its picker searches them.
 
@@ -146,7 +145,7 @@ controlled by `egui::Order`, lowest first:
 - `Middle` - the region-select box-drag layer, so drags draw a box instead of
   panning the map, while the controls above stay clickable.
 - `Foreground` - the controls bar and the status bar stacked at the foot of
-  the map, floating popups, the manual GPS bar.
+  the map, and the floating popups.
 - `Tooltip` - the floating corner page toggle on non-map pages.
 - `Debug` - the adjuster, over everything, in one `Area` (below).
 
@@ -183,7 +182,7 @@ The scaffolding, as functions:
   exactly screen-wide.
 - `floating(ctx, id, order, pos, pivot, constrain, add)` - a popup `Frame` in
   its own area, for the transient overlays (selection hint, download confirm
-  and progress, marker info bubble, manual position bar).
+  and progress, marker info bubble).
   `confirm_popup(ctx, id, screen, add)` is the centered case of it.
 - `row(ui, label, add)` - a wrapping row of controls behind a leading label.
   Wrapping rather than plain horizontal because these labels are sentences more
@@ -324,9 +323,10 @@ than a point count:
   the icon cap.
 - `icon_size_for_row(ctx, avail, spacing, count)` - the same size, but capped
   so `count` buttons still fit `avail` points: no button may exceed a `1/count`
-  share of the width, counting its padding and the gaps between buttons. The
-  controls bar counts its buttons before laying any out and sizes itself with
-  this, so adding one shrinks the row instead of pushing it off the edge.
+  share of the width, counting its padding, the stroke of its frame (egui lays
+  a button out stroke and all) and the gaps between buttons. The controls bar
+  counts its buttons before laying any out and sizes itself with this, so
+  adding one shrinks the row instead of pushing it off the edge.
 - `em`, `page_margin`, `corner_margin`, `bar_margin`, `control_height` - the
   rest of the page measures, each one key.
 - `apply_spacing(style, look, screen)` - the insides of every control, off the
@@ -599,9 +599,20 @@ how the bottom one came to be forgotten by every page that scrolls: the top
 inset is visibly wrong the moment you look at the screen, and the bottom one
 only hides the last row of a page you have to scroll to the end of.
 `content_page` now keeps both clear, so a page gets it by being a page. The
-overlays that sit at one edge still ask for the end they need - the manual
-position bar and the download readout for the bottom, the corner page toggle
-for the top.
+overlays that sit at one edge still ask for the end they need - the download
+readout for the bottom, the corner page toggle for the top.
+
+The phone's keyboard arrives the same way. `NativeActivity` sizes its content
+view to clear the keyboard (it sets `SOFT_INPUT_ADJUST_RESIZE` itself), so
+`content_rect` shrinks and the bottom inset grows by the keyboard's height:
+the page frame's foot grows with it and the scroll viewport shrinks, which is
+the gap that keeps the last row reachable. What that does not do on its own
+is move the field the keyboard was opened for, which is most likely in the
+strip just lost. So `MyApp::ui` compares the bottom inset with last frame's
+(`last_bottom_inset`) and notes a rise (`widgets::note_keyboard_rise`), and
+every text field (`text_field`, and the Radio page's raw `TextEdit`, through
+`keep_above_keyboard`) scrolls itself to the middle of the viewport on that
+frame if it has focus. Once; after that the page is the user's to scroll.
 
 ## Position sources (`gps.rs` + `app.rs`)
 
@@ -622,8 +633,8 @@ Where "you" are on the map comes from one of three places, and
   out of the tracking and center lists. Both settings on, the node wins while
   it has a fix; a phone fix arriving meanwhile still feeds the phone's own
   track and the log.
-- **Typed in** (`LocationSource::Manual`), from the desktop bar. Never
-  switched off by either setting.
+- **Typed in** (`LocationSource::Manual`), from the Settings page's Phone
+  section on desktop. Never switched off by either setting.
 
 Turning a source off drops a position it gave (`clear_current`), and so does
 the node's link ending: a marker left standing would read as where you are.
@@ -638,11 +649,26 @@ edges. The key wrinkles:
 - **The controls bar is at the foot of the screen** (`map_controls_bar`),
   with the Android gesture-bar inset folded into its frame so the fill
   reaches the edge. Folded, which is how a session starts, it is a strip with
-  a chevron at its right end; the whole strip is the button (`bar_strip`, an
-  `Atom::grow` before the glyph puts it at the end). A press brings the button
-  row up out of the strip (`controls_block`) and turns the chevron over; the
-  next press folds it back. `MyApp::map_bar_open` is session state, and the
-  zoom column and the color key go with the buttons.
+  a chevron at its right end; the whole strip is the button (`bar_strip`). A
+  press brings the button row up out of the strip (`controls_block`) and
+  turns the chevron over; the next press folds it back. `MyApp::map_bar_open`
+  is session state, and the zoom column and the color key go with the
+  buttons.
+
+  The strip is painted by hand - a rect with `Sense::click`, a highlight
+  filled inside it while hovered or pressed, the glyph at its right end -
+  rather than being an egui `Button`. egui lays a button out with its frame's
+  stroke included, and a button drawn frameless at rest grows by that stroke
+  the moment it is hovered or pressed; at the foot of a bar placed by its
+  height, that was the bar jumping up on every press.
+
+  The button row (`controls`) is centered by hand too: egui lays a row out
+  from the left and cannot center it in one pass, so the row is laid out in
+  a rect set in from the left by half of last frame's leftover, measured
+  from the row's own width (`controls_width`). Not a spacer: a spacer counts
+  as an item and brings an item spacing with it, which pushed a row that
+  exactly fit over the edge by one gap. The row is sized with
+  `icon_size_for_row`, stroke included, so it never exceeds the bar.
 
   The rise is animated (`BAR_FOLD_S`, `animate_bool_with_time`): the row is
   laid out at full size every frame it is on the way, clipped to its share of
@@ -658,8 +684,7 @@ edges. The key wrinkles:
   off `controls_height` the same frame, so it rides up and down with the
   row. Its own height is `status_bar_height`, and `bottom_overlay_inset`
   adds the two for everything that floats above them: the zoom column, the
-  center menu, the credit line, the download read-out and the manual
-  position bar.
+  center menu, the credit line and the download read-out.
 - **The zoom buttons are a column in the bottom right corner**
   (`zoom_column`): in on top, out below, above the bars
   (`bottom_overlay_inset`). On every platform now that they are out of the
@@ -730,17 +755,14 @@ edges. The key wrinkles:
   `cfg!(target_os = "android")`), and the corner column's buttons on both.
 - **Panning** is by primary-button drag, suppressed while pinching or while a
   download box is being picked.
-- **The path button** is a session-only master switch (`MyApp::show_paths`) over
-  every recorded path. It only ever hides: which paths a shown map draws is
-  `[track] show_path`, `[ble] show_path` and `[lora] show_path` on the Settings
-  page (your path, the connected node's path, and the remote nodes' paths
-  respectively), and the button changes none of them, so a press is undone by a
-  press. Your path is the phone's track, or the connected node's while the
-  node is where you are (`MyApp::your_track`). The line to the tracked board and its distance label are not paths and
-  stay drawn either way - they say where that board is *now*, which is what is
-  worth keeping when the map is too busy to read. It replaced the old "clear
-  tracks" button; discarding the points moved to the Settings page, off the bar
-  used while moving.
+- **Which paths are drawn** is `[track] show_path`, `[ble] show_path` and
+  `[lora] show_path` on the Settings page (your path, the connected node's
+  path, and the remote nodes' paths respectively); the bar has no switch over
+  them any more. Your path is the phone's track, or the connected node's while
+  the node is where you are (`MyApp::your_track`). The line to the tracked
+  board and its distance label are not paths and stay drawn either way - they
+  say where that board is *now*. Discarding the points is on the Settings
+  page, off the bar used while moving.
 - **The layer button** cycles the base layers the tile provider has
   (`TileProvider::layers`): standard and topographic on OpenStreetMap; streets,
   outdoor and satellite on ArcGIS (`[map] tiles`). Its glyph is the layer a
@@ -833,8 +855,8 @@ keeps the read-out and never rotates.
 The bar records its own height in `MyApp::status_bar_height` after laying out,
 because the read-out wraps and how tall it ends up depends on the text size and
 what is being reported. `MyApp::bottom_overlay_inset` is what the other
-bottom-anchored overlays - the zoom column, the desktop manual position bar
-and the offline download progress - position from: the larger of that height
+bottom-anchored overlays - the zoom column, the credit line and the offline
+download progress - position from: the larger of that height
 and the gesture-bar inset, not their sum (the bar's own frame already covers
 the inset), and only on the map page, which is the one page that draws it. The
 bar's fill is the map's `bar_fill`, so it fades with the controls bar.
@@ -956,9 +978,7 @@ sending you back here for it, writing the same file and sharing the same
   taking that on yourself.
 - `[track] show_path`, `[ble] show_path` and `[lora] show_path` are the per-path
   overlay settings (the phone track, the connected board's path, and every remote
-  node's path). The map bar's path button is a session-only master switch over
-  all three (`MyApp::show_paths`) and never writes them, so the saved settings
-  survive it. None affects recording: the points are kept either way, which is
+  node's path). None affects recording: the points are kept either way, which is
   why discarding them is its own button under "Track recording" (it clears the
   phone, beacon and every remote track). `mac` is an `Option<String>` where
   `None` means "any board"; it is no longer typed by hand but chosen in the
@@ -1337,19 +1357,16 @@ off the device. The model is `src/logging.rs`; the page is `logging_page`.
   pin every later run to the same file. The path input is disabled while
   recording - the open file is what it names.
 
-## Manual position bar (desktop)
+## Manual position (desktop)
 
-With no live GPS source (`gps.is_none()`, i.e. desktop), a bottom-anchored
-bar lets a position be typed as "lat, lon". A valid entry feeds the same
-`apply_gps_fix` pipeline a real fix would, as `LocationSource::Manual`, and
-recenters the map. It is shown on the Map page only. A typed position carries
-no course and no speed, so the Status page's velocity line stays off on
-desktop - both come from the receiver, and there is no second position to
-derive them from.
-
-It positions from `MyApp::bottom_overlay_inset`, so it stacks above the map
-status bar instead of overlapping it (see that section for how the clearance is
-worked out).
+With no live GPS source (`gps.is_none()`, i.e. desktop), a "Position:" row in
+the Settings page's Phone section (`MyApp::manual_position_row`, in
+`pages/manual.rs`) lets a position be typed as "lat, lon". A valid entry feeds
+the same `apply_gps_fix` pipeline a real fix would, as `LocationSource::Manual`,
+and recenters the map. A typed position carries no course and no speed, so the
+Status page's velocity line stays off on desktop - both come from the receiver,
+and there is no second position to derive them from. The row is absent on a
+phone, which has a receiver of its own.
 
 ## The compass (mobile)
 
@@ -1388,8 +1405,8 @@ live-source channels/insets are present:
 - **Zoom**: desktop = wheel + the corner buttons; mobile = pinch + the same
   buttons.
 - **GPS**: mobile = live GNSS channel, powered only while `[phone] location`
-  is on; desktop = manual position bar. The connected node's receiver can be
-  the position on both.
+  is on; desktop = the Settings page's position row. The connected node's
+  receiver can be the position on both.
 - **Clipboard**: mobile = Android's clipboard service over JNI; desktop =
   egui's own.
 - **Heading-up lock**: mobile locks/centers the view; desktop keeps free pan.

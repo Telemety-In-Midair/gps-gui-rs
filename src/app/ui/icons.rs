@@ -66,14 +66,6 @@ pub(super) fn north() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/north.svg")
 }
 
-pub(super) fn path() -> egui::ImageSource<'static> {
-    egui::include_image!("../../../assets/icons/path.svg")
-}
-
-pub(super) fn path_off() -> egui::ImageSource<'static> {
-    egui::include_image!("../../../assets/icons/path-off.svg")
-}
-
 pub(super) fn points() -> egui::ImageSource<'static> {
     egui::include_image!("../../../assets/icons/points.svg")
 }

@@ -37,8 +37,8 @@ dotted = true       # draw distance line dotted rather than solid
 [map]                # the map page: its tiles and its overlays
 tiles = "osm"        # "osm" (OpenStreetMap, OpenTopoMap) or "arcgis" (Esri streets, outdoor, satellite)
 arcgis_key = ""      # your own ArcGIS key; empty uses the built-in one
-bar_opacity = 1.0    # the top bar and the status bar backgrounds, 0 - 1
-show_key = true      # the color key under the top bar
+bar_opacity = 1.0    # the bottom bar and the status bar backgrounds, 0 - 1
+show_key = true      # the color key in the top left corner
 
 [ble]
 enabled = true       # master switch for the BLE GPS source

@@ -37,3 +37,6 @@ mod widgets;
 /// the text sizes it is derived from. `publish` puts the look up for a frame,
 /// which the app loop does before it draws anything.
 pub(super) use theme::{apply_spacing, publish};
+/// The frame's note that the phone's keyboard has just come up, which the
+/// text fields read to keep the focused one in view.
+pub(super) use widgets::note_keyboard_rise;
