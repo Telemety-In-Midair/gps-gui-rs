@@ -1281,7 +1281,8 @@ app's) and edits it in place. The model lives in `src/radio.rs`; the page in
   track edits as they are set and hide while a value would be rejected. Printed:
   the exact time on air of one beacon (header, sync word when hopping, and the
   selected fields), the duty cycle over the interval, the hop plan (channels,
-  spacing, span, dwell) with whether the frame fits the slot window, and the
+  spacing, span, dwell) with whether the frame fits its turn of the slot
+  window and how many addresses the plan carries, and the
   902-928 MHz verdict for that plan: 400 ms per channel visit when hopping
   (`LimitRule::HopVisit`), nothing for a 500 kHz single channel, and a "needs
   hopping" error for a narrower single channel. Out of band, no verdict.

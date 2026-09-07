@@ -263,24 +263,40 @@ impl MyApp {
                 "Hopping: {} channels x {} kHz ({:.2}-{:.2} MHz), {} ms per channel",
                 fit.channels, fit.step_khz, fit.span_mhz.0, fit.span_mhz.1, fit.dwell_ms,
             ));
-            match fit.overrun_ms(est.toa_ms) {
-                None => {
-                    ui.colored_label(
-                        colors.ok,
-                        format!(
-                            "Fits the {:.0} ms slot ({:.0}%)",
-                            fit.window_ms, fit.window_pct
-                        ),
-                    );
-                }
-                Some(over) => {
+            match (fit.overrun_ms(est.toa_ms), fit.turn_overrun_ms(est.toa_ms)) {
+                (Some(over), _) => {
                     ui.colored_label(
                         colors.error,
                         format!("Over the {:.0} ms slot by {over:.0} ms", fit.window_ms),
                     );
                     hint!(ui, text::HOP_OVERRUN);
                 }
+                (None, Some(over)) => {
+                    ui.colored_label(
+                        colors.error,
+                        format!(
+                            "Fits the {:.0} ms slot, over its {:.0} ms turn by {over:.0} ms",
+                            fit.window_ms, fit.turn_ms
+                        ),
+                    );
+                    hint!(ui, text::HOP_TURN_OVERRUN);
+                }
+                (None, None) => {
+                    ui.colored_label(
+                        colors.ok,
+                        format!(
+                            "Fits its {:.0} ms turn ({:.0}%), {} a slot",
+                            fit.turn_ms, fit.turn_pct, fit.turns_per_slot
+                        ),
+                    );
+                }
             }
+            // The fleet the plan carries: consecutive addresses from 1 take
+            // turns that never overlap; past this many, two share one.
+            ui.label(format!(
+                "Addresses 1-{} beacon without overlapping",
+                fit.addresses
+            ));
         }
 
         // The band rules only mean anything in-band, so out of band there is

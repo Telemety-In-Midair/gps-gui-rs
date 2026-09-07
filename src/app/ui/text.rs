@@ -165,6 +165,8 @@ pub(crate) mod radio {
 
     pub(crate) const HOP_OVERRUN: &str =
         "Lengthen hop_dwell_ms, widen the bandwidth or send fewer fields.";
+    pub(crate) const HOP_TURN_OVERRUN: &str =
+        "Runs into the next address's turn every slot: send fewer fields, or lower the spreading factor.";
     pub(crate) const NEEDS_HOPPING: &str =
         "902-928 MHz needs hopping under 500 kHz: set hop_channels, or bandwidth_khz = 500.";
 }

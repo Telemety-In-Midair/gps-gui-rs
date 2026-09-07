@@ -122,6 +122,18 @@ pub struct HopFit {
     pub window_ms: f32,
     /// The frame's share of the window, percent.
     pub window_pct: f32,
+    /// Turns the window is cut into: nodes take one each, by address, so
+    /// this many beacon a slot without overlapping.
+    pub turns_per_slot: u8,
+    /// One turn, ms: what this node's frame has to fit so as not to run
+    /// into the next node's.
+    pub turn_ms: f32,
+    /// The frame's share of its turn, percent.
+    pub turn_pct: f32,
+    /// Addresses that get a turn of their own at the beacon interval -
+    /// turns per slot times slots per interval. Address `n + 1` shares
+    /// address 1's turn.
+    pub addresses: u32,
 }
 
 impl HopFit {
@@ -129,6 +141,13 @@ impl HopFit {
     /// it fits.
     pub fn overrun_ms(&self, toa_ms: f32) -> Option<f32> {
         (toa_ms > self.window_ms).then_some(toa_ms - self.window_ms)
+    }
+
+    /// How far a transmission of `toa_ms` overruns its turn - into the next
+    /// node's - or `None` when it fits. A frame that fits the window but not
+    /// a turn is sent anyway; it is one overlap per slot with one neighbor.
+    pub fn turn_overrun_ms(&self, toa_ms: f32) -> Option<f32> {
+        (toa_ms > self.turn_ms).then_some(toa_ms - self.turn_ms)
     }
 }
 
@@ -154,6 +173,11 @@ pub fn airtime(cfg: &RadioConfig) -> Airtime {
     let hop = plan.map(|plan| {
         let (lo, hi) = plan.span_hz();
         let window_ms = plan.window_ms() as f32;
+        let turn_ms = plan.sub_slot_ms() as f32;
+        // Slots per interval, as the firmware counts them: whole slots,
+        // at least one. A silenced node still has a plan to show.
+        let interval_ms = u32::from(interval_s.max(1)) * 1000;
+        let interval_slots = interval_ms.div_ceil(u32::from(plan.dwell_ms.max(1))).max(1);
         HopFit {
             channels: plan.channels,
             step_khz: plan.step_khz,
@@ -161,6 +185,10 @@ pub fn airtime(cfg: &RadioConfig) -> Airtime {
             span_mhz: (lo as f32 / 1e6, hi as f32 / 1e6),
             window_ms,
             window_pct: if window_ms > 0.0 { toa_ms / window_ms * 100.0 } else { f32::INFINITY },
+            turns_per_slot: plan.sub_slots,
+            turn_ms,
+            turn_pct: if turn_ms > 0.0 { toa_ms / turn_ms * 100.0 } else { f32::INFINITY },
+            addresses: plan.turns(interval_slots),
         }
     });
     let limit = match (in_band, plan.is_some(), cfg.bandwidth_khz) {
@@ -867,6 +895,24 @@ power_mode = \"full\"
         // The frame counted is the one that goes out: header, sync word,
         // position.
         assert_eq!(est.payload_len, lora::HEADER_SYNC_LEN + 10);
+        // The default beacon takes one of two 400 ms turns, so with the
+        // beacon silenced the plan still shows two addresses a slot...
+        assert_eq!((fit.turns_per_slot, fit.turn_ms), (2, 400.0));
+        assert_eq!(fit.turn_overrun_ms(est.toa_ms), None);
+        assert!(fit.turn_pct > 70.0 && fit.turn_pct < 75.0, "{}", fit.turn_pct);
+        assert_eq!(fit.addresses, 2);
+        // ...and every second at the default interval, ten every five.
+        cfg.beacon_interval_s = 1;
+        assert_eq!(airtime(&cfg).hop.unwrap().addresses, 2);
+        cfg.beacon_interval_s = 5;
+        assert_eq!(airtime(&cfg).hop.unwrap().addresses, 10);
+        // Every field selected still fits a turn; a turn is the unit the
+        // lean beacon cuts, not the one this node sends.
+        cfg.beacon_fields = lora::FIELDS_ALL;
+        let rich = airtime(&cfg);
+        let fit = rich.hop.unwrap();
+        assert_eq!(fit.turns_per_slot, 2);
+        assert_eq!(fit.turn_overrun_ms(rich.toa_ms), None, "{} ms", rich.toa_ms);
     }
 
     /// A frame longer than the slot window is reported as an overrun of the
