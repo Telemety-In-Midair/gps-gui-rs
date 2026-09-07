@@ -227,8 +227,8 @@ pub(crate) mod map {
     pub(crate) const SHOW_PATHS: &str = "Show paths";
     pub(crate) const MENU_OPEN: &str = "Menu";
     pub(crate) const MENU_CLOSE: &str = "Close menu";
-    pub(crate) const FOLD_BAR: &str = "Fold the bar away";
-    pub(crate) const UNFOLD_BAR: &str = "Show the bar";
+    pub(crate) const FOLD_BAR: &str = "Hide the buttons";
+    pub(crate) const UNFOLD_BAR: &str = "Show the buttons";
 
     pub(crate) const SELECT_HINT: &str = "Drag a box to download";
     pub(crate) const DOWNLOAD_TITLE: &str = "Download region";

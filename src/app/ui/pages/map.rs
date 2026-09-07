@@ -1,11 +1,13 @@
-//! The interactive map page: the folding controls bar and the tab that
-//! folds it, the zoom column and the color key that go with it, the marker
-//! info popups, and the offline region-download selection and progress.
+//! The interactive map page: the controls bar along the foot of the screen
+//! and the strip that unfolds its buttons, the zoom column and the color key
+//! that go with them, the marker info popups, and the offline region-download
+//! selection and progress.
 //!
 //! The map picture itself is painted in [`crate::app::ui::mapdraw`] and the
-//! bottom status bar in [`crate::app::ui::statusbar`]; what is declared here
-//! is everything else laid over it.
+//! status bar that stacks on the controls in [`crate::app::ui::statusbar`];
+//! what is declared here is everything else laid over it.
 
+use std::f32::consts::PI;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
@@ -34,6 +36,10 @@ const MAX_REGION_TILES: u64 = 10_000;
 /// it will ever reach.
 const REGION_ZOOM_HEADROOM: u8 = 2;
 const REGION_ZOOM_MAX: u8 = 17;
+
+/// How long the button row takes to rise out of the strip, or sink back
+/// into it. The same beat as the menu glyph's crossfade.
+const BAR_FOLD_S: f32 = 0.15;
 
 /// What shapes the bar's button row, for the adjuster.
 const TOOLBAR_KEYS: [Key; 4] = [
@@ -141,54 +147,22 @@ impl MyApp {
         // The box-selection layer sits between the map and the controls.
         self.select_overlay(ctx, screen);
 
-        // Controls float on top in the foreground layer, so they keep pointer
-        // priority over the (interactive) map behind them. The fill spans the
-        // status-bar area; the top inset pushes the buttons clear of it. The
-        // tab hanging under the bar's right end folds the whole bar away, and
-        // the zoom column and the key go with it.
-        let top = self.top_inset(ctx);
-        let (margin_x, margin_y) = bar_margin(ctx);
+        // The bars stack at the foot of the screen, in the foreground layer so
+        // they keep pointer priority over the (interactive) map behind them:
+        // the controls bar on the edge, and the signal read-out on top of it
+        // when that is turned on. The controls go first because the read-out
+        // is placed off the height they measure. Both are drawn before the
+        // transient popups so a confirmation still lands on top of them.
+        self.map_controls_bar(ctx, screen);
+        self.map_status_bar(ctx, screen);
+        // The zoom column and the key go with the buttons: folded away, the
+        // map is left to itself.
         if self.map_bar_open {
-            let fill = self.bar_fill(ctx);
-            let bar = egui::Area::new(egui::Id::new("controls"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(egui::Pos2::ZERO)
-                .movable(false)
-                .constrain(false)
-                .show(ctx, |ui| {
-                    egui::Frame::NONE
-                        .fill(fill)
-                        .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
-                        .show(ui, |ui| {
-                            // The frame's margin is part of the screen width, so the
-                            // content gets what is left of it. Setting the full width
-                            // here would push the bar (and the button row it sizes)
-                            // past the right edge by the margin.
-                            ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
-                            ui.add_space(top);
-                            self.controls(ui);
-                        });
-                });
-            probe(
-                ctx,
-                bar.response.rect,
-                "Controls bar",
-                &[Key::BarMarginX, Key::BarMarginY],
-            );
-            self.controls_height = bar.response.rect.height();
             self.zoom_column(ctx, screen);
             if self.config.map.show_key {
                 self.map_key(ctx, screen);
             }
-        } else {
-            self.controls_height = 0.0;
         }
-        self.bar_tab(ctx, screen);
-
-        // The signal read-out along the bottom, when it is turned on. Drawn
-        // before the transient popups so a confirmation still lands on top of
-        // it.
-        self.map_status_bar(ctx, screen);
         self.attribution_ui(ctx, screen);
 
         // Selection hint / download confirmation, floating over everything.
@@ -207,51 +181,133 @@ impl MyApp {
             .gamma_multiply(self.config.map.bar_opacity)
     }
 
-    /// The tab at the right edge that folds the controls bar away and brings
-    /// it back. It hangs under the bar while the bar is up, and moves up to
-    /// the top corner once the bar is folded: below the bar rather than over
-    /// it, so it never covers the menu button at the row's right end when a
-    /// narrow screen pushes the row out to the edge.
-    fn bar_tab(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let icon = icon_size(ctx);
-        let margin = corner_margin(ctx);
-        let pad = px(ctx, Key::MapTabPad);
+    /// The controls bar along the foot of the screen: a strip with a chevron
+    /// at its right end, and above it, once the strip has been pressed, the
+    /// row of buttons. Folded, the strip is all there is.
+    ///
+    /// The row rises out of the strip rather than appearing: it is laid out
+    /// at full size every frame it is on the way and clipped to the share of
+    /// its height the animation has reached, with the strip covering the
+    /// rest. An `Area` places itself by the size it had *last* frame, which
+    /// would paint a growing bar one frame late at the bottom edge, so this
+    /// one is placed by its top edge instead, worked out from the two heights
+    /// measured last frame and this frame's share of the row - which is the
+    /// height it is about to lay out, so the edge lands where it is meant to.
+    /// The gesture-bar inset is part of the frame, so the fill reaches the
+    /// screen edge and the strip still clears it.
+    pub(crate) fn map_controls_bar(&mut self, ctx: &egui::Context, screen: egui::Rect) {
+        let openness = ctx.animate_bool_with_time(
+            egui::Id::new("map_bar_openness"),
+            self.map_bar_open,
+            BAR_FOLD_S,
+        );
+        let shown = (openness * self.bar_row_height).round();
+        let top = screen.bottom() - (self.bar_foot_height + shown);
+        let bottom = self.bottom_inset(ctx);
+        let (margin_x, margin_y) = bar_margin(ctx);
         let fill = self.bar_fill(ctx);
-        // The bar is drawn before the tab each frame, so its height is this
-        // frame's. It starts at the top of the screen with the inset inside
-        // it, so its height is also where its bottom edge is.
-        let (glyph, hint, top) = if self.map_bar_open {
-            (icons::chevron_up(), text::FOLD_BAR, self.controls_height)
-        } else {
-            (icons::chevron_down(), text::UNFOLD_BAR, self.top_inset(ctx))
-        };
-        let area = egui::Area::new(egui::Id::new("map_bar_tab"))
-            // Over the popups that hang under the bar, which are Foreground,
-            // so the tab wins the press should one drift under it.
-            .order(egui::Order::Tooltip)
-            .fixed_pos(egui::pos2(screen.right() - margin, top))
-            .pivot(egui::Align2::RIGHT_TOP)
+        let bar = egui::Area::new(egui::Id::new("controls"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(screen.left(), top))
             .movable(false)
             .constrain(false)
             .show(ctx, |ui| {
-                egui::Frame::NONE.fill(fill).show(ui, |ui| {
-                    ui.spacing_mut().button_padding = egui::Vec2::splat(pad);
-                    if icon_button(ui, icon, glyph).on_hover_text(hint).clicked() {
-                        self.map_bar_open = !self.map_bar_open;
-                    }
-                });
+                egui::Frame::NONE
+                    .fill(fill)
+                    .inner_margin(egui::Margin {
+                        left: margin_x,
+                        right: margin_x,
+                        top: margin_y,
+                        bottom: margin_y.saturating_add(bottom as i8),
+                    })
+                    .show(ui, |ui| {
+                        // The frame's margin is part of the screen width, so the
+                        // content gets what is left of it. Setting the full width
+                        // here would push the bar (and the button row it sizes)
+                        // past the right edge by the margin.
+                        ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
+                        // The row sits straight on the strip; the buttons'
+                        // own padding is the space between the two.
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        if openness > 0.0 {
+                            self.controls_block(ui, shown);
+                        }
+                        self.bar_strip(ui, openness);
+                    });
             });
         probe(
             ctx,
-            area.response.rect,
-            "Bar tab",
-            &[Key::MapTabPad, Key::IconSize, Key::CornerMargin],
+            bar.response.rect,
+            "Controls bar",
+            &[Key::BarMarginX, Key::BarMarginY],
+        );
+        self.controls_height = bar.response.rect.height();
+        self.bar_foot_height = self.controls_height - shown;
+    }
+
+    /// The button row's place in the bar: `shown` points of it, clipped from
+    /// the top, with the buttons laid out at their full size behind the clip
+    /// so their height can be measured whatever share of it is on show. A
+    /// button clipped away cannot be pressed: egui interacts with what is
+    /// inside the clip and nothing else.
+    fn controls_block(&mut self, ui: &mut egui::Ui, shown: f32) {
+        let width = ui.available_width();
+        let origin = ui.next_widget_position();
+        let block = egui::Rect::from_min_size(origin, egui::vec2(width, shown));
+        let mut row = ui.new_child(
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
+                origin,
+                egui::pos2(origin.x + width, f32::INFINITY),
+            )),
+        );
+        row.set_clip_rect(block.intersect(ui.clip_rect()));
+        self.controls(&mut row);
+        self.bar_row_height = row.min_rect().height();
+        ui.advance_cursor_after_rect(block);
+    }
+
+    /// The strip at the foot of the bar. The whole width is the button, so a
+    /// thumb anywhere along it will do, and the chevron at its right end
+    /// points the way a press moves the buttons: up while they are folded
+    /// away, turning over as they rise.
+    fn bar_strip(&mut self, ui: &mut egui::Ui, openness: f32) {
+        let ctx = ui.ctx().clone();
+        let icon = icon_size(&ctx);
+        let pad = px(&ctx, Key::MapTabPad);
+        ui.spacing_mut().button_padding = egui::Vec2::splat(pad);
+        let tint = ui.visuals().text_color();
+        let chevron = egui::Image::new(icons::chevron_up())
+            .fit_to_exact_size(egui::Vec2::splat(icon))
+            .tint(tint)
+            .rotate(openness * PI, egui::Vec2::splat(0.5));
+        let hint = if self.map_bar_open {
+            text::FOLD_BAR
+        } else {
+            text::UNFOLD_BAR
+        };
+        let strip = ui
+            .add(
+                // The grow atom takes the width, which puts the glyph at the
+                // right end. No frame at rest: the bar's own fill is the strip.
+                egui::Button::new((egui::Atom::grow(), chevron))
+                    .frame_when_inactive(false)
+                    .min_size(egui::vec2(ui.available_width(), 0.0)),
+            )
+            .on_hover_text(hint);
+        if strip.clicked() {
+            self.map_bar_open = !self.map_bar_open;
+        }
+        probe(
+            &ctx,
+            strip.rect,
+            "Bar strip",
+            &[Key::MapTabPad, Key::IconSize],
         );
     }
 
-    /// The zoom buttons, stacked in the bottom right corner above the status
-    /// bar: in on top, out below. On every platform now that they are out of
-    /// the bar; pinching still works where there is a touch screen.
+    /// The zoom buttons, stacked in the bottom right corner above the bars:
+    /// in on top, out below. On every platform now that they are out of the
+    /// bar; pinching still works where there is a touch screen.
     fn zoom_column(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let icon = icon_size(ctx);
         let margin = corner_margin(ctx);
@@ -293,10 +349,11 @@ impl MyApp {
         );
     }
 
-    /// The color key, hanging under the left end of the controls bar: one
-    /// row per marker on the map, in the color it is drawn in. Only the
-    /// markers that are there, so the key is never longer than the map is
-    /// busy.
+    /// The color key, in the top left corner: one row per marker on the map,
+    /// in the color it is drawn in. Only the markers that are there, so the
+    /// key is never longer than the map is busy. Up there rather than on the
+    /// bars, whose left end the credit line and the download read-out
+    /// already float over.
     fn map_key(&self, ctx: &egui::Context, screen: egui::Rect) {
         let mut entries: Vec<(egui::Color32, String)> = Vec::new();
         if self.current.is_some() {
@@ -313,8 +370,8 @@ impl MyApp {
         if entries.is_empty() {
             return;
         }
-        let top = self.top_inset(ctx) + self.controls_height + px(ctx, Key::MapKeyUnderBar);
         let margin = corner_margin(ctx);
+        let top = self.top_inset(ctx) + margin;
         let radius = px(ctx, Key::MapKeyDot);
         let fill = self.bar_fill(ctx);
         let outline = self.config.colors.outline;
@@ -344,7 +401,7 @@ impl MyApp {
             ctx,
             area.response.rect,
             "Map key",
-            &[Key::MapKeyDot, Key::MapKeyUnderBar, Key::CornerMargin],
+            &[Key::MapKeyDot, Key::CornerMargin],
         );
     }
 
@@ -530,7 +587,7 @@ impl MyApp {
             return;
         }
 
-        let top = self.top_inset(ctx);
+        let foot = self.bottom_overlay_inset(ctx);
         let padding = popup_padding(ctx);
         let entry_gap = px(ctx, Key::MapCenterGap);
         let min_width = px(ctx, Key::MapCenterWidth);
@@ -546,9 +603,9 @@ impl MyApp {
             ctx,
             "center_menu",
             egui::Order::Foreground,
-            // Just under the controls bar the button sits in.
-            egui::Pos2::new(screen.center().x, top + px(ctx, Key::MapUnderBar)),
-            egui::Align2::CENTER_TOP,
+            // Just above the bars, the button that opened it being in them.
+            egui::Pos2::new(screen.center().x, screen.bottom() - foot - px(ctx, Key::MapAboveBar)),
+            egui::Align2::CENTER_BOTTOM,
             false,
             |ui| {
                 ui.spacing_mut().button_padding = padding;
@@ -570,7 +627,7 @@ impl MyApp {
             rect,
             "Center menu",
             &[
-                Key::MapUnderBar,
+                Key::MapAboveBar,
                 Key::MapPopupPadX,
                 Key::MapPopupPadY,
                 Key::MapCenterGap,
@@ -799,10 +856,11 @@ impl MyApp {
     /// The floating hint while picking a box, and the confirm panel (tile
     /// count, max-zoom stepper) once one is chosen.
     fn select_ui(&mut self, ctx: &egui::Context, screen: egui::Rect) {
-        let top = self.top_inset(ctx);
-        // Both panels are measured off the icon size, which is itself a
-        // fraction of the screen: the hint clears the controls bar it sits
-        // under, and the confirm panel's buttons stay a touch target.
+        // The hint sits at the top, where nothing else is now that the bars
+        // are at the foot of the screen, inset as far as the corner toggle.
+        let top = self.top_inset(ctx) + corner_margin(ctx);
+        // The confirm panel's buttons are measured off the icon size, which
+        // is itself a fraction of the screen, so they stay a touch target.
         let padding = popup_padding(ctx);
         match self.select {
             RegionSelect::Inactive => {}
@@ -812,7 +870,7 @@ impl MyApp {
                     ctx,
                     "select_hint",
                     egui::Order::Foreground,
-                    egui::Pos2::new(screen.center().x, top + px(ctx, Key::MapHintUnderBar)),
+                    egui::Pos2::new(screen.center().x, top),
                     egui::Align2::CENTER_TOP,
                     false,
                     |ui| {
@@ -824,7 +882,7 @@ impl MyApp {
                         });
                     },
                 );
-                probe(ctx, rect, "Select hint", &[Key::MapHintUnderBar]);
+                probe(ctx, rect, "Select hint", &[Key::CornerMargin]);
                 if cancel {
                     self.select = RegionSelect::Inactive;
                 }
@@ -979,6 +1037,78 @@ impl MyApp {
                     }
                 });
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::tests::test_app;
+    use crate::app::MyApp;
+
+    /// One frame of the two bottom bars, at a given clock, so the fold
+    /// animation can be run through.
+    fn frame(ctx: &egui::Context, app: &mut MyApp, screen: egui::Rect, time: f64) {
+        let input = egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ctx| {
+            app.map_controls_bar(ctx, screen);
+            app.map_status_bar(ctx, screen);
+        });
+    }
+
+    fn area(ctx: &egui::Context, id: &str) -> egui::Rect {
+        ctx.memory(|m| m.area_rect(egui::Id::new(id)))
+            .unwrap_or_else(|| panic!("{id} was not laid out"))
+    }
+
+    /// Folded, the controls bar is a strip on the bottom edge and the status
+    /// bar stands on it; opened, the button row rises out of the strip, the
+    /// bar stays on the edge, and the status bar rides up with its top.
+    #[test]
+    fn the_buttons_rise_out_of_the_strip_and_the_status_bar_stands_on_it() {
+        let (mut app, _cmds, _events) = test_app();
+        app.config.status_bar.show = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 800.0));
+        let ctx = egui::Context::default();
+
+        // The first frame measures the strip; the second places the bar by it.
+        frame(&ctx, &mut app, screen, 0.0);
+        frame(&ctx, &mut app, screen, 0.02);
+        let folded = app.controls_height;
+        assert!(folded > 0.0);
+        assert!(folded < screen.height() / 8.0, "a strip, not a panel: {folded}");
+        let bar = area(&ctx, "controls");
+        assert!((bar.bottom() - screen.bottom()).abs() < 1.0, "on the edge: {bar:?}");
+        assert!((bar.height() - folded).abs() < 1.0);
+        let status = area(&ctx, "map_status_bar");
+        assert!(
+            (status.bottom() - bar.top()).abs() < 1.0,
+            "the status bar stands on the strip: {status:?} over {bar:?}"
+        );
+
+        app.map_bar_open = true;
+        for i in 1..=30 {
+            frame(&ctx, &mut app, screen, 0.02 + f64::from(i) * 0.02);
+            // Every frame of the rise, the bar's bottom edge stays put.
+            let bar = area(&ctx, "controls");
+            assert!(
+                (bar.bottom() - screen.bottom()).abs() < 1.0,
+                "frame {i}: the edge moved: {bar:?}"
+            );
+        }
+        let open = app.controls_height;
+        assert!(open > folded + 1.0, "the row adds height: {open} over {folded}");
+        assert!(app.bar_row_height > 0.0);
+        let bar = area(&ctx, "controls");
+        assert!((bar.height() - open).abs() < 1.0);
+        let status = area(&ctx, "map_status_bar");
+        assert!(
+            (status.bottom() - bar.top()).abs() < 1.0,
+            "the status bar rode up: {status:?} over {bar:?}"
         );
     }
 }

@@ -123,39 +123,35 @@ fn rssi_graph(
 }
 
 impl MyApp {
-    /// The status bar along the bottom of the map, when it is turned on.
+    /// The status bar across the map, when it is turned on: on top of the
+    /// controls bar at the foot of the screen, which is drawn first each
+    /// frame and has the gesture-bar inset inside it, so this one sits on
+    /// its top edge and needs no inset of its own.
     ///
-    /// Records its own height in [`MyApp::status_bar_height`] so the other
-    /// bottom-anchored overlay - the desktop manual position bar - can sit
-    /// above it rather than under it. Measured after the fact because the
-    /// read-out wraps: how tall it is depends on the text size and what is
-    /// being reported.
+    /// Records its own height in [`MyApp::status_bar_height`] so what floats
+    /// above the two bars - the zoom column, the desktop manual position bar -
+    /// can clear them. Measured after the fact because the read-out wraps:
+    /// how tall it is depends on the text size and what is being reported.
     pub(crate) fn map_status_bar(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         if !self.config.status_bar.show {
             self.status_bar_height = 0.0;
             return;
         }
-        let bottom = self.bottom_inset(ctx);
         let (margin_x, margin_y) = bar_margin(ctx);
         let fill = self.bar_fill(ctx);
         let area = egui::Area::new(egui::Id::new("map_status_bar"))
             .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(screen.left(), screen.bottom()))
+            .fixed_pos(egui::pos2(
+                screen.left(),
+                screen.bottom() - self.controls_height,
+            ))
             .pivot(egui::Align2::LEFT_BOTTOM)
             .movable(false)
             .constrain(false)
             .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(fill)
-                    .inner_margin(egui::Margin {
-                        left: margin_x,
-                        right: margin_x,
-                        top: margin_y,
-                        // The gesture bar is part of the frame rather than
-                        // space under it, so the fill reaches the screen edge
-                        // and the read-out still clears the inset.
-                        bottom: margin_y.saturating_add(bottom as i8),
-                    })
+                    .inner_margin(egui::Margin::symmetric(margin_x, margin_y))
                     .show(ui, |ui| {
                         ui.set_width(screen.width() - 2.0 * f32::from(margin_x));
                         self.status_bar_row(ui);

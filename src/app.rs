@@ -950,16 +950,27 @@ pub struct MyApp {
     /// can't center a horizontal row in a single layout pass). `0.0` until the
     /// first frame has measured it.
     controls_width: f32,
-    /// Height the map's controls bar took last frame, so what hangs under it
-    /// (the key, the center menu) can clear it.
+    /// Height the map's controls bar took last frame: the strip along the
+    /// foot of the screen, the button row above it while it is open, and the
+    /// gesture-bar inset folded into it. The status bar stacks on it, and
+    /// what floats above the two clears it.
     controls_height: f32,
-    /// Whether the map's controls bar is unfolded. The tab in the corner
-    /// folds it away, and the zoom column and the key go with it. Session
-    /// state: a map cleared for a look is not a setting.
+    /// The bar's height with the button row taken out - the strip, its
+    /// margins and the inset - as measured last frame. With the row's full
+    /// height it says where the bar's top edge is before the bar is laid
+    /// out, so the bar can be placed by its top and never paints a frame
+    /// late.
+    bar_foot_height: f32,
+    /// The full height of the button row, measured whenever it is laid out.
+    /// `0.0` until the bar has been opened once.
+    bar_row_height: f32,
+    /// Whether the map's buttons are out. The strip at the foot of the bar
+    /// brings them up and folds them away again, and the zoom column and the
+    /// key go with them. Session state: a map cleared for a look is not a
+    /// setting.
     map_bar_open: bool,
-    /// Height the map's bottom status bar took last frame, so the other
-    /// bottom-anchored overlay can sit above it. `0.0` while the bar is off,
-    /// which is also what leaves that overlay where it was.
+    /// Height the map's bottom status bar took last frame, so what floats
+    /// above the bottom bars can clear it. `0.0` while the bar is off.
     status_bar_height: f32,
     /// The CSV recorder behind the Logging page.
     logger: Logger,
@@ -1123,7 +1134,9 @@ impl MyApp {
             zoom_rx,
             controls_width: 0.0,
             controls_height: 0.0,
-            map_bar_open: true,
+            bar_foot_height: 0.0,
+            bar_row_height: 0.0,
+            map_bar_open: false,
             status_bar_height: 0.0,
             logger: Logger::default(),
             // Replaced below once the config has been loaded, which is what
@@ -2038,19 +2051,19 @@ impl MyApp {
     }
 
     /// The clearance a bottom-anchored overlay needs: the gesture-bar inset,
-    /// or the map's status bar when that is what occupies the foot of the
-    /// screen.
+    /// or on the map the two bars stacked at the foot of the screen - the
+    /// controls bar and the status bar on top of it.
     ///
-    /// The larger of the two rather than their sum - the status bar's own
+    /// The larger of the two rather than their sum - the controls bar's own
     /// frame already covers the inset - and only on the map, which is the one
-    /// page that draws it. The height itself is measured by the bar as it lays
-    /// out, so it is last frame's on the frame the bar appears.
+    /// page that draws them. The heights are measured by the bars as they lay
+    /// out, so they are last frame's on the frame a bar appears.
     fn bottom_overlay_inset(&self, ctx: &egui::Context) -> f32 {
-        let bar = match self.page {
-            Page::Map => self.status_bar_height,
+        let bars = match self.page {
+            Page::Map => self.controls_height + self.status_bar_height,
             _ => 0.0,
         };
-        self.bottom_inset(ctx).max(bar)
+        self.bottom_inset(ctx).max(bars)
     }
 
     /// Device-facing compass heading if available, otherwise course over ground.

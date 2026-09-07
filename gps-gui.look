@@ -43,7 +43,8 @@ type
     bar
         margin
             # Inner side margin of a bar spanning the screen: the map's
-            # controls at the top and its status read-out at the bottom.
+            # controls at the foot of the screen and its status read-out on
+            # top of them.
             x  2%
             # Inner top and bottom margin of those bars.
             y  1%
@@ -148,27 +149,23 @@ id
             gap    0.12icon
             # The narrowest that list is drawn.
             width  3.5icon
-        # How far below the controls bar the center menu hangs.
-        under_bar       1.8icon
-        # How far below the controls bar the region-select hint hangs.
-        hint_under_bar  1.6icon
+        # How far above the bars the center menu floats.
+        above_bar    0.25icon
         # How far above a marker its info bubble floats.
-        marker_lift     0.35icon
+        marker_lift  0.35icon
         # The smallest drag that counts as a region box rather than a tap.
         # Also how far a held finger may wander and still count as a hold.
-        drag_min        2.5%
+        drag_min     2.5%
         tab
-            # Padding around the glyph of the tab that folds the controls bar
-            # away.
+            # Padding around the chevron on the strip that unfolds the map's
+            # buttons, and around the zoom buttons.
             pad  0.15icon
         zoom
             # Between the two zoom buttons in the bottom corner.
             gap  0.15icon
         key
             # Radius of a color dot in the map key.
-            dot        0.35em
-            # How far below the controls bar the key hangs.
-            under_bar  0.25icon
+            dot  0.35em
     status
         graph
             # Width of the status bar's signal graph.

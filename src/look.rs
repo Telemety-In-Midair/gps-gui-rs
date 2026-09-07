@@ -451,7 +451,7 @@ keys! {
         the ceiling whatever this says: those are physical, not a look.";
     BarMarginX: "type.bar.margin.x" = "2%", _,
         "Inner side margin of a bar spanning the screen: the map's controls at the \
-        top and its status read-out at the bottom.";
+        foot of the screen and its status read-out on top of them.";
     BarMarginY: "type.bar.margin.y" = "1%", _,
         "Inner top and bottom margin of those bars.";
     BarButtonPadX: "type.bar.button.pad.x" = "0.7icon", _,
@@ -529,23 +529,20 @@ keys! {
         "Between two entries of the center button's marker list.";
     MapCenterWidth: "id.map.center.width" = "3.5icon", _,
         "The narrowest that list is drawn.";
-    MapUnderBar: "id.map.under_bar" = "1.8icon", _,
-        "How far below the controls bar the center menu hangs.";
-    MapHintUnderBar: "id.map.hint_under_bar" = "1.6icon", _,
-        "How far below the controls bar the region-select hint hangs.";
+    MapAboveBar: "id.map.above_bar" = "0.25icon", _,
+        "How far above the bars the center menu floats.";
     MapMarkerLift: "id.map.marker_lift" = "0.35icon", _,
         "How far above a marker its info bubble floats.";
     MapDragMin: "id.map.drag_min" = "2.5%", _,
         "The smallest drag that counts as a region box rather than a tap. Also how \
         far a held finger may wander and still count as a hold.";
     MapTabPad: "id.map.tab.pad" = "0.15icon", _,
-        "Padding around the glyph of the tab that folds the controls bar away.";
+        "Padding around the chevron on the strip that unfolds the map's buttons, \
+        and around the zoom buttons.";
     MapZoomGap: "id.map.zoom.gap" = "0.15icon", _,
         "Between the two zoom buttons in the bottom corner.";
     MapKeyDot: "id.map.key.dot" = "0.35em", _,
         "Radius of a color dot in the map key.";
-    MapKeyUnderBar: "id.map.key.under_bar" = "0.25icon", _,
-        "How far below the controls bar the key hangs.";
     StatusGraphWidth: "id.status.graph.width" = "28%w", _,
         "Width of the status bar's signal graph.";
     StatusGraphHeight: "id.status.graph.height" = "1.7em", _,
@@ -660,8 +657,6 @@ const RENAMED: &[(&str, Key)] = &[
     ("map.popup.pad.y", Key::MapPopupPadY),
     ("map.center.gap", Key::MapCenterGap),
     ("map.center.width", Key::MapCenterWidth),
-    ("map.under_bar", Key::MapUnderBar),
-    ("map.hint_under_bar", Key::MapHintUnderBar),
     ("map.marker_lift", Key::MapMarkerLift),
     ("map.drag_min", Key::MapDragMin),
     ("status.graph.width", Key::StatusGraphWidth),

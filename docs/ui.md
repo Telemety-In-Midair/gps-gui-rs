@@ -145,10 +145,9 @@ controlled by `egui::Order`, lowest first:
 - `Background` - the full-screen page content (the map, or a `content_page`).
 - `Middle` - the region-select box-drag layer, so drags draw a box instead of
   panning the map, while the controls above stay clickable.
-- `Foreground` - the controls bar, the bottom status bar, floating popups, the
-  manual GPS bar.
-- `Tooltip` - the floating corner page toggle on non-map pages, and the
-  map's bar tab, which hangs under the bar it folds.
+- `Foreground` - the controls bar and the status bar stacked at the foot of
+  the map, floating popups, the manual GPS bar.
+- `Tooltip` - the floating corner page toggle on non-map pages.
 - `Debug` - the adjuster, over everything, in one `Area` (below).
 
 Pointer priority follows the same order: a higher layer under the pointer wins
@@ -353,9 +352,9 @@ the whole vocabulary, and there is no unit for points:
   held between two text widths with `min`/`max`).
 - **Fractions of the icon side** (`icon`) for anything sitting beside the
   toolbar: the button padding (`type.bar.button.pad`), the menu page's buttons
-  (`type.menu.row`), the bar tab and the zoom column (`id.map.tab.pad`,
-  `id.map.zoom.gap`), and how far the map's popups and the key hang below the
-  bar (`id.map.*`).
+  (`type.menu.row`), the bar's strip and the zoom column (`id.map.tab.pad`,
+  `id.map.zoom.gap`), and how far the center menu floats above the bars
+  (`id.map.above_bar`).
 - **Text heights** (`em`) for everything inside a page: the vertical rhythm
   (`type.gap`, five steps from `hair` to `section`), the insides of a control
   (`type.control.*`) and the narrow inputs (`class.number.width`,
@@ -636,22 +635,40 @@ neither receiver is on.
 The map is a full-bleed `Background` area so it can overscan past the screen
 edges. The key wrinkles:
 
-- **The bar folds.** A tab at the right edge (`MyApp::bar_tab`, at the
-  `Tooltip` order so it wins the press over any popup that drifts under it)
-  hangs under the bar while the bar is up: a chevron up folds the controls
-  bar away, and the tab moves up to the top corner, where a chevron down
-  brings the bar back. `MyApp::map_bar_open` is session state. The zoom
-  column and the color key go with the bar; the tab and the status bar stay.
-  The tab is under the bar rather than over it so it never covers the menu
-  button at the row's right end on a narrow screen.
+- **The controls bar is at the foot of the screen** (`map_controls_bar`),
+  with the Android gesture-bar inset folded into its frame so the fill
+  reaches the edge. Folded, which is how a session starts, it is a strip with
+  a chevron at its right end; the whole strip is the button (`bar_strip`, an
+  `Atom::grow` before the glyph puts it at the end). A press brings the button
+  row up out of the strip (`controls_block`) and turns the chevron over; the
+  next press folds it back. `MyApp::map_bar_open` is session state, and the
+  zoom column and the color key go with the buttons.
+
+  The rise is animated (`BAR_FOLD_S`, `animate_bool_with_time`): the row is
+  laid out at full size every frame it is on the way, clipped to its share of
+  the height and covered by the strip for the rest, the way a collapsing
+  header's body is. An `Area` places itself by *last* frame's size, which
+  would paint a bar whose height changes one frame late at the bottom edge
+  (a gap under it while folding), so the bar is placed by its top edge
+  instead: `bar_foot_height` (the bar less the row, measured last frame) plus
+  this frame's share of `bar_row_height` is the height about to be laid out,
+  so the edge lands where it is meant to. Only the very first frame, before
+  anything is measured, is off.
+- **The status bar stands on the controls bar** (`map_status_bar`), placed
+  off `controls_height` the same frame, so it rides up and down with the
+  row. Its own height is `status_bar_height`, and `bottom_overlay_inset`
+  adds the two for everything that floats above them: the zoom column, the
+  center menu, the credit line, the download read-out and the manual
+  position bar.
 - **The zoom buttons are a column in the bottom right corner**
-  (`zoom_column`): in on top, out below, above the status bar
+  (`zoom_column`): in on top, out below, above the bars
   (`bottom_overlay_inset`). On every platform now that they are out of the
   bar; pinching still works on a touch screen.
-- **The color key** (`map_key`, `[map] show_key`) hangs under the left end
-  of the bar: one row per marker that is on the map - you, the connected
-  node, each remote node heard - in its color and by its name. Never longer
-  than the map is busy.
+- **The color key** (`map_key`, `[map] show_key`) sits in the top left
+  corner, inset by `type.corner.margin`: one row per marker that is on the
+  map - you, the connected node, each remote node heard - in its color and
+  by its name. Never longer than the map is busy. Up there rather than over
+  the bars, whose left end the credit line already floats over.
 - **Both bars take `[map] bar_opacity`** (`MyApp::bar_fill`): the controls
   bar, the status bar and the key share one fill, the panel color with its
   alpha multiplied, so at 0 the map shows through all three.
@@ -770,11 +787,11 @@ edges. The key wrinkles:
 
 ## The map status bar (`statusbar.rs`)
 
-Off unless `[status_bar] show` is set. A `Foreground` area pinned to the bottom
-of the screen (pivot `LEFT_BOTTOM`), framed like the controls bar at the top:
-the same `theme::bar_margin`, the same panel fill, with the Android gesture-bar
-inset folded into the frame's bottom margin so the fill reaches the edge and
-the read-out still clears it.
+Off unless `[status_bar] show` is set. A `Foreground` area standing on the
+controls bar at the foot of the screen (pivot `LEFT_BOTTOM` at that bar's top
+edge, which is drawn first each frame), framed like it: the same
+`theme::bar_margin`, the same panel fill. The gesture-bar inset is the
+controls bar's to keep clear, so this one carries none.
 
 Two halves, side by side:
 

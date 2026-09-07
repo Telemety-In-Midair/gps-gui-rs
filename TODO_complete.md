@@ -4,6 +4,13 @@ Items struck through in `TODO.md`, summarized. Newest first.
 
 ## 2026-09-06
 
+- **Map bar at the bottom.** The controls bar moved to the foot of the
+  screen, under the status bar, and folds to a strip with an up chevron at
+  its right end; pressing the strip raises the button row out of it (a short
+  animation, the chevron turning over) and pressing again folds it back. A
+  session starts folded. The zoom column and the key still go with the
+  buttons; the key moved to the top left corner and the region-select hint
+  to the top. This supersedes the top-bar dropdown below.
 - **Concise menus.** Every page lost the line under its heading and under
   each section title, and every line that restated a control: the node
   settings' "Node: ..." echoes (the value now sits in the section title,
