@@ -12,7 +12,7 @@ use crate::app::ui::plot::{self, Series};
 use crate::app::ui::text::logging as text;
 use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{
-    button, check, content_page, feedback_label, heading, hint, text_field,
+    button, check, content_page, feedback_label, heading, hint, scroll_body, text_field,
 };
 use crate::app::MyApp;
 use crate::logging::{LogAxis, LogSource, LogStat};
@@ -22,7 +22,7 @@ impl MyApp {
     pub(crate) fn logging_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "logging", screen, safe, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            scroll_body(ui, |ui| {
                 heading!(ui, "Logging");
                 gap(ui, Key::GapBlock);
                 self.log_controls_ui(ui);

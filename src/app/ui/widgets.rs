@@ -12,13 +12,13 @@
 //! Everything else is a plain function, which reads better than a macro would.
 
 use std::hash::Hash;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::time::Duration;
 
 use crate::app::{MyApp, SafeArea};
 use crate::config::UiSettings;
 
-use super::theme::{control_height, em, gap, page_margin, probe, px, Key};
+use super::theme::{control_height, em, gap, page_margin, page_tail, probe, px, Key};
 
 /// How fast the dots behind a busy line cycle.
 const DOTS_PERIOD: Duration = Duration::from_millis(500);
@@ -193,8 +193,8 @@ pub(super) fn icon_button_pulse(
 
 /// A full-screen page: a Background `Area` filled with the panel color, a
 /// [`page_margin`] margin, sized to the screen, with both safe-area insets
-/// already kept clear. The closure supplies the page's heading and body (and
-/// its own `ScrollArea` where one is used).
+/// already kept clear. The closure supplies the page's heading and body,
+/// through [`scroll_body`] where the page scrolls.
 pub(super) fn content_page(
     ctx: &egui::Context,
     id: &str,
@@ -253,6 +253,81 @@ pub(super) fn content_page(
                     add(ui);
                 });
         });
+}
+
+/// The room under the last row of a page: the sheet's `type.page.tail` of
+/// empty space, half the screen by default, so the end of a page can be
+/// scrolled up to the middle of the screen rather than stopping at its foot,
+/// and a field near the end can be brought clear of a keyboard. It is
+/// content, laid out after the last row inside the scroll, where the bottom
+/// inset that [`content_page`] keeps clear is the frame's: that one holds the
+/// last row above the gesture bar, this one is the room past it.
+fn tail(ui: &mut egui::Ui) {
+    let space = page_tail(ui.ctx());
+    let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), space));
+    probe(ui.ctx(), rect, "Page tail", &[Key::PageTail]);
+    ui.add_space(space);
+}
+
+/// The scrolling body of a page: a vertical `ScrollArea` around `add`, with
+/// the [`tail`] under whatever it laid out.
+pub(super) fn scroll_body(
+    ui: &mut egui::Ui,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::scroll_area::ScrollAreaOutput<()> {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        add(ui);
+        tail(ui);
+    })
+}
+
+/// egui's `show_rows` with the [`tail`] under the last row: a list of `total`
+/// rows of one height, only the rows in view laid out, and `add` given their
+/// range. The viewport arithmetic is egui's own; what differs is the height
+/// the content is pinned to, which counts the tail, so the list is exactly
+/// its rows plus the room under them wherever it is scrolled. Adding the
+/// space inside `show_rows` instead would grow the content only in the
+/// frames that draw the last row, and the scroll bar would jump as that row
+/// came into view.
+pub(super) fn scroll_rows(
+    scroll: egui::ScrollArea,
+    ui: &mut egui::Ui,
+    row_height: f32,
+    total: usize,
+    add: impl FnOnce(&mut egui::Ui, Range<usize>),
+) -> egui::scroll_area::ScrollAreaOutput<()> {
+    let row = row_height + ui.spacing().item_spacing.y;
+    // The rows and the spacing after the last of them, which is where the
+    // tail begins - as it does after the last item of a `scroll_body`.
+    let rows_height = row * total as f32;
+    let tail_height = page_tail(ui.ctx());
+    scroll.show_viewport(ui, |ui, viewport| {
+        ui.set_height(rows_height + tail_height);
+        let mut min_row = (viewport.min.y / row).floor() as usize;
+        let mut max_row = (viewport.max.y / row).ceil() as usize + 1;
+        if max_row > total {
+            let diff = max_row.saturating_sub(min_row);
+            max_row = total;
+            min_row = total.saturating_sub(diff);
+        }
+        let top = ui.max_rect().top();
+        let rect = egui::Rect::from_x_y_ranges(
+            ui.max_rect().x_range(),
+            (top + min_row as f32 * row)..=(top + max_row as f32 * row),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            // Consistent ids for the rows whichever range is in view.
+            ui.skip_ahead_auto_ids(min_row);
+            add(ui, min_row..max_row);
+        });
+        // The tail's place, for the adjuster: under the last row, whether or
+        // not that row is in view this frame.
+        let tail_rect = egui::Rect::from_min_size(
+            egui::pos2(ui.max_rect().left(), top + rows_height),
+            egui::vec2(ui.available_width(), tail_height),
+        );
+        probe(ui.ctx(), tail_rect, "Page tail", &[Key::PageTail]);
+    })
 }
 
 /// A floating popup `Frame` in its own `Area`, used for the transient overlays
@@ -619,5 +694,105 @@ mod tests {
             "the page kept the bigger window's height: {shrunk:?}"
         );
         assert!((shrunk.width() - small.width()).abs() < 1.0, "{shrunk:?}");
+    }
+
+    /// The content of a scrolling page is its rows and half the screen under
+    /// them, so the last row can be brought up to the middle of the screen.
+    #[test]
+    fn a_scrolling_page_has_half_a_screen_under_its_last_row() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 800.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let rows = |ui: &mut egui::Ui| {
+            for i in 0..5 {
+                ui.label(format!("row {i}"));
+            }
+        };
+        // The same rows through a bare scroll area, for the height they take
+        // on their own.
+        let mut bare = 0.0;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(input(), |ui| {
+            bare = egui::ScrollArea::vertical().show(ui, rows).content_size.y;
+        });
+        let mut with_tail = 0.0;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(input(), |ui| {
+            with_tail = scroll_body(ui, rows).content_size.y;
+        });
+        assert!(bare > 0.0, "{bare}");
+        // The tail begins one item gap under the last row, as any item would.
+        let spacing = ctx.global_style().spacing.item_spacing.y;
+        let tail = with_tail - bare - spacing;
+        assert!(
+            (tail - screen.height() / 2.0).abs() < 1.0,
+            "rows alone {bare}, with the tail {with_tail}"
+        );
+    }
+
+    /// A virtual list is its rows plus the tail whatever is in view: the
+    /// content is the same height at the top and at the bottom, the bottom
+    /// draws the last rows, and the scroll reaches half a screen past them.
+    #[test]
+    fn a_virtual_list_is_its_rows_plus_the_tail_wherever_it_is_scrolled() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 800.0));
+        let row_height = 20.0;
+        let total = 200;
+        let ctx = egui::Context::default();
+        // One frame of the list, scrolled to `offset` when one is given,
+        // answering with the scroll output and the rows it was asked for.
+        let frame = |offset: Option<f32>| {
+            let mut out = None;
+            let mut drawn = 0..0;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .id_salt("list")
+                        .max_height(300.0)
+                        .auto_shrink([false, false]);
+                    if let Some(offset) = offset {
+                        scroll = scroll.vertical_scroll_offset(offset);
+                    }
+                    out = Some(scroll_rows(scroll, ui, row_height, total, |ui, range| {
+                        for i in range.clone() {
+                            ui.label(format!("row {i}"));
+                        }
+                        drawn = range;
+                    }));
+                },
+            );
+            (out.expect("the list was laid out"), drawn)
+        };
+        let (top, first) = frame(Some(0.0));
+        assert_eq!(first.start, 0);
+        assert!(first.end < total, "{first:?}");
+        // Far past the end, then a frame at the offset that clamped to.
+        let _ = frame(Some(1.0e6));
+        let (bottom, last) = frame(None);
+        assert_eq!(last.end, total, "{last:?}");
+        assert!(
+            (top.content_size.y - bottom.content_size.y).abs() < 0.5,
+            "the content changed height between the top and the bottom: {} vs {}",
+            top.content_size.y,
+            bottom.content_size.y
+        );
+        // The rows end here, and the scroll went past them by the tail: the
+        // offset at the bottom is the content less the viewport, and what
+        // lies below the last row in view is half the screen.
+        let spacing = ctx.global_style().spacing.item_spacing.y;
+        let rows_height = (row_height + spacing) * total as f32;
+        let viewport = bottom.inner_rect.height();
+        let past_rows = bottom.state.offset.y + viewport - rows_height;
+        assert!(
+            (past_rows - screen.height() / 2.0).abs() < 1.0,
+            "offset {} viewport {viewport} rows {rows_height}: {past_rows} past the rows",
+            bottom.state.offset.y
+        );
     }
 }

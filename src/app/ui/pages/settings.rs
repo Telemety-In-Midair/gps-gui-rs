@@ -15,7 +15,7 @@ use crate::app::ui::text::settings as text;
 use crate::app::ui::theme::{gap, probe, px, Key};
 use crate::app::ui::widgets::{
     busy_dots, button, check, content_page, drag, feedback_label, grid, heading, hint,
-    preset_pick, row, section, submitted, text_field,
+    preset_pick, row, scroll_body, section, submitted, text_field,
 };
 use crate::app::{MyApp, Page, RegionSelect};
 use crate::config::{
@@ -115,7 +115,7 @@ impl MyApp {
     pub(crate) fn settings_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "settings", screen, safe, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            scroll_body(ui, |ui| {
                 heading!(ui, "Settings");
                 gap(ui, Key::GapBlock);
 

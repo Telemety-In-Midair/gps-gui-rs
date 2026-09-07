@@ -184,6 +184,19 @@ The scaffolding, as functions:
   page grew with a bigger window and, handed last frame's size to fill, never
   came back down when the window shrank, so its scroll viewport stayed taller
   than the window and the last rows could not be scrolled to.
+
+  The room *past* the last row works the other way round. `scroll_body(ui,
+  add)` is the vertical `ScrollArea` every scrolling page's body goes through,
+  and after whatever `add` drew it lays down the sheet's `type.page.tail` -
+  half the screen height - of empty space, inside the scroll. So the end of a
+  page can be brought up to the middle of the screen rather than stopping at
+  its foot, and a field near the end can be scrolled clear of the keyboard.
+  Being content it scrolls with the rows; the inset above is what holds the
+  last row above the gesture bar once it gets there. `scroll_rows(scroll, ui,
+  row_height, total, add)` is the same over a virtual list (the Points list):
+  egui's `show_rows` arithmetic, with the tail counted into the height the
+  content is pinned to, so the list is its rows plus the tail wherever it is
+  scrolled rather than growing only in the frames that draw the last row.
 - `floating(ctx, id, order, pos, pivot, constrain, add)` - a popup `Frame` in
   its own area, for the transient overlays (selection hint, download confirm
   and progress, marker info bubble).
@@ -331,8 +344,8 @@ than a point count:
   a button out stroke and all) and the gaps between buttons. The controls bar
   counts its buttons before laying any out and sizes itself with this, so
   adding one shrinks the row instead of pushing it off the edge.
-- `em`, `page_margin`, `corner_margin`, `bar_margin`, `control_height` - the
-  rest of the page measures, each one key.
+- `em`, `page_margin`, `page_tail`, `corner_margin`, `bar_margin`,
+  `control_height` - the rest of the page measures, each one key.
 - `apply_spacing(style, look, screen)` - the insides of every control, off the
   body font with a touch-target floor (below), from the sheet's `control`
   block.
@@ -350,7 +363,8 @@ the whole vocabulary, and there is no unit for points:
 
 - **Fractions of the screen** (`%` of the smaller side, `%w`, `%h`) for the
   layout frame - the icon size (`type.icon.size`), the page and bar margins
-  (`type.page.margin`, `type.bar.margin`), the corner inset
+  (`type.page.margin`, `type.bar.margin`), the room under a page's last row
+  (`type.page.tail`, of the height), the corner inset
   (`type.corner.margin`), the smallest drag that counts as a region box
   (`id.map.drag_min`), and the width of a path field (`class.path.width`,
   held between two text widths with `min`/`max`).

@@ -435,6 +435,10 @@ macro_rules! keys {
 keys! {
     PageMargin: "type.page.margin" = "2.5%", _,
         "Between a page's body and the screen edge.";
+    PageTail: "type.page.tail" = "50%h", _,
+        "Room under the last row of a scrolling page: the end of a page can be \
+        brought up to the middle of the screen, and a field near it clear of the \
+        keyboard.";
     GapHair: "type.gap.hair" = "0.25em", _,
         "The vertical rhythm of a page, in text heights. A hair: between a control \
         and the note under it.";

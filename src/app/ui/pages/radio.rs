@@ -8,7 +8,7 @@ use crate::app::ui::text::radio as text;
 use crate::app::ui::theme::{control_height, gap, probe, px, Key};
 use crate::app::ui::widgets::{
     button, confirm_popup, content_page, feedback_label, heading, hint, icon_button,
-    keep_above_keyboard, submitted, text_field,
+    keep_above_keyboard, scroll_body, submitted, text_field,
 };
 use crate::app::{MyApp, RadioEdit};
 use crate::radio::{self, EditVal, FieldType};
@@ -58,7 +58,7 @@ impl MyApp {
     pub(crate) fn radio_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "radio", screen, safe, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            scroll_body(ui, |ui| {
                 heading!(ui, "Radio");
                 gap(ui, Key::GapBlock);
 

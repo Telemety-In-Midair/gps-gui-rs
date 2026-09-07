@@ -141,6 +141,13 @@ pub(super) fn page_margin(ctx: &egui::Context) -> f32 {
     px(ctx, Key::PageMargin)
 }
 
+/// Room under the last row of a scrolling page, in points: the sheet's
+/// `type.page.tail`, half the screen by default, so the end of a page can be
+/// brought up to the middle of it.
+pub(super) fn page_tail(ctx: &egui::Context) -> f32 {
+    px(ctx, Key::PageTail)
+}
+
 /// Inset of a floating corner control from the screen edge, in points.
 pub(super) fn corner_margin(ctx: &egui::Context) -> f32 {
     px(ctx, Key::CornerMargin)

@@ -6,7 +6,7 @@ use walkers::Position;
 
 use crate::app::ui::text::points as text;
 use crate::app::ui::theme::{control_height, gap, page_margin, probe, px, Key};
-use crate::app::ui::widgets::{content_page, heading, text_field};
+use crate::app::ui::widgets::{content_page, heading, scroll_rows, text_field};
 use crate::app::{MyApp, Page, PointFilter};
 use crate::points::{age_text, PointSource};
 
@@ -86,10 +86,14 @@ impl MyApp {
             let floor = screen.bottom() - safe.bottom - page_margin(ctx);
             let list_height = (floor - ui.cursor().min.y).max(px(ctx, Key::PointsListMin));
             let mut goto: Option<Position> = None;
-            let list = egui::ScrollArea::vertical()
-                .max_height(list_height)
-                .auto_shrink([false, false])
-                .show_rows(ui, row_height, rows.len(), |ui, range| {
+            let list = scroll_rows(
+                egui::ScrollArea::vertical()
+                    .max_height(list_height)
+                    .auto_shrink([false, false]),
+                ui,
+                row_height,
+                rows.len(),
+                |ui, range| {
                     for p in &rows[range] {
                         let text = format!(
                             "{:<column$} {}  {:>7}",
@@ -104,7 +108,8 @@ impl MyApp {
                             goto = Some(p.pos);
                         }
                     }
-                });
+                },
+            );
             probe(
                 ctx,
                 list.inner_rect,

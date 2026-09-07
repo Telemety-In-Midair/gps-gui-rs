@@ -15,7 +15,7 @@ use crate::app::ui::text::bluetooth as text;
 use crate::app::ui::theme::{gap, Key};
 use crate::app::ui::widgets::{
     busy_dots, button, check, content_page, feedback_label, heading, hint, preset_text, row,
-    secs_presets, section, text_field,
+    scroll_body, secs_presets, section, text_field,
 };
 use crate::app::{secs_text, BleIntent, MyApp};
 use crate::ble::ConfigWrite;
@@ -41,7 +41,7 @@ impl MyApp {
     pub(crate) fn bluetooth_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "bluetooth", screen, safe, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            scroll_body(ui, |ui| {
                 heading!(ui, "Bluetooth");
 
                 // Which node first, then what to do about the link to it.

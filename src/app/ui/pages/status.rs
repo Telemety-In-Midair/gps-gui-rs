@@ -11,7 +11,9 @@ use midair_proto::link::{TELEM_FLAG_CFG_LOADED, TELEM_FLAG_GPS_FIX, TELEM_FLAG_S
 
 use crate::app::ui::text::status as text;
 use crate::app::ui::theme::{gap, Key};
-use crate::app::ui::widgets::{busy_dots, content_page, heading, hint, section, status_bool};
+use crate::app::ui::widgets::{
+    busy_dots, content_page, heading, hint, scroll_body, section, status_bool,
+};
 use crate::app::{BleIntent, MyApp};
 
 /// How often the elapsed counts (connecting-for, node-silent-for) are
@@ -34,7 +36,7 @@ impl MyApp {
     pub(crate) fn status_page(&mut self, ctx: &egui::Context, screen: egui::Rect) {
         let safe = self.safe_area(ctx);
         content_page(ctx, "status", screen, safe, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            scroll_body(ui, |ui| {
                 heading!(ui, "Status");
                 self.position_ui(ui);
                 self.node_ui(ui);

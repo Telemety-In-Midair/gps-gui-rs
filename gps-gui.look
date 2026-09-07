@@ -23,6 +23,10 @@ type
     page
         # Between a page's body and the screen edge.
         margin  2.5%
+        # Room under the last row of a scrolling page: the end of a page can
+        # be brought up to the middle of the screen, and a field near it clear
+        # of the keyboard.
+        tail    50%h
     gap
         # The vertical rhythm of a page, in text heights. A hair: between a
         # control and the note under it.
